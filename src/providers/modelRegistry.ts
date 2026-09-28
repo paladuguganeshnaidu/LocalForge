@@ -61,7 +61,7 @@ export class ModelRegistry {
         let errStr: string | undefined;
 
         try {
-          isReachable = await entry.provider.detect();
+          isReachable = entry.provider.detect ? await entry.provider.detect() : true;
           if (isReachable) {
             models = await entry.provider.listModels();
           }

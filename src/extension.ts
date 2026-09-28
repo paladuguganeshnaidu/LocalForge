@@ -171,6 +171,81 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage('Started new LocalForge session.');
     }),
 
+    vscode.commands.registerCommand('localforge.newConversation', async () => {
+      engine.sessionManager.createNewSession();
+      await viewProvider.refresh();
+      void vscode.window.showInformationMessage('Started new LocalForge conversation.');
+    }),
+
+    vscode.commands.registerCommand('localforge.openAgent', async () => {
+      await vscode.commands.executeCommand('localforge.chatView.focus');
+    }),
+
+    vscode.commands.registerCommand('localforge.cancelAgent', () => {
+      engine.cancelCurrentTask();
+      viewProvider.cancelActiveChat();
+      void vscode.window.showInformationMessage('LocalForge agent task cancelled.');
+    }),
+
+    vscode.commands.registerCommand('localforge.reviewChanges', async () => {
+      const proposals = engine.editEngine.getPendingProposals();
+      if (!proposals.length) {
+        void vscode.window.showInformationMessage('No pending changes to review.');
+        return;
+      }
+      const latest = proposals[0];
+      if (latest.files.length > 0) {
+        await engine.editEngine.showDiff(latest.id, latest.files[0].path);
+      }
+    }),
+
+    vscode.commands.registerCommand('localforge.showArtifacts', async () => {
+      const session = engine.sessionManager.getActiveSession();
+      const artifacts = engine.artifactManager.getArtifactsByConversation(session.id);
+      if (!artifacts.length) {
+        void vscode.window.showInformationMessage('No artifacts generated in this session yet.');
+        return;
+      }
+      const pick = await vscode.window.showQuickPick(
+        artifacts.map((a) => ({ label: a.title, description: a.type, detail: a.status, artifact: a }))
+      );
+      if (pick) {
+        const doc = await vscode.workspace.openTextDocument({
+          content: pick.artifact.content,
+          language: 'markdown'
+        });
+        await vscode.window.showTextDocument(doc, { preview: true });
+      }
+    }),
+
+    vscode.commands.registerCommand('localforge.setAgentMode', async () => {
+      const pick = await vscode.window.showQuickPick(['Ask', 'Plan', 'Agent'], {
+        placeHolder: 'Select LocalForge agent mode'
+      });
+      if (pick) {
+        const mode = pick.toLowerCase() as any;
+        viewProvider.activeMode = mode;
+        void vscode.window.showInformationMessage(`LocalForge agent mode set to: ${pick}`);
+      }
+    }),
+
+    vscode.commands.registerCommand('localforge.setModel', async () => {
+      const models = engine.modelRegistry.getModels();
+      const items = [
+        { label: 'Auto', description: 'Smart capability-based task routing', id: 'auto' },
+        ...models.map((m) => ({
+          label: m.displayName || m.name,
+          description: `${m.providerId} (${m.source})`,
+          id: m.id || m.name
+        }))
+      ];
+      const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select active model' });
+      if (pick) {
+        viewProvider.selectedModel = pick.id;
+        void vscode.window.showInformationMessage(`Selected model: ${pick.label}`);
+      }
+    }),
+
     vscode.commands.registerCommand('localforge.reindexWorkspace', async () => {
       if (engine.indexer) {
         await vscode.window.withProgress(

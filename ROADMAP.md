@@ -6,42 +6,45 @@ LocalForge is a local-first AI software engineer for VS Code. It discovers model
 
 ---
 
-## 📌 Status & Milestones
+## Status & Milestones
 
-### Completed in v0.1.5 ✅
-- [x] **Modular Architecture Refactoring**:
-  - Independent domains: `core/`, `providers/`, `context/`, `agent/`, `editing/`, `remote/`, `completion/`, and `ui/`.
-- [x] **Model Capabilities & Unified Registry**:
-  - Auto-detection of tool calling, streaming, code completion, reasoning, vision, and context windows.
-  - Unified registry aggregating local Ollama, OpenAI-compatible servers, and SSH remote GPU endpoints.
-  - Intelligent, capability-aware task router (`chat`, `edit`, `agent`, `completion`).
-- [x] **Context Engine & Workspace Indexing**:
-  - Bounded hierarchical context (selection, active file, open tabs, diagnostics, lexical retrieval).
-  - Persistent, incremental `WorkspaceIndexer` ignoring `.git`, `node_modules`, `dist`, binaries, and large files.
-- [x] **Agent Engine & Permission Framework**:
-  - Autonomous `AgentLoop` with round limits, cancellation, and error capture.
-  - Granular `PermissionManager` (`read`, `edit`, `execute`) and command safety policies.
-- [x] **Patch-First & Composer Editing**:
-  - Atomic SHA-256 hash checks and `StaleEditError` protection before writing.
-  - Multi-file Composer workflow with unified diff inspection and selective approval.
-- [x] **Project Validation & Auto-Repair Loop**:
-  - Project detection (Node, Python, Rust, Go, Java, C/C++).
-  - Post-edit test validation and up to 3 automatic repair iterations.
-- [x] **SSH Remote GPU System**:
-  - Forwarded loopback tunnels with host key fingerprint pinning and VS Code `SecretStorage`.
-  - Structured `nvidia-smi` status parser and memory fit estimation.
-- [x] **Minimal Antigravity-Style Chat UI**:
-  - Segmented mode bar (`⚡ Agent`, `📋 Plan`, `💬 Ask`).
-  - Native VS Code theme styling, live agent activity chips, and rich settings drawer.
-- [x] **Continuity & Diagnostics**:
-  - Workspace-scoped `SessionManager` and `TaskManager` with "Continue Previous Task".
-  - One-click `LocalForge: Diagnose Installation` health check.
-- [x] **Testing**:
-  - 42 automated tests with 100% pass rate.
+### Completed in v0.1.6
+- [x] **Antigravity IDE Agent Side Panel Experience**:
+  - Implemented Secondary Sidebar view (`contributes.viewsContainers.secondarySidebar`).
+  - Zero-emoji design standard with native VS Code theme tokens and Codicon SVGs.
+  - Interactive deliverable cards (`Implementation Plan`, `Walkthrough`, `Code Diff`) with review and proceed actions.
+  - Collapsible operational activity timeline without private chain-of-thought exposure.
+  - Dedicated Review Changes drawer with diff inspection and atomic multi-file apply.
+  - Composer with `@` context reference chips and `/` slash command autocomplete.
+- [x] **Canonical Model Identity (ModelRef.id)**:
+  - Unified single source of truth across ModelRegistry, CompositeProvider, ModelRouter, and sessions.
+  - Deterministic execution of UI-selected models.
+- [x] **Synchronized Remote GPU Lifecycle**:
+  - Synchronous registration and unregistration across ModelRegistry and CompositeProvider.
+  - Surfaced NVIDIA GPU telemetry in the unified model picker.
+- [x] **Atomic Two-Phase Multi-File Patching**:
+  - Safe 2-phase atomic commit verifying original hashes and missing-file state before writing.
+  - All-or-nothing apply prevents partially applied or corrupted states.
+- [x] **Layered Command Policy & Chaining Safety**:
+  - Command categorization and strict rejection of shell chaining operators (`&&`, `||`, `;`, `|`, `2>`, `$()`, backticks) in auto-safe execution.
+- [x] **Terminal & Local Browser Tool Abstractions**:
+  - Managed terminal sub-process execution and local browser verification without cloud dependencies.
+- [x] **Deliverable Artifact System & Turn Management**:
+  - Comprehensive ArtifactManager and TurnManager with status lifecycles and milestone tracking.
+- [x] **Expanded Automated Test Suite**:
+  - 56 passing automated tests covering all core components and end-to-end integration fixtures.
+
+### Completed in v0.1.5
+- [x] Modular architecture refactoring (`core/`, `providers/`, `context/`, `agent/`, `editing/`, `remote/`, `ui/`).
+- [x] Model capabilities detection and unified ModelRegistry.
+- [x] ContextEngine with token budgeting and persistent WorkspaceIndexer.
+- [x] Patch-first editing with SHA-256 snapshots and StaleEditError.
+- [x] Automated project detection and test validation loop with auto-repair.
+- [x] SSH Remote GPU tunnel with SecretStorage and host key pinning.
 
 ---
 
-## 🔭 Future Roadmap (v0.2.0+)
+## Future Roadmap (v0.2.0+)
 
 ### 1. Hybrid & Embedding Retrieval Engines
 - [ ] Implement `EmbeddingRetrievalEngine` utilizing local embedding models (e.g. `nomic-embed-text`) via Ollama.
@@ -59,7 +62,7 @@ LocalForge is a local-first AI software engineer for VS Code. It discovers model
 
 ## Quality Principles
 
-1. **Zero Secret Leakage**: Passwords and keys must never touch settings files or disk logs.
-2. **Review Before Write**: No silent file overwriting. Always validate hashes and offer diffs.
-3. **Command Safety**: Policy blocks dangerous system calls; execution requires explicit permission mode.
-4. **Local Sovereignty**: Never depend on LocalForge cloud infrastructure.
+1. **Local-First Always**: No required cloud dependencies, accounts, or telemetry.
+2. **Never Overwrite Silently**: Every write is staged as an EditProposal and checked against original file hashes.
+3. **Deterministic Identity**: Canonical model IDs ensure the user gets exactly what they selected.
+4. **Native VS Code Look & Feel**: The agent panel feels like an integral part of VS Code, matching the editor aesthetic.

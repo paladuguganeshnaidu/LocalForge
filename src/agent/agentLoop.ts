@@ -251,10 +251,10 @@ Available read-only inspection tools:
 ${toolList}
 
 Format your plan with the following clear markdown structure:
-## 🎯 Objective & Architecture
-## 📁 Files Affected (existing files to edit or new files to create)
-## 📋 Step-by-Step Implementation Checklist (use markdown checkboxes: "- [ ] Step 1...")
-## ⚠️ Edge Cases & Validation
+## Objective & Architecture
+## Files Affected (existing files to edit or new files to create)
+## Implementation Checklist (use markdown checkboxes: "- [ ] Step 1...")
+## Edge Cases & Verification
 
 Do NOT execute write tools or edit files in Plan Mode. Only output the plan for review.`;
     }

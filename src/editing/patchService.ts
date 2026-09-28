@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
-import { validateRelativeWorkspacePath } from '../agent/workspaceTools';
+
+export type FileOriginalState = 'present' | 'missing';
 
 export class StaleEditError extends Error {
-  constructor(public readonly filePath: string, public readonly expectedHash: string, public readonly actualHash: string) {
+  constructor(
+    public readonly filePath: string,
+    public readonly expectedHash: string,
+    public readonly actualHash: string
+  ) {
     super(`File "${filePath}" was modified after the edit proposal was created. Edit cancelled to prevent overwriting changes.`);
     this.name = 'StaleEditError';
   }
@@ -21,7 +26,6 @@ export async function computeFileHash(uri: vscode.Uri): Promise<string> {
     if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
       return '';
     }
-    // Try node filesystem error code
     const errObj = error as { code?: string };
     if (errObj.code === 'ENOENT' || errObj.code === 'FileNotFound') {
       return '';
@@ -30,14 +34,44 @@ export async function computeFileHash(uri: vscode.Uri): Promise<string> {
   }
 }
 
+export async function validateFileState(
+  uri: vscode.Uri,
+  originalState: FileOriginalState,
+  expectedHash: string
+): Promise<{ valid: boolean; currentHash: string; error?: string }> {
+  const currentHash = await computeFileHash(uri);
+
+  if (originalState === 'missing') {
+    if (currentHash !== '') {
+      return {
+        valid: false,
+        currentHash,
+        error: `File "${uri.fsPath}" did not exist when proposed but now exists.`
+      };
+    }
+    return { valid: true, currentHash: '' };
+  }
+
+  if (currentHash !== expectedHash) {
+    return {
+      valid: false,
+      currentHash,
+      error: `File "${uri.fsPath}" hash changed from ${expectedHash.slice(0, 8)} to ${currentHash.slice(0, 8)}.`
+    };
+  }
+
+  return { valid: true, currentHash };
+}
+
 export async function applyFileEditSafely(
   uri: vscode.Uri,
   newContent: string,
-  expectedOriginalHash: string
+  expectedOriginalHash: string,
+  originalState: FileOriginalState = 'present'
 ): Promise<void> {
-  const currentHash = await computeFileHash(uri);
-  if (expectedOriginalHash && currentHash !== expectedOriginalHash) {
-    throw new StaleEditError(uri.fsPath, expectedOriginalHash, currentHash);
+  const validation = await validateFileState(uri, originalState, expectedOriginalHash);
+  if (!validation.valid) {
+    throw new StaleEditError(uri.fsPath, expectedOriginalHash, validation.currentHash);
   }
 
   const encoded = Buffer.from(newContent, 'utf8');

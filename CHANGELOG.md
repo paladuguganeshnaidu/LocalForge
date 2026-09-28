@@ -2,6 +2,50 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.1.6] - 2026-09-28
+
+### Added
+- **Antigravity IDE Agent Side Panel Experience**:
+  - Rebuilt the primary interface to closely match the modern Antigravity IDE agent panel, designed for VS Code Secondary Sidebar (`contributes.viewsContainers.secondarySidebar`).
+  - Zero-emoji design standard: pure VS Code Codicon SVGs, native theme tokens (`--vscode-*`), clean typography, subtle borders, and monochrome status indicators.
+  - Compact header with real-time model indicator, session title, and quick action buttons.
+  - Segmented mode bar (`Ask`, `Plan`, `Agent`) and execution strategy selector (`Fast`, `Planning`).
+  - Collapsible operational activity timeline (`Thinking`, `Working`, `Searching`, `Reading`, `Planning`, `Editing`, `Waiting for approval`, `Running`, `Verifying`, `Completed`, `Failed`, `Cancelled`). No raw chain-of-thought or internal reasoning exposed.
+  - Interactive deliverable artifact cards for `Task List`, `Implementation Plan`, `Code Diff`, and `Walkthrough` with `[Review]`, `[Proceed]`, and inline commenting.
+  - Bottom utility toolbar featuring live `Changes` counter, `Terminal` activity drawer, and context budget chips.
+  - Dedicated Review Changes panel with multi-file unified diff inspection, file status, additions/deletions, and atomic apply/reject.
+  - Streamlined composer with context attachment chips (`@file`, `@selection`, `@terminal`, `@diagnostics`, `@git`), multiline input, and slash command autocomplete popup (`/plan`, `/diff`, `/search`, `/terminal`, `/model`, `/context`, `/diagnose`, `/remote`, `/clear`).
+
+- **Canonical Model Identity (ModelRef.id)**:
+  - Eliminated dual/overlapping model identity systems across `ModelRegistry`, `CompositeProvider`, `ModelRouter`, `AgentEngine`, and sessions.
+  - Unified everything under canonical `ModelRef.id` (`${providerId}:${encodeURIComponent(name)}`).
+  - Selecting a model in the UI deterministically routes and executes that exact model instance.
+
+- **Synchronized Remote GPU Model Lifecycle**:
+  - SshOllamaTunnel connections now register remote models synchronously with both `CompositeProvider` and `ModelRegistry`.
+  - Disconnecting or losing the SSH tunnel immediately unregisters remote models from all registries, removing stale models from the UI picker.
+  - Full remote GPU telemetry (`nvidia-smi` GPU model, VRAM used/total, utilization) surfaced in the model picker.
+
+- **Atomic Two-Phase Multi-File Patch-First Editing**:
+  - Non-destructive agent tool execution: tools never directly write to disk during normal Agent workflows. Instead, edits produce an `EditProposal` with SHA-256 snapshots and unified diffs.
+  - Support for `originalState: 'present' | 'missing'`, detecting missing-file resurrection races.
+  - Two-phase commit: Phase 1 validates all expected hashes across all proposed files; if any single file is stale or modified, NONE are applied. Phase 2 applies all changes atomically via `vscode.WorkspaceEdit`.
+
+- **Layered Command Policy & Chaining Safety**:
+  - Replaced naive regexes with layered command categorization (`read-only`, `test`, `build`, `lint`, `package`, `version control`, `file mutation`, `network`, `process control`, `destructive`).
+  - Prohibits shell operator chaining (`&&`, `||`, `;`, `|`, `2>`, `>`, `&`, `$()`, backticks) in auto-safe execution mode.
+
+- **Deliverable Artifact System & Turn Manager**:
+  - Implemented `ArtifactManager` producing structured deliverables (`Implementation Plan`, `Walkthrough`, `Test Report`, etc.) with status lifecycles and review comments.
+  - Implemented `TurnManager` maintaining structured conversation turns, tracking operational activities, timestamps, and turn-level diffs.
+
+- **Terminal & Browser Tool Abstractions**:
+  - Implemented `TerminalManager` supporting managed sub-processes, stdout/stderr buffering, and process lifecycle tracking.
+  - Implemented local `BrowserTool` abstraction detecting local Chrome/Edge executables for web verification without external cloud dependencies.
+
+- **Expanded Test Suite (56 Automated Tests)**:
+  - Added test suites for canonical model identity, remote model lifecycle synchronization, atomic multi-file apply and stale edit detection, layered command policies and chaining rejection, artifact and turn lifecycles, and end-to-end product integration fixtures.
+
 ## [0.1.5] - 2026-09-28
 
 ### Added

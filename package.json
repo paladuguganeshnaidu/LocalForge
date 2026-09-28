@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LocalForge: Local Copilot Agent",
   "description": "Autonomous Copilot coding agent powered by local Ollama & remote GPU models (Ask, Plan, and Agent modes).",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
@@ -23,24 +23,32 @@
   ],
   "activationEvents": [
     "onView:localforge.chatView",
+    "onCommand:localforge.openAgent",
+    "onCommand:localforge.newConversation",
+    "onCommand:localforge.continueTask",
+    "onCommand:localforge.reviewChanges",
+    "onCommand:localforge.showArtifacts",
+    "onCommand:localforge.diagnose",
     "onCommand:localforge.refreshModels",
-    "onCommand:localforge.editSelection",
-    "onCommand:localforge.explain",
-    "onCommand:localforge.fix",
-    "onCommand:localforge.searchWorkspace",
-    "onCommand:localforge.configureRemote",
     "onCommand:localforge.connectRemote",
     "onCommand:localforge.disconnectRemote",
     "onCommand:localforge.remoteGpuStatus",
-    "onCommand:localforge.diagnose",
-    "onCommand:localforge.continueTask",
-    "onCommand:localforge.newSession",
     "onCommand:localforge.reindexWorkspace",
+    "onCommand:localforge.cancelAgent",
+    "onCommand:localforge.setAgentMode",
+    "onCommand:localforge.setModel",
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "localforge-secondary",
+          "title": "LocalForge",
+          "icon": "media/localforge.svg"
+        }
+      ],
       "activitybar": [
         {
           "id": "localforge",
@@ -50,18 +58,77 @@
       ]
     },
     "views": {
+      "localforge-secondary": [
+        {
+          "type": "webview",
+          "id": "localforge.chatView",
+          "name": "LocalForge Agent"
+        }
+      ],
       "localforge": [
         {
           "type": "webview",
           "id": "localforge.chatView",
-          "name": "Local Chat"
+          "name": "LocalForge Agent"
         }
       ]
     },
     "commands": [
       {
+        "command": "localforge.openAgent",
+        "title": "LocalForge: Open Agent"
+      },
+      {
+        "command": "localforge.newConversation",
+        "title": "LocalForge: New Conversation"
+      },
+      {
+        "command": "localforge.continueTask",
+        "title": "LocalForge: Continue Previous Task"
+      },
+      {
+        "command": "localforge.reviewChanges",
+        "title": "LocalForge: Review Changes"
+      },
+      {
+        "command": "localforge.showArtifacts",
+        "title": "LocalForge: Show Artifacts"
+      },
+      {
+        "command": "localforge.diagnose",
+        "title": "LocalForge: Diagnose Installation"
+      },
+      {
         "command": "localforge.refreshModels",
-        "title": "LocalForge: Refresh Ollama Models"
+        "title": "LocalForge: Refresh Models"
+      },
+      {
+        "command": "localforge.connectRemote",
+        "title": "LocalForge: Connect to Remote GPU Host"
+      },
+      {
+        "command": "localforge.disconnectRemote",
+        "title": "LocalForge: Disconnect Remote GPU Host"
+      },
+      {
+        "command": "localforge.remoteGpuStatus",
+        "title": "LocalForge: Show Remote GPU Status"
+      },
+      {
+        "command": "localforge.reindexWorkspace",
+        "title": "LocalForge: Re-index Workspace Context"
+      },
+      {
+        "command": "localforge.cancelAgent",
+        "title": "LocalForge: Cancel Agent"
+      },
+      {
+        "command": "localforge.setAgentMode",
+        "title": "LocalForge: Set Agent Mode"
+      },
+      {
+        "command": "localforge.setModel",
+        "title": "LocalForge: Set Model"
       },
       {
         "command": "localforge.editSelection",
@@ -82,34 +149,6 @@
       {
         "command": "localforge.configureRemote",
         "title": "LocalForge: Configure Remote GPU Host"
-      },
-      {
-        "command": "localforge.connectRemote",
-        "title": "LocalForge: Connect to Remote GPU Host"
-      },
-      {
-        "command": "localforge.disconnectRemote",
-        "title": "LocalForge: Disconnect Remote GPU Host"
-      },
-      {
-        "command": "localforge.remoteGpuStatus",
-        "title": "LocalForge: Show Remote GPU Status"
-      },
-      {
-        "command": "localforge.diagnose",
-        "title": "LocalForge: Diagnose Installation"
-      },
-      {
-        "command": "localforge.continueTask",
-        "title": "LocalForge: Continue Previous Task"
-      },
-      {
-        "command": "localforge.newSession",
-        "title": "LocalForge: New Session"
-      },
-      {
-        "command": "localforge.reindexWorkspace",
-        "title": "LocalForge: Re-index Workspace Context"
       }
     ],
     "menus": {

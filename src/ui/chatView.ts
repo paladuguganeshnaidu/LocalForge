@@ -7,6 +7,8 @@ import { isWebviewMessage, WebviewMessage } from './webviewMessages';
 import { LocalForgeEngine } from '../core/LocalForgeEngine';
 import { ModelTask, routeModel } from '../providers/modelRouter';
 import { EditProposal } from '../editing/editEngine';
+import { Artifact } from '../core/artifactManager';
+import { TurnActivity, ExecutionStrategy } from '../core/turnManager';
 
 export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -17,6 +19,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private remoteSession?: { tunnel: SshOllamaTunnel; providerId: string; profileName: string };
   public selectedModel?: string;
   public activeMode: AgentMode = 'agent';
+  public activeStrategy: ExecutionStrategy = 'planning';
   private engine?: LocalForgeEngine;
   private currentProposal?: EditProposal;
 
@@ -48,7 +51,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       agent: configuration.get<string>('agentModel', ''),
       completion: configuration.get<string>('completionModel', '')
     };
-    return routeModel(this.models, task, preferences, this.selectedModel)?.name;
+    return routeModel(this.models, task, preferences, this.selectedModel)?.id || routeModel(this.models, task, preferences, this.selectedModel)?.name;
   }
 
   public setRemoteSession(session?: { tunnel: SshOllamaTunnel; providerId: string; profileName: string }): void {
@@ -101,6 +104,12 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
       if (message.type === 'setMode') {
         this.activeMode = message.mode;
+        this.post({ type: 'mode', mode: this.activeMode });
+      }
+
+      if (message.type === 'setStrategy') {
+        this.activeStrategy = message.strategy;
+        this.post({ type: 'strategy', strategy: this.activeStrategy });
       }
 
       if (message.type === 'selectModel') {
@@ -145,6 +154,17 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         this.cancelActiveChat();
       }
 
+      if (message.type === 'openFile') {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (root && message.filePath) {
+          try {
+            const uri = vscode.Uri.joinPath(root, message.filePath);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(doc);
+          } catch {}
+        }
+      }
+
       if (message.type === 'showDiff') {
         if (this.engine && message.proposalId && message.filePath) {
           await this.engine.editEngine.showDiff(message.proposalId, message.filePath);
@@ -159,6 +179,13 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
             success: res.failedCount === 0 && res.staleCount === 0,
             summary: `Applied changes to ${res.appliedCount} file(s).`
           });
+          this.post({ type: 'activity', activity: {
+            id: `act-${Date.now()}`,
+            category: 'Applying changes',
+            title: `Applied ${res.appliedCount} file(s) safely`,
+            status: res.failedCount === 0 ? 'success' : 'error',
+            timestamp: Date.now()
+          }});
         }
       }
 
@@ -166,6 +193,44 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         if (this.engine && message.proposalId) {
           this.engine.editEngine.rejectProposal(message.proposalId);
           this.post({ type: 'editResult', success: false, summary: 'Proposed edits discarded.' });
+          this.post({ type: 'activity', activity: {
+            id: `act-${Date.now()}`,
+            category: 'Cancelled',
+            title: 'Proposal rejected by user',
+            status: 'error',
+            timestamp: Date.now()
+          }});
+        }
+      }
+
+      if (message.type === 'proceedArtifact') {
+        if (this.engine) {
+          const art = this.engine.artifactManager.getArtifact(message.artifactId);
+          if (art) {
+            this.engine.artifactManager.updateStatus(message.artifactId, 'approved');
+            this.post({ type: 'artifactUpdated', artifact: art });
+            // Send continuation to engine to execute the approved plan
+            await this.handleChatMessage({
+              model: this.selectedModel ?? '',
+              prompt: `Proceed with approved plan: ${art.title}`,
+              includeContext: true,
+              includeWorkspace: true,
+              agentMode: true
+            });
+          }
+        }
+      }
+
+      if (message.type === 'commentArtifact') {
+        if (this.engine) {
+          this.engine.artifactManager.addComment(message.artifactId, {
+            author: 'User',
+            text: message.comment
+          });
+          const art = this.engine.artifactManager.getArtifact(message.artifactId);
+          if (art) {
+            this.post({ type: 'artifactUpdated', artifact: art });
+          }
         }
       }
 
@@ -177,10 +242,16 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
   public async refresh(): Promise<void> {
     try {
-      this.models = await this.provider.listModels();
-      if (!this.selectedModel && this.models.length > 0) {
-        this.selectedModel = this.models[0].name;
+      if (this.engine) {
+        this.models = this.engine.modelRegistry.getModels();
+      } else {
+        this.models = await this.provider.listModels();
       }
+
+      if (!this.selectedModel && this.models.length > 0) {
+        this.selectedModel = this.models[0].id || this.models[0].name;
+      }
+
       this.post({
         type: 'models',
         models: this.models,
@@ -219,18 +290,28 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     }
     this.busy = false;
     this.post({ type: 'status', state: 'ready', message: 'Ready' });
+    this.post({ type: 'activity', activity: {
+      id: `act-${Date.now()}`,
+      category: 'Cancelled',
+      title: 'Task cancelled by user',
+      status: 'error',
+      timestamp: Date.now()
+    }});
   }
 
-  public async sendUserPrompt(prompt: string, options: { includeContext?: boolean; mode?: AgentMode } = {}): Promise<void> {
+  public async sendUserPrompt(prompt: string, options: { includeContext?: boolean; mode?: AgentMode; strategy?: ExecutionStrategy } = {}): Promise<void> {
     if (!this.selectedModel && this.models.length > 0) {
-      this.selectedModel = this.models[0].name;
+      this.selectedModel = this.models[0].id || this.models[0].name;
     }
     if (options.mode) {
       this.activeMode = options.mode;
       this.post({ type: 'mode', mode: this.activeMode });
     }
+    if (options.strategy) {
+      this.activeStrategy = options.strategy;
+      this.post({ type: 'strategy', strategy: this.activeStrategy });
+    }
     await this.handleChatMessage({
-      type: 'chat',
       model: this.selectedModel ?? '',
       prompt,
       includeContext: options.includeContext ?? true,
@@ -240,7 +321,6 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleChatMessage(message: {
-    type?: string;
     model: string;
     prompt: string;
     includeContext: boolean;
@@ -263,14 +343,29 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           message.prompt,
           mode,
           modelName,
-          (progress) => {
-            this.post({ type: 'status', state: 'running', message: progress });
-            this.post({ type: 'activity', text: progress });
-          },
-          (token) => {
-            this.post({ type: 'chunk', content: token });
+          {
+            strategy: this.activeStrategy,
+            onProgress: (progress) => {
+              this.post({ type: 'status', state: 'running', message: progress });
+            },
+            onToken: (token) => {
+              this.post({ type: 'chunk', content: token });
+            },
+            onActivity: (activity: TurnActivity) => {
+              this.post({ type: 'activity', activity });
+            },
+            onArtifact: (artifact: Artifact) => {
+              this.post({ type: 'artifact', artifact });
+            }
           }
         );
+
+        // Check for pending proposals in the edit engine
+        const pending = this.engine.editEngine.getPendingProposals();
+        if (pending.length > 0) {
+          const latest = pending[0];
+          this.post({ type: 'proposal', proposal: latest });
+        }
 
         history.push({ role: 'user', content: message.prompt });
         history.push({ role: 'assistant', content: summary.response });
@@ -331,58 +426,73 @@ function getHtml(webview: vscode.Webview): string {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${cspSource} 'unsafe-inline';">
   <style>
     :root {
-      --bg: var(--vscode-editor-background);
-      --fg: var(--vscode-editor-foreground);
-      --border: var(--vscode-widget-border, rgba(128,128,128,0.2));
-      --accent: var(--vscode-button-background, #007acc);
+      --bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
+      --editor-bg: var(--vscode-editor-background, #1e1e1e));
+      --fg: var(--vscode-foreground, #cccccc);
+      --border: var(--vscode-panel-border, var(--vscode-widget-border, rgba(128,128,128,0.2)));
+      --accent: var(--vscode-button-background, #0e639c);
       --accent-fg: var(--vscode-button-foreground, #ffffff);
-      --input-bg: var(--vscode-input-background);
-      --input-fg: var(--vscode-input-foreground);
-      --subtle: var(--vscode-descriptionForeground);
+      --input-bg: var(--vscode-input-background, #252526);
+      --input-fg: var(--vscode-input-foreground, #cccccc);
+      --subtle: var(--vscode-descriptionForeground, #888888);
       --card-bg: var(--vscode-editor-inactiveSelectionBackground, rgba(128,128,128,0.08));
+      --badge-bg: var(--vscode-badge-background, #4d4d4d);
+      --badge-fg: var(--vscode-badge-foreground, #ffffff);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      padding: 0;
-      margin: 0;
       background: var(--bg);
       color: var(--fg);
-      font: 13px/1.5 var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+      font: 12.5px/1.5 var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
+      user-select: none;
     }
 
-    /* Minimal Header */
-    .top-header {
+    /* SVG Icons */
+    .icon {
+      width: 14px;
+      height: 14px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      flex-shrink: 0;
+    }
+
+    /* Top Header */
+    .header {
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 12px;
+      flex-direction: column;
       border-bottom: 1px solid var(--border);
       background: var(--bg);
       flex-shrink: 0;
+      padding: 8px 12px;
+      gap: 6px;
     }
-    .brand {
+    .header-top {
       display: flex;
       align-items: center;
-      gap: 7px;
+      justify-content: space-between;
+    }
+    .header-title {
       font-weight: 600;
-      font-size: 12.5px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
       letter-spacing: -0.2px;
     }
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #10b981;
-    }
-    .status-dot.busy { background: #f59e0b; animation: pulse 1s infinite; }
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 2px;
     }
     .icon-btn {
       background: transparent;
@@ -391,153 +501,303 @@ function getHtml(webview: vscode.Webview): string {
       cursor: pointer;
       padding: 4px;
       border-radius: 4px;
-      display: flex;
+      display: inline-flex;
       align-items: center;
       justify-content: center;
-      transition: all 0.15s;
+      transition: background 0.15s, color 0.15s;
     }
     .icon-btn:hover {
       color: var(--fg);
       background: var(--card-bg);
     }
 
+    /* Model Chip & Selector */
+    .model-chip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 8px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 11.5px;
+      cursor: pointer;
+      color: var(--fg);
+    }
+    .model-chip:hover { border-color: var(--accent); }
+    .model-info-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .model-badge {
+      font-size: 10px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: var(--badge-bg);
+      color: var(--badge-fg);
+      text-transform: uppercase;
+    }
+    .model-badge.remote {
+      background: #0284c7;
+      color: #ffffff;
+    }
+
     /* Segmented Mode Selector */
     .mode-bar {
       display: flex;
-      margin: 8px 12px;
-      background: var(--card-bg);
-      padding: 2px;
-      border-radius: 6px;
-      gap: 2px;
+      padding: 6px 12px;
+      background: var(--bg);
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
     .mode-btn {
       flex: 1;
-      border: 0;
-      padding: 5px 6px;
-      font-size: 11.5px;
+      border: 1px solid transparent;
+      padding: 4px 6px;
+      font-size: 11px;
       font-weight: 500;
       background: transparent;
       color: var(--subtle);
       border-radius: 4px;
       cursor: pointer;
       text-align: center;
-      transition: all 0.15s;
+      transition: all 0.12s;
     }
     .mode-btn:hover { color: var(--fg); }
     .mode-btn.active {
-      background: var(--bg);
+      background: var(--card-bg);
+      color: var(--fg);
+      border-color: var(--border);
+      font-weight: 600;
+    }
+    .strategy-toggle {
+      display: flex;
+      border-left: 1px solid var(--border);
+      padding-left: 6px;
+      gap: 3px;
+      align-items: center;
+    }
+    .strat-btn {
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--subtle);
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .strat-btn.active {
+      background: var(--card-bg);
+      border-color: var(--border);
       color: var(--fg);
       font-weight: 600;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
     }
 
-    /* Conversation Area */
-    .chat-scroll {
+    /* Conversation & Activity Area */
+    .main-scroll {
       flex: 1;
       overflow-y: auto;
       padding: 12px;
       display: flex;
       flex-direction: column;
       gap: 12px;
+      user-select: text;
     }
-    .msg-card {
+
+    /* Timeline & Activity */
+    .timeline {
       display: flex;
       flex-direction: column;
       gap: 4px;
-      max-width: 100%;
+      border-left: 2px solid var(--border);
+      margin-left: 6px;
+      padding-left: 10px;
     }
+    .timeline-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      font-size: 11.5px;
+      color: var(--subtle);
+      padding: 2px 0;
+    }
+    .timeline-cat {
+      font-weight: 600;
+      color: var(--fg);
+      min-width: 60px;
+    }
+    .timeline-text {
+      flex: 1;
+      word-break: break-word;
+    }
+
+    /* Message Cards */
     .msg-user {
       align-self: flex-end;
       background: var(--accent);
       color: var(--accent-fg);
       padding: 8px 12px;
-      border-radius: 12px 12px 2px 12px;
-      max-width: 85%;
+      border-radius: 8px 8px 2px 8px;
+      max-width: 90%;
       word-break: break-word;
+      font-size: 12.5px;
     }
     .msg-assistant {
       align-self: flex-start;
       background: var(--card-bg);
       color: var(--fg);
-      padding: 10px 14px;
-      border-radius: 12px 12px 12px 2px;
-      max-width: 95%;
-      word-break: break-word;
+      padding: 10px 12px;
+      border-radius: 8px;
       border: 1px solid var(--border);
-    }
-    .activity-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      color: var(--subtle);
-      padding: 2px 6px;
-      background: var(--card-bg);
-      border-radius: 4px;
-      margin: 2px 0;
+      max-width: 100%;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.55;
     }
 
-    /* Composer / Proposal Cards */
-    .proposal-card {
+    /* Interactive Artifact Card */
+    .artifact-card {
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px;
+      border-radius: 6px;
       background: var(--bg);
-      margin: 8px 0;
+      padding: 10px;
       display: flex;
       flex-direction: column;
       gap: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
-    .proposal-header {
+    .artifact-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
       font-weight: 600;
       font-size: 12px;
-      display: flex;
-      justify-content: space-between;
     }
-    .file-diff-item {
+    .artifact-title {
       display: flex;
-      justify-content: space-between;
       align-items: center;
-      padding: 4px 6px;
-      background: var(--card-bg);
-      border-radius: 4px;
-      font-size: 11.5px;
-      font-family: monospace;
-    }
-    .proposal-actions {
-      display: flex;
       gap: 6px;
     }
-
-    /* Bottom Input Container */
-    .bottom-container {
-      padding: 10px 12px;
-      border-top: 1px solid var(--border);
-      background: var(--bg);
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      flex-shrink: 0;
+    .artifact-body {
+      font-size: 11.5px;
+      color: var(--fg);
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-family: inherit;
+      background: var(--card-bg);
+      padding: 8px;
+      border-radius: 4px;
     }
-    .context-pill {
+    .artifact-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .action-btn {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 0;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .action-btn.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--fg);
+    }
+    .action-btn.secondary:hover { background: var(--card-bg); }
+
+    /* Bottom Utility Toolbar */
+    .toolbar-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 12px;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
       font-size: 11px;
       color: var(--subtle);
+      flex-shrink: 0;
+    }
+    .toolbar-items {
+      display: flex;
+      gap: 8px;
+    }
+    .toolbar-btn {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
+      background: transparent;
+      border: 0;
+      color: var(--subtle);
+      font-size: 11px;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 3px;
     }
-    .input-box {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--input-bg);
-      padding: 8px 10px;
+    .toolbar-btn:hover {
+      color: var(--fg);
+      background: var(--card-bg);
+    }
+    .toolbar-count {
+      font-weight: 600;
+      padding: 0 4px;
+      background: var(--badge-bg);
+      color: var(--badge-fg);
+      border-radius: 3px;
+      font-size: 10px;
+    }
+
+    /* Composer */
+    .composer {
+      padding: 8px 12px 10px;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
       display: flex;
       flex-direction: column;
       gap: 6px;
-      transition: border-color 0.15s;
+      flex-shrink: 0;
     }
-    .input-box:focus-within {
+    .ref-chips {
+      display: flex;
+      gap: 4px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+    .chip {
+      font-size: 10.5px;
+      color: var(--subtle);
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 2px 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chip:hover {
+      color: var(--fg);
+      border-color: var(--accent);
+    }
+    .composer-input-box {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--input-bg);
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      position: relative;
+    }
+    .composer-input-box:focus-within {
       border-color: var(--accent);
     }
     textarea {
@@ -547,41 +807,70 @@ function getHtml(webview: vscode.Webview): string {
       background: transparent;
       color: var(--input-fg);
       font-family: inherit;
-      font-size: 13px;
+      font-size: 12.5px;
       resize: none;
-      min-height: 48px;
-      max-height: 180px;
+      min-height: 44px;
+      max-height: 160px;
+      line-height: 1.4;
     }
-    .input-bottom-row {
+    .composer-bottom {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      padding-top: 4px;
+      border-top: 1px solid rgba(128,128,128,0.1);
     }
-    select.model-select {
-      background: transparent;
-      border: 0;
+    .composer-bottom-left {
+      font-size: 11px;
       color: var(--subtle);
-      font-size: 11.5px;
-      cursor: pointer;
-      outline: 0;
-      max-width: 160px;
-      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
-    select.model-select:hover { color: var(--fg); }
     .send-btn {
       background: var(--accent);
       color: var(--accent-fg);
       border: 0;
-      border-radius: 6px;
-      padding: 5px 12px;
-      font-size: 12px;
+      border-radius: 4px;
+      padding: 4px 12px;
+      font-size: 11.5px;
       font-weight: 500;
       cursor: pointer;
     }
     .send-btn:disabled { opacity: 0.5; cursor: default; }
 
-    /* Settings Overlay */
-    .settings-drawer {
+    /* Slash Auto-complete Popup */
+    .slash-popup {
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      right: 0;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+      display: none;
+      flex-direction: column;
+      margin-bottom: 4px;
+      overflow: hidden;
+      z-index: 50;
+    }
+    .slash-popup.open { display: flex; }
+    .slash-item {
+      padding: 6px 10px;
+      font-size: 11.5px;
+      display: flex;
+      justify-content: space-between;
+      cursor: pointer;
+      color: var(--fg);
+    }
+    .slash-item:hover, .slash-item.selected {
+      background: var(--accent);
+      color: var(--accent-fg);
+    }
+
+    /* Drawers (Review Changes, Terminal, Settings) */
+    .drawer {
       position: absolute;
       top: 0;
       left: 0;
@@ -592,170 +881,367 @@ function getHtml(webview: vscode.Webview): string {
       display: none;
       flex-direction: column;
       overflow-y: auto;
-      padding: 16px;
-      gap: 16px;
+      padding: 12px;
+      gap: 12px;
     }
-    .settings-drawer.open { display: flex; }
-    .setting-group {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .setting-title {
-      font-weight: 600;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--subtle);
-    }
-    .setting-item {
+    .drawer.open { display: flex; }
+    .drawer-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+    .drawer-title {
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .diff-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .diff-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 8px;
       background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-family: monospace;
+      cursor: pointer;
+    }
+    .diff-item:hover { border-color: var(--accent); }
+    .diff-stats {
+      font-size: 11px;
+      display: flex;
+      gap: 6px;
+    }
+    .stat-add { color: var(--success); font-weight: 600; }
+    .stat-del { color: var(--error); font-weight: 600; }
+
+    /* Model Picker Modal */
+    .modal-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
       border-radius: 6px;
+      width: 100%;
+      max-width: 380px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    }
+    .modal-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
       font-size: 12px;
     }
+    .model-list {
+      overflow-y: auto;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .model-option {
+      padding: 8px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      border: 1px solid transparent;
+    }
+    .model-option:hover {
+      background: var(--card-bg);
+      border-color: var(--border);
+    }
+    .model-option.selected {
+      background: var(--card-bg);
+      border-color: var(--accent);
+    }
+    .model-opt-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    .model-opt-meta {
+      font-size: 11px;
+      color: var(--subtle);
+      display: flex;
+      gap: 8px;
+    }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
+    /* Terminal Output Container */
+    .terminal-box {
+      background: #000000;
+      color: #00ff66;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 8px;
+      border-radius: 4px;
+      max-height: 250px;
+      overflow-y: auto;
+      white-space: pre-wrap;
     }
   </style>
 </head>
 <body>
   <!-- Header -->
-  <div class="top-header">
-    <div class="brand">
-      <span class="status-dot" id="statusDot"></span>
-      <span>LocalForge</span>
-      <span id="remoteBadge" style="font-size:10.5px; color:var(--subtle); font-weight:normal;"></span>
-    </div>
-    <div class="header-actions">
-      <button class="icon-btn" id="newChatBtn" title="New Session">➕</button>
-      <button class="icon-btn" id="diagnoseBtn" title="Installation Diagnostics">🛠️</button>
-      <button class="icon-btn" id="settingsBtn" title="Settings">⚙️</button>
-      <button class="icon-btn" id="refreshBtn" title="Refresh Models">🔄</button>
-    </div>
-  </div>
-
-  <!-- Segmented Mode Bar -->
-  <div class="mode-bar">
-    <button class="mode-btn active" data-mode="agent" id="modeAgent">⚡ Agent</button>
-    <button class="mode-btn" data-mode="plan" id="modePlan">📋 Plan</button>
-    <button class="mode-btn" data-mode="ask" id="modeAsk">💬 Ask</button>
-  </div>
-
-  <!-- Chat Log -->
-  <div class="chat-scroll" id="chatFeed">
-    <div class="msg-card">
-      <div class="msg-assistant">
-        <strong>LocalForge 0.1.5</strong><br>
-        Local-first AI software engineer. Running on your machine or private GPU.
+  <div class="header">
+    <div class="header-top">
+      <div class="header-title">
+        <span>LocalForge</span>
+        <span id="sessionTitle" style="color:var(--subtle); font-weight:normal;"></span>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="newChatBtn" title="New Session">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button class="icon-btn" id="refreshBtn" title="Refresh Models">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+        <button class="icon-btn" id="diagnoseBtn" title="Diagnose Installation">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        </button>
+        <button class="icon-btn" id="settingsBtn" title="Settings">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
       </div>
     </div>
+    <!-- Model Chip -->
+    <div class="model-chip" id="modelChipBtn" title="Click to choose model">
+      <div class="model-info-left">
+        <span id="activeModelLabel">Auto</span>
+        <span class="model-badge" id="activeModelBadge">Local</span>
+        <span id="remoteGpuStatus" style="font-size:10.5px; color:var(--subtle);"></span>
+      </div>
+      <svg class="icon" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
   </div>
 
-  <!-- Bottom Bar -->
-  <div class="bottom-container">
-    <div class="context-pill" id="contextPill">
-      <span>📁 Workspace Active</span>
-      <span id="activeFilePath"></span>
+  <!-- Mode Selector -->
+  <div class="mode-bar">
+    <button class="mode-btn" data-mode="ask" id="modeAsk">Ask</button>
+    <button class="mode-btn" data-mode="plan" id="modePlan">Plan</button>
+    <button class="mode-btn active" data-mode="agent" id="modeAgent">Agent</button>
+    <div class="strategy-toggle">
+      <button class="strat-btn" id="stratFast" title="Direct execution for small tasks">Fast</button>
+      <button class="strat-btn active" id="stratPlanning" title="Plan and verify major changes">Planning</button>
     </div>
-    <div class="input-box">
-      <textarea id="promptInput" placeholder="Ask a question, propose a plan, or ask Agent to build a feature..."></textarea>
-      <div class="input-bottom-row">
-        <select class="model-select" id="modelSelect" title="Select Model"></select>
+  </div>
+
+  <!-- Conversation & Activity Scroll Area -->
+  <div class="main-scroll" id="mainScroll">
+    <div class="msg-assistant">
+      <strong>LocalForge 0.1.6</strong><br>
+      Local-first AI software engineer for VS Code. Select a mode or type a task below.
+    </div>
+    <div class="timeline" id="timelineContainer" style="display:none;"></div>
+  </div>
+
+  <!-- Bottom Utility Toolbar -->
+  <div class="toolbar-bar">
+    <div class="toolbar-items">
+      <button class="toolbar-btn" id="openChangesBtn">
+        <svg class="icon" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7M6 9v12"/></svg>
+        <span>Changes</span>
+        <span class="toolbar-count" id="changesBadge">0</span>
+      </button>
+      <button class="toolbar-btn" id="openTerminalBtn">
+        <svg class="icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span>Terminal</span>
+        <span class="toolbar-count" id="terminalBadge">0</span>
+      </button>
+    </div>
+    <div id="footerStatusText">Ready</div>
+  </div>
+
+  <!-- Composer Area -->
+  <div class="composer">
+    <div class="ref-chips">
+      <span class="chip" data-ref="@file">@file</span>
+      <span class="chip" data-ref="@selection">@selection</span>
+      <span class="chip" data-ref="@terminal">@terminal</span>
+      <span class="chip" data-ref="@diagnostics">@diagnostics</span>
+      <span class="chip" data-ref="@git">@git</span>
+    </div>
+    <div class="composer-input-box">
+      <!-- Slash Command Autocomplete Popup -->
+      <div class="slash-popup" id="slashPopup">
+        <div class="slash-item" data-cmd="/plan"><span>/plan</span><span style="color:var(--subtle);">Architecture & plan</span></div>
+        <div class="slash-item" data-cmd="/diff"><span>/diff</span><span style="color:var(--subtle);">Inspect pending edits</span></div>
+        <div class="slash-item" data-cmd="/search"><span>/search</span><span style="color:var(--subtle);">Search workspace</span></div>
+        <div class="slash-item" data-cmd="/terminal"><span>/terminal</span><span style="color:var(--subtle);">Execute shell command</span></div>
+        <div class="slash-item" data-cmd="/model"><span>/model</span><span style="color:var(--subtle);">View active model</span></div>
+        <div class="slash-item" data-cmd="/context"><span>/context</span><span style="color:var(--subtle);">Context budget info</span></div>
+        <div class="slash-item" data-cmd="/diagnose"><span>/diagnose</span><span style="color:var(--subtle);">Diagnose installation</span></div>
+        <div class="slash-item" data-cmd="/remote"><span>/remote</span><span style="color:var(--subtle);">SSH remote GPU</span></div>
+        <div class="slash-item" data-cmd="/clear"><span>/clear</span><span style="color:var(--subtle);">Clear conversation</span></div>
+      </div>
+      <textarea id="promptInput" placeholder="Type a task, question, or / for commands..."></textarea>
+      <div class="composer-bottom">
+        <div class="composer-bottom-left">
+          <span id="activeFileName"></span>
+        </div>
         <button class="send-btn" id="sendBtn">Send</button>
       </div>
     </div>
   </div>
 
-  <!-- Settings Drawer -->
-  <div class="settings-drawer" id="settingsDrawer">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-      <h3 style="margin:0; font-size:14px;">LocalForge Settings</h3>
-      <button class="icon-btn" id="closeSettingsBtn" style="font-size:14px;">✕</button>
+  <!-- Review Changes Drawer -->
+  <div class="drawer" id="changesDrawer">
+    <div class="drawer-header">
+      <div class="drawer-title">Review Changes</div>
+      <button class="icon-btn" id="closeChangesBtn">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
     </div>
+    <div style="font-size:12px; color:var(--subtle);" id="proposalSummary">No active proposals</div>
+    <div class="diff-list" id="diffFileList"></div>
+    <div style="display:flex; gap:8px; margin-top:auto;">
+      <button class="action-btn" id="acceptAllBtn" style="flex:1;">Accept All</button>
+      <button class="action-btn secondary" id="rejectAllBtn" style="flex:1;">Reject All</button>
+    </div>
+  </div>
 
-    <div class="setting-group">
-      <div class="setting-title">Runtimes & Endpoints</div>
-      <div class="setting-item">
+  <!-- Terminal Drawer -->
+  <div class="drawer" id="terminalDrawer">
+    <div class="drawer-header">
+      <div class="drawer-title">Terminal Activity</div>
+      <button class="icon-btn" id="closeTerminalBtn">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="terminalCommandLabel" style="font-size:11.5px; font-weight:600;"></div>
+    <div class="terminal-box" id="terminalOutput">No terminal activity recorded.</div>
+  </div>
+
+  <!-- Settings Drawer -->
+  <div class="drawer" id="settingsDrawer">
+    <div class="drawer-header">
+      <div class="drawer-title">LocalForge Settings</div>
+      <button class="icon-btn" id="closeSettingsBtn">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      <span style="font-size:11px; text-transform:uppercase; color:var(--subtle); font-weight:600;">Endpoints</span>
+      <div style="background:var(--card-bg); padding:8px; border-radius:4px; font-size:11.5px; display:flex; justify-content:space-between;">
         <span>Ollama Endpoint</span>
         <span style="font-family:monospace; color:var(--subtle);">http://127.0.0.1:11434</span>
       </div>
-      <div class="setting-item">
-        <span>OpenAI Endpoint</span>
-        <button class="send-btn" style="padding:3px 8px; font-size:11px;" id="cfgOpenAiBtn">Configure</button>
+      <div style="background:var(--card-bg); padding:8px; border-radius:4px; font-size:11.5px; display:flex; justify-content:space-between; align-items:center;">
+        <span>Remote GPU Host (SSH)</span>
+        <button class="action-btn secondary" id="sshConnectBtn" style="padding:2px 8px;">Connect SSH</button>
       </div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-title">Remote GPU & SSH</div>
-      <div class="setting-item">
-        <div>
-          <div>SSH GPU Host</div>
-          <div style="font-size:11px; color:var(--subtle);" id="sshStatusLabel">Not Connected</div>
-        </div>
-        <button class="send-btn" style="padding:3px 8px; font-size:11px;" id="sshConnectBtn">Connect SSH</button>
-      </div>
-      <div class="setting-item">
+      <div style="background:var(--card-bg); padding:8px; border-radius:4px; font-size:11.5px; display:flex; justify-content:space-between; align-items:center;">
         <span>Configure SSH Profiles</span>
-        <button class="send-btn" style="padding:3px 8px; font-size:11px;" id="sshConfigBtn">Add Profile</button>
+        <button class="action-btn secondary" id="sshConfigBtn" style="padding:2px 8px;">Add Profile</button>
       </div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-title">Safety & Permissions</div>
-      <div class="setting-item">
-        <span>Auto-approve safe operations</span>
-        <input type="checkbox" id="autoApproveCheck" checked>
-      </div>
-      <div class="setting-item">
-        <span>Stale edit protection</span>
-        <span style="color:#10b981;">Enabled (SHA-256)</span>
-      </div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-title">Features</div>
-      <div class="setting-item">
-        <span>Inline Code Autocomplete</span>
-        <input type="checkbox" id="inlineCompCheck" checked>
-      </div>
-      <div class="setting-item">
+      <div style="background:var(--card-bg); padding:8px; border-radius:4px; font-size:11.5px; display:flex; justify-content:space-between; align-items:center;">
         <span>Continue Previous Task</span>
-        <button class="send-btn" style="padding:3px 8px; font-size:11px;" id="continueTaskBtn">Continue</button>
+        <button class="action-btn secondary" id="continueTaskBtn" style="padding:2px 8px;">Continue</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Model Picker Modal -->
+  <div class="modal-overlay" id="modelModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>Select Model</span>
+        <button class="icon-btn" id="closeModelModalBtn">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="model-list" id="modelModalList"></div>
     </div>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const chatFeed = document.getElementById('chatFeed');
+
+    const mainScroll = document.getElementById('mainScroll');
+    const timelineContainer = document.getElementById('timelineContainer');
     const promptInput = document.getElementById('promptInput');
     const sendBtn = document.getElementById('sendBtn');
-    const modelSelect = document.getElementById('modelSelect');
-    const statusDot = document.getElementById('statusDot');
-    const remoteBadge = document.getElementById('remoteBadge');
-    const activeFilePath = document.getElementById('activeFilePath');
+    const slashPopup = document.getElementById('slashPopup');
+    const modelChipBtn = document.getElementById('modelChipBtn');
+    const modelModal = document.getElementById('modelModal');
+    const modelModalList = document.getElementById('modelModalList');
+    const activeModelLabel = document.getElementById('activeModelLabel');
+    const activeModelBadge = document.getElementById('activeModelBadge');
+    const remoteGpuStatus = document.getElementById('remoteGpuStatus');
+    const activeFileName = document.getElementById('activeFileName');
+    const footerStatusText = document.getElementById('footerStatusText');
+    const changesBadge = document.getElementById('changesBadge');
+    const terminalBadge = document.getElementById('terminalBadge');
+    const changesDrawer = document.getElementById('changesDrawer');
+    const terminalDrawer = document.getElementById('terminalDrawer');
     const settingsDrawer = document.getElementById('settingsDrawer');
+    const diffFileList = document.getElementById('diffFileList');
+    const proposalSummary = document.getElementById('proposalSummary');
+    const terminalOutput = document.getElementById('terminalOutput');
+    const terminalCommandLabel = document.getElementById('terminalCommandLabel');
 
     let currentMode = 'agent';
+    let currentStrategy = 'planning';
     let isBusy = false;
+    let availableModels = [];
+    let selectedModelId = 'auto';
+    let activeProposal = null;
 
     // Mode Buttons
-    ['agent', 'plan', 'ask'].forEach(mode => {
-      document.querySelector('[data-mode="' + mode + '"]').addEventListener('click', () => {
+    ['ask', 'plan', 'agent'].forEach(mode => {
+      const btn = document.getElementById('mode' + mode.charAt(0).toUpperCase() + mode.slice(1));
+      btn.addEventListener('click', () => {
         document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-        document.querySelector('[data-mode="' + mode + '"]').classList.add('active');
+        btn.classList.add('active');
         currentMode = mode;
         vscode.postMessage({ type: 'setMode', mode });
       });
     });
 
-    // Action Buttons
+    // Strategy Buttons
+    document.getElementById('stratFast').addEventListener('click', () => {
+      document.getElementById('stratFast').classList.add('active');
+      document.getElementById('stratPlanning').classList.remove('active');
+      currentStrategy = 'fast';
+      vscode.postMessage({ type: 'setStrategy', strategy: 'fast' });
+    });
+    document.getElementById('stratPlanning').addEventListener('click', () => {
+      document.getElementById('stratPlanning').classList.add('active');
+      document.getElementById('stratFast').classList.remove('active');
+      currentStrategy = 'planning';
+      vscode.postMessage({ type: 'setStrategy', strategy: 'planning' });
+    });
+
+    // Header Action Buttons
     document.getElementById('newChatBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'clear' });
     });
@@ -781,17 +1267,121 @@ function getHtml(webview: vscode.Webview): string {
       vscode.postMessage({ type: 'continueTask' });
     });
 
-    modelSelect.addEventListener('change', () => {
-      vscode.postMessage({ type: 'selectModel', model: modelSelect.value });
+    // Toolbar Drawers
+    document.getElementById('openChangesBtn').addEventListener('click', () => {
+      changesDrawer.classList.add('open');
+    });
+    document.getElementById('closeChangesBtn').addEventListener('click', () => {
+      changesDrawer.classList.remove('open');
+    });
+    document.getElementById('openTerminalBtn').addEventListener('click', () => {
+      terminalDrawer.classList.add('open');
+    });
+    document.getElementById('closeTerminalBtn').addEventListener('click', () => {
+      terminalDrawer.classList.remove('open');
     });
 
+    // Proposal Actions
+    document.getElementById('acceptAllBtn').addEventListener('click', () => {
+      if (activeProposal) {
+        vscode.postMessage({ type: 'applyEdit', proposalId: activeProposal.id });
+        changesDrawer.classList.remove('open');
+      }
+    });
+    document.getElementById('rejectAllBtn').addEventListener('click', () => {
+      if (activeProposal) {
+        vscode.postMessage({ type: 'rejectEdit', proposalId: activeProposal.id });
+        changesDrawer.classList.remove('open');
+      }
+    });
+
+    // Model Picker Modal
+    modelChipBtn.addEventListener('click', () => {
+      renderModelList();
+      modelModal.classList.add('open');
+    });
+    document.getElementById('closeModelModalBtn').addEventListener('click', () => {
+      modelModal.classList.remove('open');
+    });
+
+    function renderModelList() {
+      modelModalList.innerHTML = '';
+
+      // Auto Option
+      const autoDiv = document.createElement('div');
+      autoDiv.className = 'model-option' + (selectedModelId === 'auto' ? ' selected' : '');
+      autoDiv.innerHTML = '<div class="model-opt-header"><span>Auto</span><span class="model-badge">Smart</span></div>' +
+        '<div class="model-opt-meta"><span>Capability-based task router</span></div>';
+      autoDiv.addEventListener('click', () => {
+        selectedModelId = 'auto';
+        activeModelLabel.textContent = 'Auto';
+        activeModelBadge.textContent = 'Local';
+        activeModelBadge.className = 'model-badge';
+        modelModal.classList.remove('open');
+        vscode.postMessage({ type: 'selectModel', model: 'auto' });
+      });
+      modelModalList.appendChild(autoDiv);
+
+      availableModels.forEach(m => {
+        const div = document.createElement('div');
+        const id = m.id || m.name;
+        div.className = 'model-option' + (selectedModelId === id ? ' selected' : '');
+        const isRemote = m.source === 'remote';
+        div.innerHTML = '<div class="model-opt-header"><span>' + escapeHtml(m.displayName || m.name) + '</span>' +
+          '<span class="model-badge' + (isRemote ? ' remote' : '') + '">' + (isRemote ? 'Remote' : 'Local') + '</span></div>' +
+          '<div class="model-opt-meta"><span>' + escapeHtml(m.providerId) + '</span>' +
+          (m.capabilities?.toolCalling ? '<span>Tools</span>' : '') +
+          (m.capabilities?.codeCompletion ? '<span>Fast Coder</span>' : '') +
+          '</div>';
+        div.addEventListener('click', () => {
+          selectedModelId = id;
+          activeModelLabel.textContent = m.displayName || m.name;
+          activeModelBadge.textContent = isRemote ? 'Remote' : 'Local';
+          activeModelBadge.className = 'model-badge' + (isRemote ? ' remote' : '');
+          modelModal.classList.remove('open');
+          vscode.postMessage({ type: 'selectModel', model: id });
+        });
+        modelModalList.appendChild(div);
+      });
+    }
+
+    // Ref Chips
+    document.querySelectorAll('.chip').forEach(c => {
+      c.addEventListener('click', () => {
+        const ref = c.getAttribute('data-ref');
+        promptInput.value = (promptInput.value ? promptInput.value + ' ' : '') + ref + ' ';
+        promptInput.focus();
+      });
+    });
+
+    // Slash command autocomplete
+    promptInput.addEventListener('input', () => {
+      const val = promptInput.value;
+      if (val.startsWith('/')) {
+        slashPopup.classList.add('open');
+      } else {
+        slashPopup.classList.remove('open');
+      }
+    });
+
+    document.querySelectorAll('.slash-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const cmd = item.getAttribute('data-cmd');
+        promptInput.value = cmd + ' ';
+        slashPopup.classList.remove('open');
+        promptInput.focus();
+      });
+    });
+
+    // Send Message
     function sendMessage() {
       const text = promptInput.value.trim();
       if (!text || isBusy) return;
       promptInput.value = '';
+      slashPopup.classList.remove('open');
       vscode.postMessage({
         type: 'chat',
-        model: modelSelect.value,
+        model: selectedModelId,
         prompt: text,
         includeContext: true,
         includeWorkspace: true,
@@ -812,69 +1402,119 @@ function getHtml(webview: vscode.Webview): string {
         e.preventDefault();
         sendMessage();
       }
+      if (e.key === 'Escape') {
+        if (slashPopup.classList.contains('open')) {
+          slashPopup.classList.remove('open');
+        } else if (isBusy) {
+          vscode.postMessage({ type: 'cancel' });
+        }
+      }
     });
 
+    // Inbound Messages
     window.addEventListener('message', (event) => {
       const msg = event.data;
+
       if (msg.type === 'models') {
-        modelSelect.innerHTML = '';
-        msg.models.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m.name;
-          opt.textContent = m.displayName || m.name;
-          if (m.name === msg.selectedModel) opt.selected = true;
-          modelSelect.appendChild(opt);
-        });
+        availableModels = msg.models || [];
+        if (msg.selectedModel) {
+          selectedModelId = msg.selectedModel;
+          const found = availableModels.find(m => (m.id || m.name) === selectedModelId);
+          if (found) {
+            activeModelLabel.textContent = found.displayName || found.name;
+            activeModelBadge.textContent = found.source === 'remote' ? 'Remote' : 'Local';
+            activeModelBadge.className = 'model-badge' + (found.source === 'remote' ? ' remote' : '');
+          }
+        }
       }
 
       if (msg.type === 'activeEditor') {
-        activeFilePath.textContent = msg.path ? '· ' + msg.path : '';
+        activeFileName.textContent = msg.path ? msg.path : '';
       }
 
       if (msg.type === 'remoteStatus') {
         if (msg.connected) {
-          remoteBadge.textContent = '· SSH GPU (' + (msg.profileName || 'Connected') + ')';
-          document.getElementById('sshStatusLabel').textContent = 'Connected: ' + (msg.profileName || '');
+          remoteGpuStatus.textContent = '· SSH (' + (msg.profileName || 'DGX') + ')';
         } else {
-          remoteBadge.textContent = '';
-          document.getElementById('sshStatusLabel').textContent = 'Not Connected';
+          remoteGpuStatus.textContent = '';
         }
       }
 
       if (msg.type === 'status') {
+        footerStatusText.textContent = msg.message || 'Ready';
         if (msg.state === 'running' || msg.state === 'thinking') {
           isBusy = true;
-          statusDot.className = 'status-dot busy';
           sendBtn.textContent = 'Cancel';
         } else {
           isBusy = false;
-          statusDot.className = 'status-dot';
           sendBtn.textContent = 'Send';
         }
       }
 
       if (msg.type === 'activity') {
-        const chip = document.createElement('div');
-        chip.className = 'activity-chip';
-        chip.textContent = msg.text;
-        chatFeed.appendChild(chip);
-        chatFeed.scrollTop = chatFeed.scrollHeight;
+        const act = msg.activity;
+        timelineContainer.style.display = 'flex';
+        const row = document.createElement('div');
+        row.className = 'timeline-row';
+        row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
+          '<span class="timeline-text">' + escapeHtml(act.title) + '</span>';
+        timelineContainer.appendChild(row);
+        mainScroll.scrollTop = mainScroll.scrollHeight;
+      }
+
+      if (msg.type === 'proposal') {
+        activeProposal = msg.proposal;
+        changesBadge.textContent = String(activeProposal.files.length);
+        proposalSummary.textContent = activeProposal.summary + ' (' + activeProposal.files.length + ' files)';
+        diffFileList.innerHTML = '';
+        activeProposal.files.forEach(f => {
+          const item = document.createElement('div');
+          item.className = 'diff-item';
+          item.innerHTML = '<span>' + escapeHtml(f.path) + '</span>' +
+            '<div class="diff-stats"><span class="stat-add">+' + f.additions + '</span><span class="stat-del">-' + f.deletions + '</span></div>';
+          item.addEventListener('click', () => {
+            vscode.postMessage({ type: 'showDiff', proposalId: activeProposal.id, filePath: f.path });
+          });
+          diffFileList.appendChild(item);
+        });
+      }
+
+      if (msg.type === 'artifact') {
+        const art = msg.artifact;
+        const card = document.createElement('div');
+        card.className = 'artifact-card';
+        card.innerHTML = '<div class="artifact-header">' +
+          '<div class="artifact-title"><span>' + escapeHtml(art.type) + '</span></div>' +
+          '<span class="model-badge">' + escapeHtml(art.status) + '</span></div>' +
+          '<div class="artifact-body">' + escapeHtml(art.content) + '</div>' +
+          '<div class="artifact-actions">' +
+          (art.type === 'Implementation Plan' ? '<button class="action-btn" id="proceed-' + art.id + '">Proceed</button>' : '') +
+          '</div>';
+        mainScroll.appendChild(card);
+        mainScroll.scrollTop = mainScroll.scrollHeight;
+
+        const proceedBtn = document.getElementById('proceed-' + art.id);
+        if (proceedBtn) {
+          proceedBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'proceedArtifact', artifactId: art.id });
+          });
+        }
       }
 
       if (msg.type === 'userMessage') {
         const card = document.createElement('div');
-        card.className = 'msg-card';
-        card.innerHTML = '<div class="msg-user">' + escapeHtml(msg.content) + '</div>';
-        chatFeed.appendChild(card);
-        chatFeed.scrollTop = chatFeed.scrollHeight;
+        card.className = 'msg-user';
+        card.textContent = msg.content;
+        mainScroll.appendChild(card);
+        mainScroll.scrollTop = mainScroll.scrollHeight;
       }
 
       if (msg.type === 'done') {
         const card = document.createElement('div');
-        card.className = 'msg-card';
-        card.innerHTML = '<div class="msg-assistant">' + escapeHtml(msg.fullResponse).replace(/\\n/g, '<br>') + '</div>';
-        chatFeed.appendChild(card);
-        chatFeed.scrollTop = chatFeed.scrollHeight;
+        card.className = 'msg-assistant';
+        card.innerHTML = escapeHtml(msg.fullResponse).replace(/\\n/g, '<br>');
+        mainScroll.appendChild(card);
+        mainScroll.scrollTop = mainScroll.scrollHeight;
       }
     });
 

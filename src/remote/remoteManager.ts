@@ -4,6 +4,7 @@ import { RemoteGpuProfile, SshOllamaTunnel, readPrivateKey } from './sshOllamaTu
 import { GpuStatusInfo, parseNvidiaSmiOutput } from './gpuMonitor';
 import { OllamaProvider } from '../providers/ollamaProvider';
 import { CompositeProvider } from '../providers/compositeProvider';
+import { ModelRegistry } from '../providers/modelRegistry';
 
 export const REMOTE_PROFILES_KEY = 'localforge.remoteGpuProfiles';
 
@@ -20,10 +21,20 @@ export class RemoteManager {
   private activeSession?: RemoteSessionInfo;
   private readonly context: vscode.ExtensionContext;
   private readonly compositeProvider: CompositeProvider;
+  private modelRegistry?: ModelRegistry;
 
-  constructor(context: vscode.ExtensionContext, compositeProvider: CompositeProvider) {
+  constructor(
+    context: vscode.ExtensionContext,
+    compositeProvider: CompositeProvider,
+    modelRegistry?: ModelRegistry
+  ) {
     this.context = context;
     this.compositeProvider = compositeProvider;
+    this.modelRegistry = modelRegistry;
+  }
+
+  public setModelRegistry(registry: ModelRegistry): void {
+    this.modelRegistry = registry;
   }
 
   public getActiveSession(): RemoteSessionInfo | undefined {
@@ -106,6 +117,17 @@ export class RemoteManager {
       // GPU probe may fail if nvidia-smi is not available
     }
 
+    if (this.modelRegistry) {
+      const gpuSummary = gpuStatus[0]?.displayText;
+      this.modelRegistry.registerProvider(
+        remoteOllamaProvider,
+        'remote',
+        `http://127.0.0.1:${tunnel.port}`,
+        gpuSummary
+      );
+      await this.modelRegistry.refresh();
+    }
+
     this.activeSession = {
       profile,
       tunnel,
@@ -135,6 +157,10 @@ export class RemoteManager {
     if (!this.activeSession) return;
     try {
       this.compositeProvider.removeProvider(this.activeSession.providerId);
+      if (this.modelRegistry) {
+        this.modelRegistry.unregisterProvider(this.activeSession.providerId);
+        await this.modelRegistry.refresh();
+      }
       await this.activeSession.tunnel.close();
     } finally {
       this.activeSession = undefined;

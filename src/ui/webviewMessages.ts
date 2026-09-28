@@ -27,6 +27,10 @@ export type WebviewMessage =
   | { type: 'applyEdit'; proposalId: string; files?: string[] }
   | { type: 'rejectEdit'; proposalId: string }
   | { type: 'showDiff'; proposalId: string; filePath: string }
+  | { type: 'openFile'; filePath: string }
+  | { type: 'proceedArtifact'; artifactId: string }
+  | { type: 'commentArtifact'; artifactId: string; comment: string }
+  | { type: 'setStrategy'; strategy: 'fast' | 'planning' }
   | { type: 'updateSettings'; settings: Record<string, unknown> };
 
 export function isWebviewMessage(value: unknown): value is WebviewMessage {
@@ -54,6 +58,18 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
 
     case 'setMode':
       return msg.mode === 'ask' || msg.mode === 'plan' || msg.mode === 'agent';
+
+    case 'setStrategy':
+      return msg.strategy === 'fast' || msg.strategy === 'planning';
+
+    case 'openFile':
+      return typeof msg.filePath === 'string';
+
+    case 'proceedArtifact':
+      return typeof msg.artifactId === 'string';
+
+    case 'commentArtifact':
+      return typeof msg.artifactId === 'string' && typeof msg.comment === 'string';
 
     case 'chat':
       return (

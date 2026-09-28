@@ -1,3 +1,5 @@
+export type CapabilityConfidence = 'high' | 'medium' | 'inferred';
+
 export interface ModelCapabilities {
   chat: boolean;
   streaming: boolean;
@@ -8,15 +10,22 @@ export interface ModelCapabilities {
   reasoning: boolean;
   contextWindow: number;
   systemPrompt: boolean;
+  confidence?: {
+    toolCalling?: CapabilityConfidence;
+    codeCompletion?: CapabilityConfidence;
+    reasoning?: CapabilityConfidence;
+    vision?: CapabilityConfidence;
+    contextWindow?: CapabilityConfidence;
+  };
 }
 
 export type ModelSource = 'local' | 'remote';
 
-export interface ModelMetadata {
-  id: string;
-  name: string;
-  displayName: string;
+export interface ModelRef {
+  id: string; // Canonical identifier e.g. "ollama:qwen2.5-coder:7b" or "ssh-ollama-profile:qwen3-coder:32b"
   providerId: string;
+  name: string; // Model name passed to provider
+  displayName: string;
   source: ModelSource;
   size?: number;
   modifiedAt?: string;
@@ -24,6 +33,8 @@ export interface ModelMetadata {
   endpoint?: string;
   gpuInfo?: string;
 }
+
+export type ModelMetadata = ModelRef;
 
 export function inferModelCapabilities(name: string, size?: number): ModelCapabilities {
   const lower = name.toLowerCase();
@@ -42,6 +53,14 @@ export function inferModelCapabilities(name: string, size?: number): ModelCapabi
   else if (/mistral/i.test(lower)) contextWindow = 32768;
   else if (isTiny) contextWindow = 4096;
 
+  const confidence: Record<string, CapabilityConfidence> = {
+    toolCalling: hasToolCalling ? 'high' : 'inferred',
+    codeCompletion: isCoder ? 'high' : 'inferred',
+    reasoning: isReasoning ? 'high' : 'inferred',
+    vision: isVision ? 'high' : 'inferred',
+    contextWindow: /qwen2\.5|llama3/i.test(lower) ? 'high' : 'inferred'
+  };
+
   return {
     chat: true,
     streaming: true,
@@ -51,6 +70,7 @@ export function inferModelCapabilities(name: string, size?: number): ModelCapabi
     vision: isVision,
     reasoning: isReasoning,
     contextWindow,
-    systemPrompt: true
+    systemPrompt: true,
+    confidence
   };
 }

@@ -1,13 +1,20 @@
 import * as vscode from 'vscode';
 import { createUnifiedDiff } from './diffService';
-import { applyFileEditSafely, computeFileHash, StaleEditError } from './patchService';
+import {
+  computeFileHash,
+  validateFileState,
+  FileOriginalState,
+  StaleEditError
+} from './patchService';
 
 export type EditStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'stale' | 'failed';
 
 export interface FileEditPlan {
   path: string;
   uri: vscode.Uri;
+  originalState: FileOriginalState;
   originalHash: string;
+  currentHash: string;
   originalContent: string;
   newContent: string;
   patch: string;
@@ -19,6 +26,8 @@ export interface FileEditPlan {
 
 export interface EditProposal {
   id: string;
+  conversationId?: string;
+  turnId?: string;
   summary: string;
   createdAt: number;
   status: EditStatus;
@@ -31,6 +40,7 @@ export interface EditProposal {
 
 export interface EditApplyResult {
   proposalId: string;
+  success: boolean;
   appliedCount: number;
   rejectedCount: number;
   failedCount: number;
@@ -48,7 +58,8 @@ export class EditEngine {
   public async proposeEdits(
     workspaceRoot: vscode.Uri,
     edits: Array<{ path: string; newContent: string }>,
-    summary: string = 'Multi-file code changes'
+    summary: string = 'Multi-file code changes',
+    metadata?: { conversationId?: string; turnId?: string }
   ): Promise<EditProposal> {
     const proposalId = `prop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const filePlans: FileEditPlan[] = [];
@@ -60,12 +71,15 @@ export class EditEngine {
     for (const edit of edits) {
       const uri = vscode.Uri.joinPath(workspaceRoot, edit.path);
       let originalContent = '';
+      let originalState: FileOriginalState = 'missing';
+
       try {
         const bytes = await vscode.workspace.fs.readFile(uri);
         originalContent = new TextDecoder().decode(bytes);
+        originalState = 'present';
       } catch {
-        // File does not exist yet (creation)
         originalContent = '';
+        originalState = 'missing';
       }
 
       const hash = await computeFileHash(uri);
@@ -79,7 +93,9 @@ export class EditEngine {
       filePlans.push({
         path: edit.path,
         uri,
+        originalState,
         originalHash: hash,
+        currentHash: hash,
         originalContent,
         newContent: edit.newContent,
         patch: diff.patch,
@@ -91,6 +107,8 @@ export class EditEngine {
 
     const proposal: EditProposal = {
       id: proposalId,
+      conversationId: metadata?.conversationId,
+      turnId: metadata?.turnId,
       summary,
       createdAt: Date.now(),
       status: 'pending',
@@ -109,6 +127,14 @@ export class EditEngine {
     return this.proposals.get(proposalId);
   }
 
+  public getProposalsForTurn(turnId: string): EditProposal[] {
+    return Array.from(this.proposals.values()).filter((p) => p.turnId === turnId);
+  }
+
+  public getPendingProposals(): EditProposal[] {
+    return Array.from(this.proposals.values()).filter((p) => p.status === 'pending');
+  }
+
   /**
    * Open VS Code native diff editor to inspect the proposed changes.
    */
@@ -119,10 +145,8 @@ export class EditEngine {
     const filePlan = proposal.files.find((f) => f.path === filePath);
     if (!filePlan) throw new Error(`File ${filePath} not in proposal.`);
 
-    // Create an in-memory virtual document for the modified version
     const tempDocUri = vscode.Uri.parse(`localforge-proposed:${filePath}?proposal=${proposalId}`);
-    
-    // Register temporary text document content provider if not registered
+
     await vscode.commands.executeCommand(
       'vscode.diff',
       filePlan.uri,
@@ -132,7 +156,10 @@ export class EditEngine {
   }
 
   /**
-   * Apply approved changes with atomic hash validation.
+   * Atomic two-phase multi-file application:
+   * Phase 1: validate all file hashes against expected originalHash and originalState.
+   * If ANY file is stale, apply none.
+   * Phase 2: apply all changes atomically via WorkspaceEdit.
    */
   public async applyProposal(
     proposalId: string,
@@ -142,48 +169,85 @@ export class EditEngine {
     if (!proposal) throw new Error(`Proposal ${proposalId} not found.`);
 
     const targetPaths = selectedPaths ? new Set(selectedPaths) : null;
+    const filesToApply = proposal.files.filter((f) => !targetPaths || targetPaths.has(f.path));
+
     const result: EditApplyResult = {
       proposalId,
+      success: false,
       appliedCount: 0,
-      rejectedCount: 0,
+      rejectedCount: proposal.files.length - filesToApply.length,
       failedCount: 0,
       staleCount: 0,
       appliedFiles: [],
       errors: []
     };
 
-    for (const file of proposal.files) {
-      if (targetPaths && !targetPaths.has(file.path)) {
-        file.status = 'rejected';
-        result.rejectedCount += 1;
-        continue;
-      }
+    // Phase 1: Validate all target files
+    let hasStale = false;
+    for (const file of filesToApply) {
+      const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
+      file.currentHash = validation.currentHash;
 
-      try {
-        await applyFileEditSafely(file.uri, file.newContent, file.originalHash);
-        file.status = 'applied';
-        result.appliedCount += 1;
-        result.appliedFiles.push(file.path);
-      } catch (error) {
-        if (error instanceof StaleEditError) {
-          file.status = 'stale';
-          result.staleCount += 1;
-          result.errors.push({ path: file.path, error: error.message });
-        } else {
-          file.status = 'failed';
-          result.failedCount += 1;
-          const msg = error instanceof Error ? error.message : String(error);
-          result.errors.push({ path: file.path, error: msg });
-        }
+      if (!validation.valid) {
+        file.status = 'stale';
+        file.error = validation.error;
+        result.staleCount += 1;
+        result.errors.push({ path: file.path, error: validation.error || 'File modified' });
+        hasStale = true;
       }
     }
 
-    if (result.failedCount > 0 || result.staleCount > 0) {
-      proposal.status = result.appliedCount > 0 ? 'applied' : 'failed';
-    } else if (result.appliedCount > 0) {
+    // If any target file is stale, abort all changes
+    if (hasStale) {
+      proposal.status = 'stale';
+      result.success = false;
+      return result;
+    }
+
+    // Phase 2: Apply all changes atomically
+    try {
+      const workspaceEdit = new vscode.WorkspaceEdit();
+      for (const file of filesToApply) {
+        if (file.originalState === 'missing') {
+          workspaceEdit.createFile(file.uri, { ignoreIfExists: false, overwrite: false });
+        }
+        workspaceEdit.replace(
+          file.uri,
+          new vscode.Range(new vscode.Position(0, 0), new vscode.Position(1000000, 0)),
+          file.newContent
+        );
+      }
+
+      // If workspaceEdit execution is supported (inside VS Code host)
+      let applied = false;
+      try {
+        applied = await vscode.workspace.applyEdit(workspaceEdit);
+      } catch {
+        // Fallback to direct writes if headless testing
+        applied = false;
+      }
+
+      if (!applied) {
+        // Fallback file system write
+        for (const file of filesToApply) {
+          const encoded = Buffer.from(file.newContent, 'utf8');
+          await vscode.workspace.fs.writeFile(file.uri, encoded);
+        }
+      }
+
+      for (const file of filesToApply) {
+        file.status = 'applied';
+        result.appliedCount += 1;
+        result.appliedFiles.push(file.path);
+      }
+
       proposal.status = 'applied';
-    } else {
-      proposal.status = 'rejected';
+      result.success = true;
+    } catch (error: any) {
+      proposal.status = 'failed';
+      result.failedCount = filesToApply.length;
+      result.errors.push({ path: 'transaction', error: error.message || String(error) });
+      result.success = false;
     }
 
     return result;

@@ -2,36 +2,70 @@
 
 > **A local-first AI software engineer for VS Code.**
 
-LocalForge is an autonomous, privacy-respecting AI coding assistant that runs 100% locally or on your own remote GPU via encrypted SSH tunneling. Zero LocalForge-hosted cloud inference. Zero proprietary telemetry. Complete control over your code and writes.
+LocalForge is an autonomous, privacy-respecting AI coding assistant that runs 100% locally or on your own remote GPU via encrypted SSH tunneling. Zero LocalForge-hosted cloud inference. Zero proprietary telemetry. Complete control over your code, writes, and execution.
 
 ---
 
-## 🚀 Key Differentiators
+## Key Differentiators
 
-- **Local-First & Private**: Models run on your local machine (Ollama, LM Studio, vLLM, llama.cpp) or your private GPU server. Prompts and source code are never uploaded to any LocalForge backend.
-- **Unified Model Registry & Capability Detection**: Discovers local and remote models automatically, inferring capabilities (tool calling, code completion, reasoning, context window) so the right model is chosen for the right task.
+- **Local-First & Private**: Models run directly on your machine (Ollama, LM Studio, vLLM, llama.cpp) or your private remote GPU server. Prompts and source code are never uploaded to any LocalForge backend.
+- **Antigravity IDE Agent Side Panel**: Native VS Code Secondary Sidebar agent experience with minimal chrome, crisp Codicon icons, segmented mode selection (`Ask`, `Plan`, `Agent`), execution strategies (`Fast`, `Planning`), collapsible operational timelines, interactive artifact cards, and dedicated review changes view.
+- **Canonical Model Identity (ModelRef.id)**: Single source of truth across ModelRegistry, CompositeProvider, ModelRouter, and sessions. A selected model in the UI executes deterministically.
 - **Ask · Plan · Agent Modes**:
-  - **💬 Ask**: Context-aware Q&A across active files, selections, open tabs, and indexed workspace code.
-  - **📋 Plan**: Expert software architecture inspection producing structured implementation checklists without modifying code.
-  - **⚡ Agent**: Autonomous copilot software engineer capable of inspecting code, proposing surgical multi-file edits, running test commands, and performing automatic repairs.
-- **Patch-First & Diff-Reviewed Editing**: File changes are never blindly overwritten. Edits generate unified diffs with SHA-256 hash checks and stale edit detection.
-- **Validation & Auto-Repair Loop**: Automatically detects your project type (Node, Python, Rust, Go, Java, C/C++) and test runner, runs validation after edits, and attempts up to 3 automatic repairs if tests fail.
-- **Secure SSH Remote GPU Offloading**: Tunnel heavy inference to a remote machine equipped with NVIDIA GPUs over loopback-only forwarded SSH, with host fingerprint pinning and VS Code SecretStorage credentials.
-- **Minimal Antigravity-Style UX**: Clean, native VS Code theme tokens, live agent activity chips, segmented mode toggle, and rich settings drawer.
+  - **Ask**: Read-only contextual Q&A across active files, selections, open tabs, diagnostics, and indexed workspace code.
+  - **Plan**: Artifact-first software architecture inspection producing structured implementation plans without modifying code until approved.
+  - **Agent**: Autonomous software engineer capable of inspecting code, creating multi-file proposals, running tests, and proposing surgical repairs.
+- **Atomic Two-Phase Multi-File Patching**: File changes are never written blindly. Edits generate an `EditProposal` with SHA-256 snapshots, original state (`present` vs `missing`) verification, and unified diffs. If any single file in a multi-file proposal is stale or modified, none are applied.
+- **Validation & Auto-Repair Loop**: Automatically detects project type (Node, Python, Rust, Go, Java, C/C++) and test commands, runs validation after approved edits, and attempts up to 3 automatic repairs if tests fail.
+- **Secure SSH Remote GPU Offloading**: Synchronized remote model lifecycle. Connecting via SSH tunnel discovers remote models and surfaces live GPU telemetry (NVIDIA GPU model, VRAM usage, utilization) in the unified model picker. Disconnecting removes remote models immediately.
+- **Strict Command Safety**: Layered command policy classifies commands into categories and rejects dangerous shell chaining (`&&`, `||`, `;`, `|`, `2>`, `&`, `$()`, backticks) in auto-safe execution mode.
 
 ---
 
-## 🛠️ Modes of Operation
+## Modes of Operation
 
 | Mode | Purpose | Tools Allowed | Safety Behavior |
 | :--- | :--- | :--- | :--- |
-| **Ask** | Understand & explain code | Read-only (`read_file`, `search_workspace`, `list_dir`) | Non-destructive; answers questions with code references. |
-| **Plan** | Architectural analysis | Read-only inspection tools | Generates structured markdown checklists; no writes. |
-| **Agent** | Full-stack software engineering | Read, surgical edit, patch, and safe commands | Patch-first diff review; runs test validation & auto-repairs. |
+| **Ask** | Understand & explain code | Read-only (`read_workspace_file`, `search_workspace`, `list_directory`) | Non-destructive; answers questions with code references. |
+| **Plan** | Architectural analysis & planning | Read-only inspection tools | Produces structured Implementation Plan artifacts; no writes until user clicks Proceed. |
+| **Agent** | Full software engineering | Read, surgical edit proposal, and safe validation commands | Patch-first diff review; 2-phase atomic commit; test validation loop & repair. |
+
+### Execution Strategies
+
+- **Fast**: Direct execution for small, focused tasks (variable renames, single-function fixes, inline queries).
+- **Planning**: Deep repository inspection, Task List and Implementation Plan deliverables, approval pause, and structured verification.
 
 ---
 
-## 📦 Getting Started
+## Interaction & Information Architecture
+
+The LocalForge agent panel follows a native, focused hierarchy:
+
+1. **Header**:
+   - LocalForge branding and active conversation title.
+   - Quick action buttons (New Session, Refresh Models, Diagnostics, Settings).
+   - Compact model indicator displaying active model, provider, and compute target (`Local GPU`, `Remote GPU (SSH)`, or `Auto`).
+2. **Mode Selector**:
+   - Clean segmented selector: `Ask` | `Plan` | `Agent`.
+   - Strategy selector: `Fast` | `Planning`.
+3. **Conversation & Activity Timeline**:
+   - Streamed answers and interactive cards.
+   - Collapsible operational activity timeline: `Thinking`, `Working`, `Searching`, `Reading`, `Planning`, `Editing`, `Waiting for approval`, `Running`, `Verifying`, `Completed`.
+   - Never exposes private chain-of-thought or raw internal reasoning.
+4. **Deliverable Artifacts**:
+   - Interactive cards for `Implementation Plan`, `Walkthrough`, `Code Diff`, and `Test Report`.
+   - Actions for `[Review]`, `[Proceed]`, and inline user comments that steer subsequent turns.
+5. **Utility Toolbar**:
+   - `Changes [N]`: Opens dedicated Review Changes drawer with unified diff inspection, addition/deletion stats, and Accept/Reject controls.
+   - `Terminal [N]`: Opens Terminal drawer with live command output, exit codes, and elapsed time.
+6. **Composer**:
+   - Context chips (`@file`, `@selection`, `@terminal`, `@diagnostics`, `@git`).
+   - Multiline prompt input with slash command autocomplete (`/plan`, `/diff`, `/search`, `/terminal`, `/model`, `/context`, `/diagnose`, `/remote`, `/clear`).
+   - `Enter` to send, `Shift+Enter` for newline, `Escape` to cancel.
+
+---
+
+## Getting Started
 
 ### 1. Requirements
 
@@ -44,81 +78,71 @@ LocalForge is an autonomous, privacy-respecting AI coding assistant that runs 10
 Recommended coding models:
 ```bash
 ollama pull qwen2.5-coder:7b
-# or for fast inline completions:
+# for fast inline completions:
 ollama pull qwen2.5-coder:1.5b
 ```
 
 ### 2. First Run
 
-1. Open VS Code and click the **LocalForge** activity bar icon.
-2. LocalForge will detect running Ollama runtimes and populate the model selector.
-3. Choose your preferred mode (`⚡ Agent`, `📋 Plan`, or `💬 Ask`).
-4. Type a prompt (e.g., *"Explain this project"* or *"Add JWT authentication middleware"*).
+1. Open VS Code. LocalForge is available in the **Secondary Sidebar** (or Primary Sidebar/Panel).
+2. LocalForge will detect running model runtimes and populate the unified model picker.
+3. Choose your preferred mode (`Agent`, `Plan`, or `Ask`).
+4. Type a task (e.g., *"Add authentication middleware"* or *"Explain the repository structure"*).
 
 ---
 
-## 🖥️ Remote GPU Inference over SSH
+## Slash Commands & Context References
 
-Offload heavy models to a dedicated desktop or cloud GPU machine (RunPod, Lambda Labs, home server):
+### Slash Commands
 
-1. Click the **⚙️ Settings** icon in the LocalForge header or run `LocalForge: Configure Remote GPU Host`.
-2. Enter your SSH host, username, port, and authentication method (SSH private key or password).
-3. Secret credentials (passwords, key passphrases) are securely saved in **VS Code SecretStorage**—never in settings or disk logs.
+Type `/` in the composer for quick autocomplete:
+
+- `/plan <task>`: Switch to Plan mode and generate an Implementation Plan artifact.
+- `/diff`: Review current pending edit proposals and file diffs.
+- `/search <query>`: Search the indexed workspace for symbols or concepts.
+- `/terminal <cmd>`: Execute a terminal command through the managed process layer.
+- `/model`: View the active model, capability confidence, and runtime target.
+- `/context`: Inspect the active context budget, token usage, and attached files.
+- `/diagnose`: Run the installation health check and diagnostics suite.
+- `/remote`: Connect to a configured SSH remote GPU host.
+- `/clear`: Clear conversation history and reset turn state.
+
+### Context References
+
+Click or type `@` references to attach context directly into the prompt:
+
+- `@file`: Include the active file or search for a specific file.
+- `@selection`: Attach the currently highlighted editor code.
+- `@terminal`: Attach recent terminal output from the managed process buffer.
+- `@diagnostics`: Attach active compiler or linter errors from VS Code.
+- `@git`: Attach current branch, modified files, and working tree status.
+
+---
+
+## Remote GPU Inference over SSH
+
+Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (RunPod, Lambda Labs, home rig) while working locally:
+
+1. Click **Settings** or run `LocalForge: Configure Remote GPU Host`.
+2. Enter host, username, port, and authentication method (SSH key or password).
+3. Secrets are stored securely in **VS Code SecretStorage**—never in plaintext files or logs.
 4. Run `LocalForge: Connect to Remote GPU Host`.
-5. LocalForge establishes a loopback-only SSH tunnel (`127.0.0.1 -> remote Ollama`) and pins the server's SSH fingerprint.
-6. The top header will display your active GPU telemetry (e.g. `NVIDIA RTX 4090 · VRAM 6.1 / 24 GB · Util 45%`).
+5. LocalForge establishes a loopback-only SSH tunnel (`127.0.0.1:port -> remote Ollama`), pins the server's SSH fingerprint, and discovers all remote models.
+6. Remote models appear in the unified model picker with location tags and NVIDIA GPU telemetry (GPU name, VRAM used/total, utilization).
+7. Disconnecting cleans up the tunnel and removes remote models from the active registry immediately.
 
 ---
 
-## ⚡ Inline Code Autocomplete
+## Security & Privacy Architecture
 
-Inline completion is opt-in for maximum efficiency:
-
-1. Open the **LocalForge Settings** drawer (or VS Code settings).
-2. Toggle **Inline Code Autocomplete** (`localforge.autocomplete.enabled: true`).
-3. Set your preferred completion model (e.g. `qwen2.5-coder:1.5b`).
-4. As you type, LocalForge provides low-latency, context-aware suggestions with debounce and cancellation protection.
-
----
-
-## 🛡️ Security & Privacy Architecture
-
-- **Zero Cloud Inference**: LocalForge does not operate an external proxy or telemetry server. All model calls go directly to `127.0.0.1` (local or SSH tunnel).
+- **Zero Cloud Inference**: LocalForge does not send code or prompts to any LocalForge cloud server. All model requests target loopback addresses (`127.0.0.1`).
 - **Workspace Trust Enforced**: Untrusted workspaces cannot execute workspace tools, read files, or run terminal commands.
-- **Bounded Hierarchical Context**: Context engine caps token budgets, tracks sources, deduplicates, and limits snippet windows.
-- **Stale Edit Prevention**: Every file edit compares SHA-256 hashes against original content. If a file was modified while a diff was open, LocalForge halts and marks the proposal stale.
-- **Command Policy Layer**: Dangerous shell patterns (`rm -rf /`, `del /s /q c:\`, `mkfs`, fork bombs) are blocked at the policy layer.
-- **Host Key Pinning**: Remote SSH connections verify and pin host key fingerprints to protect against MITM attacks.
+- **Two-Phase Atomic Commit**: Changes across multiple files are checked simultaneously. If any file has been modified externally, all changes are halted to prevent overwrites.
+- **Host Key Pinning**: Remote SSH connections verify and store SHA-256 host key fingerprints to prevent MITM attacks.
+- **Strict Command Policies**: Auto-safe execution rejects dangerous shell chaining (`&&`, `||`, `;`, `|`, `2>`, `&`, `$()`). Only verified safe read and test commands run automatically.
 
 ---
 
-## 🔍 Diagnostics & Health Check
+## License
 
-Run `LocalForge: Diagnose Installation` from the Command Palette or click **🛠️** in the chat header to verify:
-
-- Workspace trust status
-- Ollama endpoint reachability & model inventory
-- Model capability detection (tool calling, context window)
-- SSH remote tunnel and GPU status
-- Workspace context index status
-
----
-
-## 🧪 Building & Running Tests
-
-```bash
-# Install dependencies
-npm ci
-
-# Compile TypeScript and run the test suite
-npm test
-
-# Build packaged VSIX extension
-npm run package
-```
-
----
-
-## 📄 License
-
-MIT License. See [LICENSE](LICENSE) for details.
+MIT © [Paladugu Ganesh Naidu](https://github.com/paladuguganeshnaidu)

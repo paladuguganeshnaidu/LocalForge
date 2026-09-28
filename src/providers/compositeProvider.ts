@@ -27,6 +27,10 @@ export class CompositeProvider implements ModelProvider {
       for (const model of item.value.models) {
         const key = `${item.value.provider.id}:${encodeURIComponent(model.name)}`;
         this.discovered.set(key, { provider: item.value.provider, actualName: model.name });
+        // Fallback for unnamespaced model name
+        if (!this.discovered.has(model.name)) {
+          this.discovered.set(model.name, { provider: item.value.provider, actualName: model.name });
+        }
         const capabilities = model.capabilities ?? inferModelCapabilities(model.name, model.size);
         output.push({
           ...model,
@@ -41,21 +45,44 @@ export class CompositeProvider implements ModelProvider {
     return output.sort((left, right) => (left.displayName ?? left.name).localeCompare(right.displayName ?? right.name));
   }
 
-  async streamChat(model: string, messages: ChatMessage[], onToken: (token: string) => void, signal?: AbortSignal): Promise<void> {
+  public resolveProvider(model: string): { provider: ModelProvider; actualName: string } | undefined {
+    return this.resolveRoute(model);
+  }
+
+  public resolveRoute(model: string): { provider: ModelProvider; actualName: string } | undefined {
     let route = this.discovered.get(model);
+    if (route) return route;
+
+    // Check decoded
+    try {
+      const decoded = decodeURIComponent(model);
+      route = this.discovered.get(decoded);
+      if (route) return route;
+    } catch {}
+
+    // Check if matches actualName
+    for (const entry of this.discovered.values()) {
+      if (entry.actualName === model) return entry;
+    }
+
+    return undefined;
+  }
+
+  async streamChat(model: string, messages: ChatMessage[], onToken: (token: string) => void, signal?: AbortSignal): Promise<void> {
+    let route = this.resolveRoute(model);
     if (!route) {
       await this.listModels();
-      route = this.discovered.get(model);
+      route = this.resolveRoute(model);
     }
     if (!route) throw new Error('The selected model is no longer available. Refresh the model list and try again.');
     await route.provider.streamChat(route.actualName, messages, onToken, signal);
   }
 
   async chatWithTools(model: string, messages: ChatMessage[], tools: ModelToolDefinition[], signal?: AbortSignal): Promise<ChatMessage> {
-    let route = this.discovered.get(model);
+    let route = this.resolveRoute(model);
     if (!route) {
       await this.listModels();
-      route = this.discovered.get(model);
+      route = this.resolveRoute(model);
     }
     if (!route) throw new Error('The selected model is no longer available. Refresh the model list and try again.');
     if (!route.provider.chatWithTools) throw new Error(`Provider ${route.provider.id} does not support agent tool calls.`);
@@ -70,9 +97,17 @@ export class CompositeProvider implements ModelProvider {
     }
   }
 
+  registerProvider(provider: ModelProvider): void {
+    this.addProvider(provider);
+  }
+
   removeProvider(providerId: string): void {
     this.providers = this.providers.filter((provider) => provider.id !== providerId);
     for (const [key, route] of this.discovered) if (route.provider.id === providerId) this.discovered.delete(key);
+  }
+
+  unregisterProvider(providerId: string): void {
+    this.removeProvider(providerId);
   }
 
   getProviders(): ModelProvider[] {

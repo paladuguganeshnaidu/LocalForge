@@ -1,19 +1,32 @@
 export type ToolCategory = 'read' | 'edit' | 'execute';
 export type PermissionMode = 'always_ask' | 'ask_once_per_session' | 'allow_safe_auto';
 
+export type CommandCategory =
+  | 'read-only'
+  | 'test'
+  | 'build'
+  | 'lint'
+  | 'package'
+  | 'version control'
+  | 'file mutation'
+  | 'network'
+  | 'process control'
+  | 'destructive';
+
 export interface PermissionRequest {
   id: string;
   toolName: string;
   category: ToolCategory;
   description: string;
   command?: string;
+  commandCategory?: CommandCategory;
   path?: string;
   args?: Record<string, unknown>;
 }
 
 export type ApprovalHandler = (request: PermissionRequest) => Promise<boolean>;
 
-const BLOCKED_COMMAND_PATTERNS = [
+const DESTRUCTIVE_COMMAND_PATTERNS = [
   /\brm\s+-rf\s+[\/\\]/i,
   /\bdel\s+.*[a-z]:\\/i,
   /\bformat\s+[a-z]:/i,
@@ -25,11 +38,20 @@ const BLOCKED_COMMAND_PATTERNS = [
   /\breboot\b/i
 ];
 
-const SAFE_READ_COMMAND_PREFIXES = [
-  'git status',
-  'git diff',
-  'git log',
-  'git branch',
+const SHELL_OPERATORS = [
+  /&&/,
+  /\|\|/,
+  /;/,
+  /\|/,
+  />/,
+  />>/,
+  /2>/,
+  /&/,
+  /`[^`]*`/,
+  /\$\(/
+];
+
+const SAFE_TEST_BUILD_COMMAND_PREFIXES = [
   'npm test',
   'npm run test',
   'npm run lint',
@@ -38,8 +60,18 @@ const SAFE_READ_COMMAND_PREFIXES = [
   'cargo test',
   'pytest',
   'go test',
-  'python -m unittest'
+  'python -m unittest',
+  'mvn test',
+  './gradlew test',
+  'git status',
+  'git diff',
+  'git log',
+  'git branch'
 ];
+
+export function hasShellChainingOrRedirection(cmd: string): boolean {
+  return SHELL_OPERATORS.some((pattern) => pattern.test(cmd));
+}
 
 export class PermissionManager {
   private mode: PermissionMode = 'allow_safe_auto';
@@ -68,18 +100,66 @@ export class PermissionManager {
   }
 
   public classifyTool(toolName: string): ToolCategory {
-    if (toolName.startsWith('read_') || toolName.startsWith('search_') || toolName.startsWith('list_') || toolName === 'git_status' || toolName === 'git_diff' || toolName === 'detect_project') {
+    if (
+      toolName.startsWith('read_') ||
+      toolName.startsWith('search_') ||
+      toolName.startsWith('list_') ||
+      toolName === 'git_status' ||
+      toolName === 'git_diff' ||
+      toolName === 'detect_project'
+    ) {
       return 'read';
     }
-    if (toolName.startsWith('write_') || toolName.startsWith('edit_') || toolName.startsWith('delete_') || toolName.startsWith('apply_patch')) {
+    if (
+      toolName.startsWith('write_') ||
+      toolName.startsWith('edit_') ||
+      toolName.startsWith('delete_') ||
+      toolName.startsWith('apply_patch')
+    ) {
       return 'edit';
     }
     return 'execute';
   }
 
+  public categorizeCommand(command: string): CommandCategory {
+    const norm = command.trim().toLowerCase();
+    for (const pat of DESTRUCTIVE_COMMAND_PATTERNS) {
+      if (pat.test(norm)) return 'destructive';
+    }
+    if (norm.startsWith('git ') || norm === 'git') {
+      return 'version control';
+    }
+    if (norm.startsWith('npm test') || norm.startsWith('cargo test') || norm.startsWith('pytest') || norm.startsWith('go test')) {
+      return 'test';
+    }
+    if (norm.startsWith('npm run build') || norm.startsWith('cargo build') || norm.startsWith('go build')) {
+      return 'build';
+    }
+    if (norm.startsWith('npm run lint') || norm.startsWith('flake8') || norm.startsWith('cargo clippy')) {
+      return 'lint';
+    }
+    if (norm.startsWith('rm ') || norm.startsWith('del ') || norm.startsWith('mkdir ') || norm.startsWith('touch ')) {
+      return 'file mutation';
+    }
+    if (norm.startsWith('curl ') || norm.startsWith('wget ') || norm.startsWith('ssh ')) {
+      return 'network';
+    }
+    if (norm.startsWith('npm i') || norm.startsWith('npm install') || norm.startsWith('pip install') || norm.startsWith('cargo add') || norm.startsWith('yarn add')) {
+      return 'package';
+    }
+    if (norm.startsWith('kill ') || norm.startsWith('pkill ') || norm.startsWith('taskkill ')) {
+      return 'process control';
+    }
+    return 'read-only';
+  }
+
+  public classifyCommand(command: string): CommandCategory {
+    return this.categorizeCommand(command);
+  }
+
   public validateCommandSafety(command: string): void {
     const normalized = command.trim().toLowerCase();
-    for (const pattern of BLOCKED_COMMAND_PATTERNS) {
+    for (const pattern of DESTRUCTIVE_COMMAND_PATTERNS) {
       if (pattern.test(normalized)) {
         throw new Error('Command contains potentially catastrophic system operations and was blocked by policy.');
       }
@@ -93,54 +173,64 @@ export class PermissionManager {
     } catch {
       return false;
     }
-    return SAFE_READ_COMMAND_PREFIXES.some(prefix => normalized === prefix || normalized.startsWith(`${prefix} `));
+
+    // Prohibit shell chaining or redirection in auto-safe execution
+    if (hasShellChainingOrRedirection(command)) {
+      return false;
+    }
+
+    return SAFE_TEST_BUILD_COMMAND_PREFIXES.some(
+      (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `)
+    );
   }
 
   public async checkPermission(toolName: string, args: Record<string, unknown>): Promise<boolean> {
     const category = this.classifyTool(toolName);
 
-    // READ operations are safe under allow_safe_auto and ask_once_per_session
+    // 1. Read operations: auto allowed in allow_safe_auto and ask_once_per_session
     if (category === 'read') {
       if (this.mode === 'allow_safe_auto' || this.mode === 'ask_once_per_session') {
         return true;
       }
     }
 
-    // Command execution security check
+    // 2. Command execution
     if (toolName === 'run_command' && typeof args.command === 'string') {
       this.validateCommandSafety(args.command);
+      // Auto-approved only if explicitly safe without chaining
       if (this.mode === 'allow_safe_auto' && this.isSafeCommand(args.command)) {
         return true;
       }
     }
 
+    // 3. Edit operations: NEVER auto-approved without proposal review in standard mode
     const sessionKey = `${toolName}:${args.path || args.command || ''}`;
     if (this.mode === 'ask_once_per_session' && this.sessionApprovedTools.has(sessionKey)) {
       return true;
     }
 
-    if (!this.approvalHandler) {
-      // Default: allow safe auto if no interactive handler registered, but reject dangerous
-      if (this.mode === 'allow_safe_auto' && category !== 'execute') {
-        return true;
+    // If an approval handler is registered, ask the user
+    if (this.approvalHandler) {
+      const cmd = typeof args.command === 'string' ? args.command : undefined;
+      const request: PermissionRequest = {
+        id: `perm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        toolName,
+        category,
+        description: `Permission requested to execute ${toolName}`,
+        command: cmd,
+        commandCategory: cmd ? this.categorizeCommand(cmd) : undefined,
+        path: typeof args.path === 'string' ? args.path : undefined,
+        args
+      };
+
+      const approved = await this.approvalHandler(request);
+      if (approved && this.mode === 'ask_once_per_session') {
+        this.sessionApprovedTools.add(sessionKey);
       }
-      return false;
+      return approved;
     }
 
-    const request: PermissionRequest = {
-      id: `perm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      toolName,
-      category,
-      description: `Permission requested to execute ${toolName}`,
-      command: typeof args.command === 'string' ? args.command : undefined,
-      path: typeof args.path === 'string' ? args.path : undefined,
-      args
-    };
-
-    const approved = await this.approvalHandler(request);
-    if (approved && this.mode === 'ask_once_per_session') {
-      this.sessionApprovedTools.add(sessionKey);
-    }
-    return approved;
+    // Fallback: If no interactive approval handler registered
+    return false;
   }
 }
