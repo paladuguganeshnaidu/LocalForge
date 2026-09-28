@@ -2,6 +2,24 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.1.4] - 2026-09-28
+
+### Added
+- **Full Autonomous Copilot Agent**:
+  - **Agent Mode**: Local models autonomously plan, inspect repository files, perform surgical code modifications, and execute workspace terminal commands end-to-end.
+  - **Plan Mode**: Architecture and planning mode that explores the codebase and outputs a step-by-step implementation checklist (`- [ ]`) without touching code until approved.
+  - **Ask Mode**: Fast contextual Q&A and code explanation with read-only workspace search.
+- **Direct Remote GPU SSH Integration**:
+  - One-click **Remote GPU** status bar in the webview to connect to remote GPU servers (Lambda Labs, RunPod, home rigs) over secure SSH loopback tunnels.
+  - Live GPU telemetry (`nvidia-smi` name and VRAM) displayed directly in the UI.
+  - Transparent port-forwarding of remote Ollama instances (`11434`), enabling heavy 32B/70B models to run remotely on dedicated GPUs while editing locally.
+- **Universal Local Model Tool Compatibility**:
+  - Dual tool-calling engine: supports native Ollama function calling as well as fallback extraction of `<tool_call>` blocks and markdown tool invocations. Smaller models (such as `qwen2.5-coder:1.5b` and `7b`) now execute tools without errors.
+- **Rich Copilot Agent UI**:
+  - Replaced chatbot layout with an interactive Copilot Agent timeline featuring live tool execution cards (`search_workspace`, `read_workspace_file`, `list_directory`, `write_workspace_file`, `edit_workspace_file`, `run_command`).
+  - Animated progress indicators, collapsible reasoning blocks, terminal output accordions, and interactive checklist checkboxes.
+  - Dynamic active editor context chip (`📄 filename.ts`).
+
 ## [0.1.3] - 2026-09-28
 
 ### Fixed

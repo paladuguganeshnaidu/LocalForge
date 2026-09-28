@@ -49,3 +49,46 @@ test('agent blocks tool calls that are not allow-listed', async () => {
   assert.equal(answer, 'I did not run commands.');
   assert.equal(executed, false);
 });
+
+test('agent extracts and executes text-embedded <tool_call> blocks from local models', async () => {
+  const executed = [];
+  let call = 0;
+  const provider = {
+    id: 'local-ollama',
+    chatWithTools: async () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          role: 'assistant',
+          content: 'Let me search.\n<tool_call>{"name": "search_workspace", "arguments": {"query": "auth"}}</tool_call>'
+        };
+      }
+      return { role: 'assistant', content: 'Found auth in src/auth.ts.' };
+    }
+  };
+  const answer = await runToolAgent(provider, 'qwen:1.5b', [{ role: 'user', content: 'Where is auth?' }], [
+    { type: 'function', function: { name: 'search_workspace', description: 'Search', parameters: {} } }
+  ], async (name, args) => {
+    executed.push([name, args]);
+    return [{ path: 'src/auth.ts' }];
+  });
+  assert.equal(answer, 'Found auth in src/auth.ts.');
+  assert.deepEqual(executed, [['search_workspace', { query: 'auth' }]]);
+});
+
+test('agent injects plan mode system instructions when mode is plan', async () => {
+  let capturedSystemPrompt = '';
+  const provider = {
+    id: 'fixture',
+    chatWithTools: async (_model, messages) => {
+      capturedSystemPrompt = messages[0].content;
+      return { role: 'assistant', content: '## 🎯 Plan\n- [ ] Step 1' };
+    }
+  };
+  const answer = await runToolAgent(provider, 'test:model', [{ role: 'user', content: 'Plan feature' }], [], async () => ({}), {
+    mode: 'plan'
+  });
+  assert.match(capturedSystemPrompt, /Plan Mode/);
+  assert.match(answer, /## 🎯 Plan/);
+});
+

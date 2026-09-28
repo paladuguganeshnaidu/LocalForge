@@ -8,8 +8,8 @@ import { ModelTask, routeModel } from './providers/modelRouter';
 import { RemoteGpuProfile, SshOllamaTunnel, readPrivateKey } from './remote/sshOllamaTunnel';
 import { findRelevantSnippets } from './context/workspaceContext';
 import { LocalForgeCompletionProvider } from './features/completionProvider';
-import { runToolAgent } from './agent/toolAgent';
-import { executeWorkspaceTool, workspaceTools } from './agent/workspaceTools';
+import { AgentMode, runToolAgent } from './agent/toolAgent';
+import { allWorkspaceTools, executeWorkspaceTool, readOnlyWorkspaceTools } from './agent/workspaceTools';
 
 export type WebviewMessage =
   | { type: 'ready' }
@@ -17,17 +17,33 @@ export type WebviewMessage =
   | { type: 'cancel' }
   | { type: 'clear' }
   | { type: 'selectModel'; model: string }
-  | { type: 'chat'; model: string; prompt: string; includeContext: boolean; includeWorkspace: boolean; agentMode: boolean };
+  | { type: 'setMode'; mode: AgentMode }
+  | { type: 'connectRemote' }
+  | { type: 'disconnectRemote' }
+  | { type: 'configureRemote' }
+  | { type: 'getRemoteStatus' }
+  | { type: 'openFile'; path: string }
+  | {
+      type: 'chat';
+      model: string;
+      prompt: string;
+      mode?: AgentMode;
+      agentMode?: boolean;
+      includeContext: boolean;
+      includeWorkspace: boolean;
+    };
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = createProvider();
   const viewProvider = new LocalForgeViewProvider(provider, context);
-  let remoteSession: { tunnel: SshOllamaTunnel; providerId: string } | undefined;
+  let remoteSession: { tunnel: SshOllamaTunnel; providerId: string; profileName: string } | undefined;
+
   const completionProvider = new LocalForgeCompletionProvider(
     provider,
     () => vscode.workspace.getConfiguration('localforge.autocomplete').get<boolean>('enabled', false),
     () => viewProvider.modelForTask('completion')
   );
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('localforge.chatView', viewProvider),
     vscode.commands.registerCommand('localforge.refreshModels', () => viewProvider.refresh()),
@@ -37,8 +53,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('localforge.searchWorkspace', () => searchWorkspace()),
     vscode.commands.registerCommand('localforge.configureRemote', () => configureRemoteProfile(context)),
     vscode.commands.registerCommand('localforge.connectRemote', () => {
-      if (remoteSession) return void vscode.window.showInformationMessage('A remote GPU connection is already active. Disconnect it before connecting to another profile.');
-      return connectRemote(context, provider, viewProvider, (session) => { remoteSession = session; });
+      if (remoteSession) {
+        return void vscode.window.showInformationMessage('A remote GPU connection is already active. Disconnect it before connecting to another profile.');
+      }
+      return connectRemote(context, provider, viewProvider, (session) => {
+        remoteSession = session;
+        viewProvider.setRemoteSession(session);
+      });
     }),
     vscode.commands.registerCommand('localforge.disconnectRemote', async () => {
       if (!remoteSession) return void vscode.window.showInformationMessage('No remote GPU connection is active.');
@@ -46,6 +67,7 @@ export function activate(context: vscode.ExtensionContext): void {
       remoteSession = undefined;
       provider.removeProvider(session.providerId);
       await session.tunnel.close();
+      viewProvider.setRemoteSession(undefined);
       await viewProvider.refresh();
       void vscode.window.showInformationMessage('Disconnected from the remote model host and closed its SSH tunnel.');
     }),
@@ -58,8 +80,14 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showWarningMessage(errorMessage(error));
       }
     }),
-    vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, completionProvider)
+    vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, completionProvider),
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor) {
+        viewProvider.postActiveEditor(vscode.workspace.asRelativePath(editor.document.uri));
+      }
+    })
   );
+
   context.subscriptions.push(new vscode.Disposable(() => { if (remoteSession) void remoteSession.tunnel.close(); }));
   void viewProvider.refresh();
 }
@@ -78,7 +106,7 @@ function createProvider(): CompositeProvider {
 const remoteProfilesKey = 'localforge.remoteProfiles';
 
 async function configureRemoteProfile(context: vscode.ExtensionContext): Promise<void> {
-  const name = await vscode.window.showInputBox({ title: 'Remote GPU profile', prompt: 'A recognizable name for this remote machine' });
+  const name = await vscode.window.showInputBox({ title: 'Remote GPU profile', prompt: 'A recognizable name for this remote machine (e.g. Lambda Labs, RunPod, Home RTX 4090)' });
   if (!name?.trim()) return;
   const host = await vscode.window.showInputBox({ title: name, prompt: 'SSH hostname or IP address' });
   if (!host?.trim()) return;
@@ -132,12 +160,16 @@ async function connectRemote(
   context: vscode.ExtensionContext,
   provider: CompositeProvider,
   viewProvider: LocalForgeViewProvider,
-  setSession: (session: { tunnel: SshOllamaTunnel; providerId: string } | undefined) => void
+  setSession: (session: { tunnel: SshOllamaTunnel; providerId: string; profileName: string } | undefined) => void
 ): Promise<void> {
-  const profiles = context.globalState.get<RemoteGpuProfile[]>(remoteProfilesKey, []);
+  let profiles = context.globalState.get<RemoteGpuProfile[]>(remoteProfilesKey, []);
   if (!profiles.length) {
-    void vscode.window.showInformationMessage('Configure a remote GPU profile before connecting.');
-    return;
+    const create = await vscode.window.showInformationMessage('No remote GPU profiles configured yet. Create one now?', 'Configure GPU Host', 'Cancel');
+    if (create === 'Configure GPU Host') {
+      await configureRemoteProfile(context);
+      profiles = context.globalState.get<RemoteGpuProfile[]>(remoteProfilesKey, []);
+    }
+    if (!profiles.length) return;
   }
   const selected = await vscode.window.showQuickPick(profiles.map((profile) => ({ label: profile.name, description: `${profile.username}@${profile.host}:${profile.port}`, profile })), {
     title: 'Connect to remote GPU host'
@@ -160,7 +192,7 @@ async function connectRemote(
   };
 
   try {
-    const tunnel = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Connecting to ${profile.name}` }, async () => {
+    const tunnel = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Connecting to ${profile.name} (SSH tunnel)` }, async () => {
       const options = profile.authenticationMethod === 'password'
         ? { password: credential.secret, verifyUnknownHost }
         : { privateKey: await readPrivateKey(profile.privateKeyPath ?? ''), passphrase: credential.secret || undefined, verifyUnknownHost };
@@ -168,11 +200,12 @@ async function connectRemote(
     });
     const providerId = `ssh-ollama-${profile.id}`;
     provider.addProvider(new OllamaProvider(`http://127.0.0.1:${tunnel.port}`, providerId));
-    setSession({ tunnel, providerId });
+    const session = { tunnel, providerId, profileName: profile.name };
+    setSession(session);
     await viewProvider.refresh();
-    void vscode.window.showInformationMessage(`SSH tunnel to ${profile.name} is active. Remote models are now in the model list.`);
+    void vscode.window.showInformationMessage(`SSH tunnel to ${profile.name} is active. Heavy models run remotely on your GPU!`);
   } catch (error) {
-    void vscode.window.showErrorMessage(`Remote connection failed: ${errorMessage(error)}`);
+    void vscode.window.showErrorMessage(`Remote GPU connection failed: ${errorMessage(error)}`);
   }
 }
 
@@ -269,7 +302,7 @@ async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<v
   await vscode.commands.executeCommand('localforge.chatView.focus');
   const relPath = vscode.workspace.asRelativePath(editor.document.uri);
   const prompt = formatExplainPrompt(original, editor.document.languageId, relPath);
-  await viewProvider.sendUserPrompt(prompt, { includeContext: false });
+  await viewProvider.sendUserPrompt(prompt, { includeContext: false, mode: 'ask' });
 }
 
 async function fixSelection(provider: ModelProvider, viewProvider: LocalForgeViewProvider): Promise<void> {
@@ -464,7 +497,9 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private readonly conversations = new Map<string, ChatMessage[]>();
   private busy = false;
   private activeChat?: AbortController;
+  private remoteSession?: { tunnel: SshOllamaTunnel; providerId: string; profileName: string };
   selectedModel?: string;
+  activeMode: AgentMode = 'agent';
 
   modelForTask(task: ModelTask): string | undefined {
     const configuration = vscode.workspace.getConfiguration('localforge.routing');
@@ -488,6 +523,34 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  setRemoteSession(session?: { tunnel: SshOllamaTunnel; providerId: string; profileName: string }): void {
+    this.remoteSession = session;
+    void this.postRemoteStatus();
+  }
+
+  async postRemoteStatus(): Promise<void> {
+    if (!this.remoteSession) {
+      this.post({ type: 'remoteStatus', connected: false });
+      return;
+    }
+    let gpuInfo = '';
+    try {
+      gpuInfo = await this.remoteSession.tunnel.getGpuStatus();
+    } catch {
+      gpuInfo = 'Connected via SSH tunnel';
+    }
+    this.post({
+      type: 'remoteStatus',
+      connected: true,
+      profileName: this.remoteSession.profileName,
+      gpuInfo
+    });
+  }
+
+  postActiveEditor(relPath: string): void {
+    this.post({ type: 'activeEditor', path: relPath });
+  }
+
   private saveConversations(): void {
     const obj: Record<string, ChatMessage[]> = {};
     for (const [key, value] of this.conversations.entries()) {
@@ -501,6 +564,7 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [] };
     view.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       if (!isWebviewMessage(message)) return;
+
       if (message.type === 'ready' || message.type === 'refresh') {
         if (this.models.length > 0) {
           this.post({ type: 'models', models: this.models, selectedModel: this.selectedModel });
@@ -509,14 +573,51 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           this.post({
             type: 'status',
             state: 'ready',
-            message: `Connected to ${[...new Set(this.models.map((model) => model.providerId))].join(', ')} · ${this.models.length} model${this.models.length === 1 ? '' : 's'} found`
+            message: `Connected to ${[...new Set(this.models.map((model) => model.providerId))].join(', ')} · ${this.models.length} model${this.models.length === 1 ? '' : 's'} available`
           });
+        }
+        await this.postRemoteStatus();
+        if (vscode.window.activeTextEditor) {
+          this.postActiveEditor(vscode.workspace.asRelativePath(vscode.window.activeTextEditor.document.uri));
         }
         await this.refresh();
         const history = this.conversations.get(this.selectedModel ?? '') ?? [];
         this.post({ type: 'history', messages: history });
       }
+
+      if (message.type === 'setMode') {
+        this.activeMode = message.mode;
+      }
+
+      if (message.type === 'getRemoteStatus') {
+        await this.postRemoteStatus();
+      }
+
+      if (message.type === 'connectRemote') {
+        await vscode.commands.executeCommand('localforge.connectRemote');
+      }
+
+      if (message.type === 'disconnectRemote') {
+        await vscode.commands.executeCommand('localforge.disconnectRemote');
+      }
+
+      if (message.type === 'configureRemote') {
+        await vscode.commands.executeCommand('localforge.configureRemote');
+      }
+
+      if (message.type === 'openFile') {
+        try {
+          const roots = vscode.workspace.workspaceFolders;
+          if (roots?.length) {
+            const uri = vscode.Uri.joinPath(roots[0].uri, message.path);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(doc);
+          }
+        } catch {}
+      }
+
       if (message.type === 'cancel') this.activeChat?.abort();
+
       if (message.type === 'clear') {
         if (this.selectedModel) {
           this.conversations.delete(this.selectedModel);
@@ -524,17 +625,20 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         }
         this.post({ type: 'history', messages: [] });
       }
+
       if (message.type === 'selectModel') {
         this.selectedModel = this.models.some((model) => model.name === message.model) ? message.model : undefined;
         const history = this.conversations.get(this.selectedModel ?? '') ?? [];
         this.post({ type: 'history', messages: history });
       }
+
       if (message.type === 'chat') void this.chat(message);
     });
+
     view.webview.html = getHtml(view.webview);
   }
 
-  async sendUserPrompt(promptText: string, options: { includeContext?: boolean; includeWorkspace?: boolean; agentMode?: boolean } = {}): Promise<void> {
+  async sendUserPrompt(promptText: string, options: { includeContext?: boolean; includeWorkspace?: boolean; mode?: AgentMode } = {}): Promise<void> {
     if (!this.models.length) {
       await this.refresh();
     }
@@ -550,20 +654,20 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       type: 'chat',
       model,
       prompt: promptText,
+      mode: options.mode ?? this.activeMode,
       includeContext: options.includeContext ?? false,
-      includeWorkspace: options.includeWorkspace ?? false,
-      agentMode: options.agentMode ?? false
+      includeWorkspace: options.includeWorkspace ?? false
     });
   }
 
   async refresh(): Promise<void> {
-    this.post({ type: 'status', state: 'checking', message: 'Looking for Ollama…' });
+    this.post({ type: 'status', state: 'checking', message: 'Looking for local and remote models…' });
     try {
       const detected = await this.provider.detect();
       if (!detected) {
         this.models = [];
         this.post({ type: 'models', models: [] });
-        this.post({ type: 'status', state: 'offline', message: 'No configured local model server is responding. Start Ollama or a compatible server, then refresh.' });
+        this.post({ type: 'status', state: 'offline', message: 'No configured local or remote model server is responding. Start Ollama or connect Remote GPU, then refresh.' });
         return;
       }
 
@@ -585,8 +689,8 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         type: 'status',
         state: this.models.length ? 'ready' : 'empty',
         message: this.models.length
-          ? `Connected to ${[...new Set(this.models.map((model) => model.providerId))].join(', ')} · ${this.models.length} model${this.models.length === 1 ? '' : 's'} found`
-          : 'A model server is reachable, but it reports no installed models. Install or load a model, then refresh.'
+          ? `Connected to ${[...new Set(this.models.map((model) => model.providerId))].join(', ')} · ${this.models.length} model${this.models.length === 1 ? '' : 's'} available`
+          : 'Server is reachable, but reports no installed models. Run `ollama pull <model>` or connect Remote GPU, then refresh.'
       });
     } catch (error) {
       this.post({ type: 'status', state: 'error', message: errorMessage(error) });
@@ -595,11 +699,13 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
   private async chat(request: Extract<WebviewMessage, { type: 'chat' }>): Promise<void> {
     if (this.busy) return;
-    if (request.agentMode && !vscode.workspace.isTrusted) {
-      this.post({ type: 'error', message: 'Agent mode requires a trusted workspace because it can read workspace files.' });
+    const mode: AgentMode = request.mode ?? (request.agentMode ? 'agent' : 'ask');
+
+    if (mode === 'agent' && !vscode.workspace.isTrusted) {
+      this.post({ type: 'error', message: 'Agent mode requires a trusted workspace because it can read, edit files and run commands.' });
       return;
     }
-    const routedModel = request.agentMode ? this.modelForTask('agent') : undefined;
+    const routedModel = mode === 'agent' ? this.modelForTask('agent') : undefined;
     const model = this.models.find((item) => item.name === (routedModel ?? request.model));
     if (!model) {
       this.post({ type: 'error', message: 'Choose an available model before sending a message.' });
@@ -638,15 +744,35 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     }
 
     messages.push({ role: 'user', content: userContent });
-    this.post({ type: 'userMessage', content: prompt });
-    this.post({ type: 'assistantStart' });
+    this.post({ type: 'userMessage', content: prompt, mode });
+    this.post({ type: 'assistantStart', mode });
     let answer = '';
     try {
-      if (request.agentMode) {
-        answer = await runToolAgent(this.provider, model.name, messages, workspaceTools, executeWorkspaceTool, {
-          signal: controller.signal,
-          onTool: (message) => this.post({ type: 'toolStatus', content: message })
-        });
+      if (mode === 'agent' || mode === 'plan') {
+        const tools = mode === 'agent' ? allWorkspaceTools : readOnlyWorkspaceTools;
+        answer = await runToolAgent(
+          this.provider,
+          model.name,
+          messages,
+          tools,
+          executeWorkspaceTool,
+          {
+            signal: controller.signal,
+            mode,
+            onThought: (thought) => {
+              this.post({ type: 'thought', content: thought });
+            },
+            onToolStart: (name, args, id) => {
+              this.post({ type: 'toolStart', id, name, args });
+            },
+            onToolEnd: (name, result, error, id) => {
+              this.post({ type: 'toolEnd', id, name, result, error });
+            },
+            onTool: (message) => {
+              this.post({ type: 'toolStatus', content: message });
+            }
+          }
+        );
         this.post({ type: 'token', content: answer });
       } else {
         await this.provider.streamChat(model.name, messages, (token) => {
@@ -661,7 +787,7 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       messages.pop();
       if (!controller.signal.aborted) this.post({ type: 'error', message: errorMessage(error) });
-      else this.post({ type: 'status', state: 'ready', message: 'Response cancelled.' });
+      else this.post({ type: 'status', state: 'ready', message: 'Task cancelled.' });
       this.post({ type: 'assistantDone' });
     } finally {
       this.busy = false;
@@ -681,16 +807,23 @@ function errorMessage(error: unknown): string {
 export function isWebviewMessage(value: unknown): value is WebviewMessage {
   if (!value || typeof value !== 'object' || !('type' in value)) return false;
   const message = value as Record<string, unknown>;
-  if (message.type === 'ready' || message.type === 'refresh' || message.type === 'cancel' || message.type === 'clear') return true;
+  if (message.type === 'ready' || message.type === 'refresh' || message.type === 'cancel' || message.type === 'clear'
+    || message.type === 'connectRemote' || message.type === 'disconnectRemote' || message.type === 'configureRemote' || message.type === 'getRemoteStatus') {
+    return true;
+  }
+  if (message.type === 'openFile') return typeof message.path === 'string';
   if (message.type === 'selectModel') return typeof message.model === 'string' && message.model.length <= 200;
-  return message.type === 'chat'
-    && typeof message.model === 'string'
-    && message.model.length <= 200
-    && typeof message.prompt === 'string'
-    && message.prompt.length <= 20000
-    && typeof message.includeContext === 'boolean'
-    && typeof message.includeWorkspace === 'boolean'
-    && typeof message.agentMode === 'boolean';
+  if (message.type === 'setMode') return message.mode === 'ask' || message.mode === 'plan' || message.mode === 'agent';
+  if (message.type === 'chat') {
+    return typeof message.model === 'string'
+      && message.model.length <= 200
+      && typeof message.prompt === 'string'
+      && message.prompt.length <= 20000
+      && typeof message.includeContext === 'boolean'
+      && typeof message.includeWorkspace === 'boolean'
+      && (message.mode === 'ask' || message.mode === 'plan' || message.mode === 'agent' || typeof message.agentMode === 'boolean');
+  }
+  return false;
 }
 
 function getHtml(webview: vscode.Webview): string {
@@ -703,55 +836,422 @@ function getHtml(webview: vscode.Webview): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${cspSource} 'unsafe-inline';">
   <style>
-    :root { color-scheme: light dark; }
-    body { padding: 12px; color: var(--vscode-foreground); font: 13px var(--vscode-font-family); }
-    .row { display: flex; gap: 6px; align-items: center; }
-    select, textarea, button { color: inherit; background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; padding: 7px; font: inherit; }
-    select { flex: 1; min-width: 0; }
-    button { cursor: pointer; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; }
-    button:hover { background: var(--vscode-button-hoverBackground); }
-    button.secondary { background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #ffffff); }
-    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
-    #status { margin: 10px 0; color: var(--vscode-descriptionForeground); line-height: 1.45; }
+    :root {
+      color-scheme: light dark;
+      --agent-accent: #0284c7;
+      --agent-accent-glow: rgba(2, 132, 199, 0.15);
+      --plan-accent: #d97706;
+      --plan-accent-glow: rgba(217, 119, 6, 0.15);
+      --ask-accent: #059669;
+      --ask-accent-glow: rgba(5, 150, 105, 0.15);
+      --active-theme-accent: var(--agent-accent);
+      --active-theme-glow: var(--agent-accent-glow);
+    }
+    body {
+      padding: 10px;
+      margin: 0;
+      color: var(--vscode-foreground);
+      font: 13px/1.5 var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+
+    /* Mode Pill Bar */
+    .mode-bar {
+      display: flex;
+      background: var(--vscode-editor-inactiveSelectionBackground, rgba(128,128,128,0.15));
+      padding: 3px;
+      border-radius: 8px;
+      gap: 3px;
+      margin-bottom: 8px;
+    }
+    .mode-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 6px 4px;
+      font-size: 11.5px;
+      font-weight: 600;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      transition: all 0.15s ease;
+    }
+    .mode-btn:hover {
+      color: var(--vscode-foreground);
+      background: rgba(128,128,128,0.1);
+    }
+    .mode-btn.active[data-mode="agent"] {
+      background: #0284c7;
+      color: #ffffff;
+      box-shadow: 0 1px 4px rgba(2,132,199,0.3);
+    }
+    .mode-btn.active[data-mode="plan"] {
+      background: #d97706;
+      color: #ffffff;
+      box-shadow: 0 1px 4px rgba(217,119,6,0.3);
+    }
+    .mode-btn.active[data-mode="ask"] {
+      background: #059669;
+      color: #ffffff;
+      box-shadow: 0 1px 4px rgba(5,150,105,0.3);
+    }
+
+    /* Utility Row */
+    .utility-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .remote-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: var(--vscode-badge-background, rgba(128,128,128,0.2));
+      color: var(--vscode-badge-foreground, inherit);
+      font-size: 11px;
+      border: 1px solid var(--vscode-widget-border, transparent);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+    .remote-chip:hover {
+      background: var(--vscode-button-secondaryHoverBackground, rgba(128,128,128,0.3));
+    }
+    .remote-chip.connected {
+      border-color: #10b981;
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground);
+      display: inline-block;
+    }
+    .dot.online { background: #10b981; box-shadow: 0 0 6px #10b981; }
+
+    select {
+      flex: 1;
+      min-width: 0;
+      color: inherit;
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      padding: 5px 7px;
+      font: inherit;
+      font-size: 12px;
+    }
+    .icon-btn {
+      cursor: pointer;
+      background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.2));
+      color: var(--vscode-button-secondaryForeground, inherit);
+      border: 1px solid var(--vscode-widget-border, transparent);
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 12px;
+    }
+    .icon-btn:hover {
+      background: var(--vscode-button-secondaryHoverBackground, rgba(128,128,128,0.3));
+    }
+
+    /* Status Banner */
+    #status {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.4;
+      padding: 3px 2px 6px;
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+    }
     #status[data-state="offline"], #status[data-state="error"] { color: var(--vscode-errorForeground); }
-    #messages { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; max-height: calc(100vh - 270px); overflow-y: auto; }
-    .message { padding: 9px; border-radius: 6px; background: var(--vscode-editor-inactiveSelectionBackground); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
-    .message.user { background: var(--vscode-textBlockQuote-background); }
-    .message.tool { color: var(--vscode-descriptionForeground); font-size: 11px; }
-    .error { color: var(--vscode-errorForeground); }
-    .code-container { margin: 8px 0; border-radius: 4px; overflow: hidden; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border, #333); white-space: normal; }
-    .code-header { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; background: var(--vscode-titleBar-activeBackground, rgba(128,128,128,0.1)); font-size: 11px; color: var(--vscode-descriptionForeground); font-family: sans-serif; }
-    .copy-code-btn { padding: 2px 6px; font-size: 10px; border-radius: 3px; background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #fff); border: 0; cursor: pointer; }
-    .copy-code-btn:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
-    .code-container pre { margin: 0; padding: 8px; overflow-x: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
-    code { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.9em; background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)); padding: 1px 4px; border-radius: 3px; }
+
+    /* Messages / Stream Container */
+    #messages {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 10px 0;
+      overflow-y: auto;
+      min-height: 0;
+    }
+
+    /* Message Bubbles */
+    .msg {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-radius: 8px;
+      padding: 9px 12px;
+      line-height: 1.5;
+      font-size: 12.5px;
+      overflow-wrap: anywhere;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--vscode-textBlockQuote-background, rgba(128,128,128,0.2));
+      border-left: 3px solid var(--active-theme-accent);
+      max-width: 90%;
+    }
+    .msg.assistant {
+      background: var(--vscode-editor-inactiveSelectionBackground, rgba(128,128,128,0.08));
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+    }
+    .msg-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* Thought / Reasoning Accordion */
+    .thought-card {
+      margin: 4px 0 8px;
+      border-radius: 6px;
+      background: rgba(128,128,128,0.07);
+      border: 1px dashed var(--vscode-panel-border, rgba(128,128,128,0.25));
+      font-size: 11.5px;
+    }
+    .thought-card summary {
+      padding: 6px 10px;
+      cursor: pointer;
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      user-select: none;
+    }
+    .thought-content {
+      padding: 6px 10px 8px;
+      white-space: pre-wrap;
+      color: var(--vscode-foreground);
+      opacity: 0.85;
+      line-height: 1.45;
+    }
+
+    /* Tool Action Cards */
+    .tool-card {
+      margin: 4px 0;
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+      overflow: hidden;
+      font-size: 11.5px;
+    }
+    .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      background: rgba(128,128,128,0.08);
+      cursor: pointer;
+      user-select: none;
+    }
+    .tool-icon { font-size: 12px; }
+    .tool-name { font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); }
+    .tool-param { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); }
+    .tool-status { font-size: 11px; }
+    .tool-status.running { color: #38bdf8; animation: pulse 1.5s infinite; }
+    .tool-status.done { color: #10b981; }
+    .tool-status.error { color: var(--vscode-errorForeground); }
+    .tool-details {
+      padding: 8px 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      background: rgba(0,0,0,0.15);
+      border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* Markdown & Code Blocks */
+    .code-container {
+      margin: 8px 0;
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+      white-space: normal;
+    }
+    .code-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 8px;
+      background: rgba(128,128,128,0.1);
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      font-family: sans-serif;
+    }
+    .copy-code-btn {
+      padding: 2px 6px;
+      font-size: 10px;
+      border-radius: 4px;
+      background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.2));
+      color: var(--vscode-button-secondaryForeground, inherit);
+      border: 0;
+      cursor: pointer;
+    }
+    .copy-code-btn:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(128,128,128,0.3)); }
+    pre { margin: 0; padding: 8px; overflow-x: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+    code { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.9em; background: rgba(128,128,128,0.15); padding: 1px 4px; border-radius: 3px; }
     .code-container code { background: none; padding: 0; }
     ul { margin: 6px 0; padding-left: 18px; }
-    li { margin: 2px 0; }
-    textarea { box-sizing: border-box; width: 100%; min-height: 74px; resize: vertical; margin: 8px 0; }
-    label { display: flex; align-items: center; gap: 6px; color: var(--vscode-descriptionForeground); margin: 5px 0 9px; }
-    #send { width: 100%; }
-    #send:disabled, #cancel:disabled { opacity: .6; cursor: default; }
-    .hint { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 10px; }
+    li { margin: 3px 0; }
+    input[type="checkbox"] { margin-right: 6px; vertical-align: middle; cursor: pointer; }
+
+    /* Composer Bottom Area */
+    .composer {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+      padding-top: 8px;
+      background: var(--vscode-sideBar-background);
+    }
+    .context-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      flex-wrap: wrap;
+    }
+    .context-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(128,128,128,0.12);
+      border: 1px solid var(--vscode-widget-border, transparent);
+      cursor: default;
+    }
+    .context-pill.file { color: var(--vscode-textLink-foreground); cursor: pointer; }
+    label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+    textarea {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 68px;
+      max-height: 160px;
+      resize: vertical;
+      color: inherit;
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 12.5px;
+    }
+    textarea:focus {
+      outline: 1px solid var(--active-theme-accent);
+      border-color: var(--active-theme-accent);
+    }
+
+    .composer-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .submit-btn {
+      flex: 1;
+      padding: 7px 12px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--active-theme-accent);
+      color: #ffffff;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: filter 0.15s ease;
+    }
+    .submit-btn:hover { filter: brightness(1.1); }
+    .submit-btn:disabled { opacity: 0.5; cursor: default; }
+
+    .cancel-btn {
+      padding: 7px 12px;
+      border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.3));
+      border-radius: 6px;
+      background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.2));
+      color: var(--vscode-button-secondaryForeground, inherit);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .cancel-btn:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(128,128,128,0.3)); }
+    .cancel-btn:disabled { opacity: 0.4; cursor: default; }
   </style>
 </head>
 <body>
-  <div class="row">
-    <select id="model" aria-label="Ollama model"><option value="">Discovering models…</option></select>
-    <button id="refresh" title="Refresh models" aria-label="Refresh models">↻</button>
-    <button id="clear" title="Clear conversation" aria-label="Clear conversation">⌫</button>
+  <!-- Mode Selector Bar -->
+  <div class="mode-bar">
+    <button class="mode-btn active" data-mode="agent">⚡ Agent</button>
+    <button class="mode-btn" data-mode="plan">📋 Plan</button>
+    <button class="mode-btn" data-mode="ask">💬 Ask</button>
   </div>
-  <div id="status" role="status">Connecting to Ollama…</div>
+
+  <!-- Utility / Remote GPU Bar -->
+  <div class="utility-bar">
+    <button id="remoteBtn" class="remote-chip" title="Connect to Remote GPU host (SSH Tunnel)">
+      <span class="dot" id="remoteDot"></span>
+      <span id="remoteText">🖥️ Remote GPU</span>
+    </button>
+    <select id="model" aria-label="Selected Model"><option value="">Discovering models…</option></select>
+    <button id="refresh" class="icon-btn" title="Refresh models">↻</button>
+    <button id="clear" class="icon-btn" title="Clear conversation">⌫</button>
+  </div>
+
+  <!-- Status / Mode Info -->
+  <div id="status" role="status">Connecting to local and remote models…</div>
+
+  <!-- Messages & Tool Timeline -->
   <div id="messages" aria-live="polite"></div>
-  <label><input id="context" type="checkbox" checked> Include selection or current file</label>
-  <label><input id="workspaceContext" type="checkbox"> Retrieve related workspace code (trusted workspaces only)</label>
-  <label><input id="agentMode" type="checkbox"> Agent mode (read/search workspace only)</label>
-  <textarea id="prompt" placeholder="Ask your local model…" aria-label="Message"></textarea>
-  <div class="row actions"><button id="send">Send</button><button id="cancel" class="secondary" disabled>Cancel</button></div>
-  <div class="hint">Enter to send · Shift+Enter for a new line</div>
+
+  <!-- Composer Area -->
+  <div class="composer">
+    <div class="context-row">
+      <span id="activeFileChip" class="context-pill file" style="display:none;" title="Current open file">📄 <span id="activeFileName"></span></span>
+      <label><input id="context" type="checkbox" checked> Active editor context</label>
+      <label><input id="workspaceContext" type="checkbox"> Search workspace</label>
+    </div>
+    <textarea id="prompt" placeholder="Ask LocalForge to build, inspect, edit or automate code…" aria-label="Task prompt"></textarea>
+    <div class="composer-actions">
+      <button id="send" class="submit-btn">⚡ Run Agent</button>
+      <button id="cancel" class="cancel-btn" disabled>⏹ Stop</button>
+    </div>
+  </div>
+
   <script nonce="${nonce}">
     try {
       const vscode = acquireVsCodeApi();
+      let currentMode = 'agent';
+      let activeAssistantCard = null;
+      let activeThoughtBox = null;
+      let toolCards = new Map();
+
       const modelSelect = document.getElementById('model');
       const status = document.getElementById('status');
       const messages = document.getElementById('messages');
@@ -759,22 +1259,76 @@ function getHtml(webview: vscode.Webview): string {
       const send = document.getElementById('send');
       const cancel = document.getElementById('cancel');
       const clear = document.getElementById('clear');
-      let assistant;
+      const refresh = document.getElementById('refresh');
+      const remoteBtn = document.getElementById('remoteBtn');
+      const remoteDot = document.getElementById('remoteDot');
+      const remoteText = document.getElementById('remoteText');
+      const activeFileChip = document.getElementById('activeFileChip');
+      const activeFileName = document.getElementById('activeFileName');
 
-      document.getElementById('refresh').addEventListener('click', () => {
+      // Mode Switcher
+      document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          currentMode = btn.dataset.mode;
+          updateModeTheme(currentMode);
+          vscode.postMessage({ type: 'setMode', mode: currentMode });
+        });
+      });
+
+      function updateModeTheme(mode) {
+        if (mode === 'agent') {
+          document.documentElement.style.setProperty('--active-theme-accent', 'var(--agent-accent)');
+          send.innerHTML = '⚡ Run Agent';
+          prompt.placeholder = 'Ask LocalForge to inspect, write, edit files, or run commands…';
+        } else if (mode === 'plan') {
+          document.documentElement.style.setProperty('--active-theme-accent', 'var(--plan-accent)');
+          send.innerHTML = '📋 Generate Plan';
+          prompt.placeholder = 'Describe a feature or refactoring task to architect and plan…';
+        } else {
+          document.documentElement.style.setProperty('--active-theme-accent', 'var(--ask-accent)');
+          send.innerHTML = '💬 Ask';
+          prompt.placeholder = 'Ask questions about this code or search the workspace…';
+        }
+      }
+
+      // Remote GPU Click
+      remoteBtn.addEventListener('click', () => {
+        if (remoteBtn.dataset.connected === 'true') {
+          vscode.postMessage({ type: 'disconnectRemote' });
+        } else {
+          vscode.postMessage({ type: 'connectRemote' });
+        }
+      });
+
+      refresh.addEventListener('click', () => {
         status.textContent = 'Discovering models…';
         status.dataset.state = 'checking';
         vscode.postMessage({ type: 'refresh' });
       });
+
       clear.addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
       modelSelect.addEventListener('change', () => vscode.postMessage({ type: 'selectModel', model: modelSelect.value }));
       send.addEventListener('click', submit);
       cancel.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
-      prompt.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } });
+      prompt.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          submit();
+        }
+      });
 
       function submit() {
         if (!prompt.value.trim() || !modelSelect.value || send.disabled) return;
-        vscode.postMessage({ type: 'chat', model: modelSelect.value, prompt: prompt.value, includeContext: document.getElementById('context').checked, includeWorkspace: document.getElementById('workspaceContext').checked, agentMode: document.getElementById('agentMode').checked });
+        vscode.postMessage({
+          type: 'chat',
+          model: modelSelect.value,
+          prompt: prompt.value,
+          mode: currentMode,
+          includeContext: document.getElementById('context').checked,
+          includeWorkspace: document.getElementById('workspaceContext').checked
+        });
         prompt.value = '';
       }
 
@@ -803,6 +1357,14 @@ function getHtml(webview: vscode.Webview): string {
         });
 
         processed = escapeHtml(processed);
+        // Markdown headings
+        processed = processed.replace(/^### (.*$)/gim, '<h4>$1</h4>');
+        processed = processed.replace(/^## (.*$)/gim, '<h3>$1</h3>');
+        processed = processed.replace(/^# (.*$)/gim, '<h2>$1</h2>');
+        // Checkboxes in task lists
+        processed = processed.replace(/^- \\[x\\] (.*$)/gim, '<li><input type="checkbox" checked disabled> $1</li>');
+        processed = processed.replace(/^- \\[ \\] (.*$)/gim, '<li><input type="checkbox" disabled> $1</li>');
+
         const inlinePattern = new RegExp(String.fromCharCode(96) + '([^' + String.fromCharCode(96) + '\\\\n]+)' + String.fromCharCode(96), 'g');
         processed = processed.replace(inlinePattern, (m, c) => '<code>' + c + '</code>');
         processed = processed.replace(/\\*\\*([^\\*\\n]+)\\*\\*/g, '<strong>$1</strong>');
@@ -823,16 +1385,29 @@ function getHtml(webview: vscode.Webview): string {
         return processed;
       }
 
-      function addMessage(content, role) {
+      function addUserMessage(content) {
         const item = document.createElement('div');
-        item.className = 'message ' + role;
-        item.dataset.raw = content;
-        item.innerHTML = formatMarkdown(content);
+        item.className = 'msg user';
+        item.innerHTML = '<div class="msg-header">You</div><div>' + formatMarkdown(content) + '</div>';
         messages.appendChild(item);
         messages.scrollTop = messages.scrollHeight;
-        return item;
       }
 
+      function startAssistantMessage(mode) {
+        const item = document.createElement('div');
+        item.className = 'msg assistant';
+        const label = mode === 'agent' ? '⚡ LocalForge Copilot Agent' : (mode === 'plan' ? '📋 Architecture Plan' : '💬 LocalForge');
+        item.innerHTML = '<div class="msg-header">' + label + '</div><div class="assistant-body"></div>';
+        messages.appendChild(item);
+        activeAssistantCard = item.querySelector('.assistant-body');
+        activeThoughtBox = null;
+        toolCards.clear();
+        messages.scrollTop = messages.scrollHeight;
+        send.disabled = true;
+        cancel.disabled = false;
+      }
+
+      // Clipboard copy handler
       messages.addEventListener('click', (event) => {
         const target = event.target;
         if (target && target.classList.contains('copy-code-btn')) {
@@ -847,36 +1422,175 @@ function getHtml(webview: vscode.Webview): string {
         }
       });
 
+      // Window Message Listener
       window.addEventListener('message', event => {
         const data = event.data;
-        if (data.type === 'status') { status.textContent = data.message; status.dataset.state = data.state; }
+
+        if (data.type === 'status') {
+          status.textContent = data.message;
+          status.dataset.state = data.state;
+        }
+
+        if (data.type === 'remoteStatus') {
+          if (data.connected) {
+            remoteBtn.classList.add('connected');
+            remoteBtn.dataset.connected = 'true';
+            remoteDot.className = 'dot online';
+            remoteText.textContent = '🟢 ' + (data.profileName || 'Remote GPU');
+            remoteBtn.title = (data.gpuInfo || 'Connected via SSH tunnel') + '\\nClick to disconnect';
+          } else {
+            remoteBtn.classList.remove('connected');
+            remoteBtn.dataset.connected = 'false';
+            remoteDot.className = 'dot';
+            remoteText.textContent = '🖥️ Remote GPU';
+            remoteBtn.title = 'Click to connect Remote GPU host over SSH';
+          }
+        }
+
+        if (data.type === 'activeEditor') {
+          if (data.path) {
+            activeFileChip.style.display = 'inline-flex';
+            activeFileName.textContent = data.path.split('/').pop() || data.path;
+            activeFileChip.title = data.path;
+          } else {
+            activeFileChip.style.display = 'none';
+          }
+        }
+
         if (data.type === 'models') {
-          const previous = modelSelect.value; modelSelect.replaceChildren();
-          if (!data.models.length) { const option = document.createElement('option'); option.value = ''; option.textContent = 'No models found'; modelSelect.appendChild(option); }
-          for (const model of data.models) { const option = document.createElement('option'); option.value = model.name; option.textContent = model.displayName || model.name; modelSelect.appendChild(option); }
+          const previous = modelSelect.value;
+          modelSelect.replaceChildren();
+          if (!data.models.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No models found';
+            modelSelect.appendChild(option);
+          }
+          for (const model of data.models) {
+            const option = document.createElement('option');
+            option.value = model.name;
+            option.textContent = model.displayName || model.name;
+            modelSelect.appendChild(option);
+          }
           if (data.models.some(model => model.name === data.selectedModel)) modelSelect.value = data.selectedModel;
           else if (data.models.some(model => model.name === previous)) modelSelect.value = previous;
         }
+
         if (data.type === 'history') {
           messages.replaceChildren();
           if (Array.isArray(data.messages)) {
             for (const msg of data.messages) {
-              if (msg.role === 'user' || msg.role === 'assistant') {
-                addMessage(msg.content, msg.role);
+              if (msg.role === 'user') addUserMessage(msg.content);
+              else if (msg.role === 'assistant') {
+                const item = document.createElement('div');
+                item.className = 'msg assistant';
+                item.innerHTML = '<div class="msg-header">LocalForge</div><div class="assistant-body">' + formatMarkdown(msg.content) + '</div>';
+                messages.appendChild(item);
               }
             }
           }
-        }
-        if (data.type === 'userMessage') addMessage(data.content, 'user');
-        if (data.type === 'assistantStart') { assistant = addMessage('', 'assistant'); send.disabled = true; cancel.disabled = false; }
-        if (data.type === 'token' && assistant) {
-          assistant.dataset.raw = (assistant.dataset.raw || '') + data.content;
-          assistant.innerHTML = formatMarkdown(assistant.dataset.raw);
           messages.scrollTop = messages.scrollHeight;
         }
-        if (data.type === 'toolStatus') addMessage(data.content, 'tool');
-        if (data.type === 'assistantDone') { send.disabled = false; cancel.disabled = true; assistant = undefined; }
-        if (data.type === 'error') addMessage(data.message, 'error');
+
+        if (data.type === 'userMessage') {
+          addUserMessage(data.content);
+        }
+
+        if (data.type === 'assistantStart') {
+          startAssistantMessage(data.mode);
+        }
+
+        if (data.type === 'thought' && activeAssistantCard) {
+          if (!activeThoughtBox) {
+            const details = document.createElement('details');
+            details.className = 'thought-card';
+            details.open = true;
+            details.innerHTML = '<summary>💭 Agent Reasoning</summary><div class="thought-content"></div>';
+            activeAssistantCard.appendChild(details);
+            activeThoughtBox = details.querySelector('.thought-content');
+          }
+          activeThoughtBox.textContent = data.content;
+          messages.scrollTop = messages.scrollHeight;
+        }
+
+        if (data.type === 'toolStart' && activeAssistantCard) {
+          const id = data.id || ('tool-' + Date.now());
+          const card = document.createElement('div');
+          card.className = 'tool-card';
+          card.id = id;
+
+          let icon = '🔧';
+          let param = '';
+          if (data.name === 'search_workspace') { icon = '🔍'; param = data.args?.query || ''; }
+          else if (data.name === 'read_workspace_file') { icon = '📖'; param = data.args?.path || ''; }
+          else if (data.name === 'list_directory') { icon = '📁'; param = data.args?.path || 'root'; }
+          else if (data.name === 'write_workspace_file') { icon = '📝'; param = data.args?.path || ''; }
+          else if (data.name === 'edit_workspace_file') { icon = '✏️'; param = data.args?.path || ''; }
+          else if (data.name === 'run_command') { icon = '⚡'; param = data.args?.command || ''; }
+
+          card.innerHTML = '<div class="tool-header">'
+            + '<span class="tool-icon">' + icon + '</span>'
+            + '<span class="tool-name">' + escapeHtml(data.name) + '</span>'
+            + '<span class="tool-param">' + escapeHtml(param) + '</span>'
+            + '<span class="tool-status running">⏳ running</span>'
+            + '</div>'
+            + '<div class="tool-details" style="display:none;">' + escapeHtml(JSON.stringify(data.args, null, 2)) + '</div>';
+
+          card.querySelector('.tool-header').addEventListener('click', () => {
+            const det = card.querySelector('.tool-details');
+            det.style.display = det.style.display === 'none' ? 'block' : 'none';
+          });
+
+          activeAssistantCard.appendChild(card);
+          toolCards.set(id, card);
+          messages.scrollTop = messages.scrollHeight;
+        }
+
+        if (data.type === 'toolEnd') {
+          const card = toolCards.get(data.id);
+          if (card) {
+            const statusBadge = card.querySelector('.tool-status');
+            const det = card.querySelector('.tool-details');
+            if (data.error) {
+              statusBadge.className = 'tool-status error';
+              statusBadge.textContent = '✕ failed';
+              det.textContent += '\\n\\nError: ' + data.error;
+            } else {
+              statusBadge.className = 'tool-status done';
+              statusBadge.textContent = '✓ completed';
+              det.textContent += '\\n\\nResult: ' + JSON.stringify(data.result, null, 2);
+            }
+          }
+          messages.scrollTop = messages.scrollHeight;
+        }
+
+        if (data.type === 'token' && activeAssistantCard) {
+          let textContainer = activeAssistantCard.querySelector('.text-content');
+          if (!textContainer) {
+            textContainer = document.createElement('div');
+            textContainer.className = 'text-content';
+            textContainer.dataset.raw = '';
+            activeAssistantCard.appendChild(textContainer);
+          }
+          textContainer.dataset.raw += data.content;
+          textContainer.innerHTML = formatMarkdown(textContainer.dataset.raw);
+          messages.scrollTop = messages.scrollHeight;
+        }
+
+        if (data.type === 'assistantDone') {
+          send.disabled = false;
+          cancel.disabled = true;
+          activeAssistantCard = null;
+          activeThoughtBox = null;
+        }
+
+        if (data.type === 'error') {
+          const item = document.createElement('div');
+          item.className = 'msg assistant';
+          item.innerHTML = '<div class="msg-header" style="color:var(--vscode-errorForeground)">Error</div><div>' + escapeHtml(data.message) + '</div>';
+          messages.appendChild(item);
+          messages.scrollTop = messages.scrollHeight;
+        }
       });
 
       vscode.postMessage({ type: 'ready' });

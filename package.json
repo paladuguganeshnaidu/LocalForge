@@ -1,8 +1,8 @@
 {
   "name": "localforge-vscode",
-  "displayName": "LocalForge: Ollama Chat",
-  "description": "Discover local Ollama models and chat with them from VS Code.",
-  "version": "0.1.3",
+  "displayName": "LocalForge: Local Copilot Agent",
+  "description": "Autonomous Copilot coding agent powered by local Ollama & remote GPU models (Ask, Plan, and Agent modes).",
+  "version": "0.1.4",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {

@@ -28,7 +28,15 @@ test('isWebviewMessage accepts valid control messages', () => {
   assert.equal(isWebviewMessage({ type: 'refresh' }), true);
   assert.equal(isWebviewMessage({ type: 'cancel' }), true);
   assert.equal(isWebviewMessage({ type: 'clear' }), true);
+  assert.equal(isWebviewMessage({ type: 'connectRemote' }), true);
+  assert.equal(isWebviewMessage({ type: 'disconnectRemote' }), true);
+  assert.equal(isWebviewMessage({ type: 'configureRemote' }), true);
+  assert.equal(isWebviewMessage({ type: 'getRemoteStatus' }), true);
   assert.equal(isWebviewMessage({ type: 'selectModel', model: 'ollama:qwen2.5-coder' }), true);
+  assert.equal(isWebviewMessage({ type: 'setMode', mode: 'agent' }), true);
+  assert.equal(isWebviewMessage({ type: 'setMode', mode: 'plan' }), true);
+  assert.equal(isWebviewMessage({ type: 'setMode', mode: 'ask' }), true);
+  assert.equal(isWebviewMessage({ type: 'setMode', mode: 'invalid' }), false);
 });
 
 test('isWebviewMessage validates chat payloads and rejects invalid inputs', () => {
