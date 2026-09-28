@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LocalForge: Local Copilot Agent",
   "description": "Autonomous Copilot coding agent powered by local Ollama & remote GPU models (Ask, Plan, and Agent modes).",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
@@ -32,6 +32,10 @@
     "onCommand:localforge.connectRemote",
     "onCommand:localforge.disconnectRemote",
     "onCommand:localforge.remoteGpuStatus",
+    "onCommand:localforge.diagnose",
+    "onCommand:localforge.continueTask",
+    "onCommand:localforge.newSession",
+    "onCommand:localforge.reindexWorkspace",
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
@@ -90,6 +94,22 @@
       {
         "command": "localforge.remoteGpuStatus",
         "title": "LocalForge: Show Remote GPU Status"
+      },
+      {
+        "command": "localforge.diagnose",
+        "title": "LocalForge: Diagnose Installation"
+      },
+      {
+        "command": "localforge.continueTask",
+        "title": "LocalForge: Continue Previous Task"
+      },
+      {
+        "command": "localforge.newSession",
+        "title": "LocalForge: New Session"
+      },
+      {
+        "command": "localforge.reindexWorkspace",
+        "title": "LocalForge: Re-index Workspace Context"
       }
     ],
     "menus": {

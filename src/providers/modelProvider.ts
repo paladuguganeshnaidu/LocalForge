@@ -1,9 +1,16 @@
+import { ModelCapabilities, ModelSource } from './modelCapabilities';
+
 export interface LocalModel {
+  id?: string;
   name: string;
   displayName?: string;
   providerId?: string;
+  source?: ModelSource;
   size?: number;
   modifiedAt?: string;
+  capabilities?: ModelCapabilities;
+  endpoint?: string;
+  gpuInfo?: string;
 }
 
 export interface ChatMessage {

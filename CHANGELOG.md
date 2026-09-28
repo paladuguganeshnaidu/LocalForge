@@ -2,6 +2,47 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.1.5] - 2026-09-28
+
+### Added
+- **Architectural Modularization**:
+  - Reorganized codebase into clean, dedicated modules: `core/`, `providers/`, `context/`, `agent/`, `editing/`, `remote/`, `completion/`, and `ui/`.
+  - Transformed `extension.ts` into a lightweight, focused bootstrapping and command registration layer.
+- **Model Capability & Unified Registry**:
+  - Implemented `ModelCapabilities` detection (chat, streaming, tool calling, structured output, code completion, vision, reasoning, context window, system prompt).
+  - Built unified `ModelRegistry` aggregating local Ollama, OpenAI-compatible runtimes, and SSH remote GPU endpoints with real-time health monitoring.
+  - Implemented capability-aware task router (`chat`, `edit`, `agent`, `completion`) with intelligent auto-selection and rationale reporting.
+- **Context Engine & Workspace Indexer**:
+  - Created bounded, hierarchical `ContextEngine` integrating active selection, current file, open tabs, diagnostics, and lexical retrieval.
+  - Built persistent `WorkspaceIndexer` respecting `.gitignore` exclusions and binary boundaries.
+  - Added token budgeting, source tracking, deduplication, and context summary previews.
+- **Agent Engine & Permission System**:
+  - Refactored agent execution into `AgentEngine`, `AgentLoop`, and MCP-ready `ToolRegistry`.
+  - Added explicit lifecycle tracking (`planning`, `executing`, `waiting_for_approval`, `completed`, `failed`, `cancelled`).
+  - Implemented `PermissionManager` with tool categorization (`read`, `edit`, `execute`), permission modes (`allow_safe_auto`, `always_ask`, `ask_once_per_session`), and shell command safety validation.
+- **Patch-First Editing & Multi-File Composer**:
+  - Guaranteed safe writes: agent proposals generate unified diffs and validate original file SHA-256 hashes prior to writing.
+  - Added `StaleEditError` protection to abort writes if files changed while diff reviews are open.
+  - Implemented Composer-style multi-file editing with diff inspection and selective approval.
+- **Validation & Auto-Repair Loop**:
+  - Automated project detection for Node.js, Python, Rust, Go, Java, and C/C++.
+  - Post-edit validation loop running project tests and executing up to 3 automatic repair attempts upon test failures.
+- **Remote GPU Telemetry & Fit Estimation**:
+  - Structured parser for `nvidia-smi` telemetry across single and multi-GPU configurations.
+  - Memory fit estimator classifying model requirements into "Likely fits", "May be memory constrained", or "Exceeds available VRAM".
+- **Minimal Antigravity-Style Chat UI**:
+  - Redesigned chat interface using native VS Code theme tokens, clean layout, and minimal chrome.
+  - Segmented mode bar for `⚡ Agent`, `📋 Plan`, and `💬 Ask`.
+  - Live agent activity chips (`✓ search_workspace`, `✓ read_file`, `⟳ editing`).
+  - Built-in settings drawer for runtime endpoints, remote GPU profiles, auto-approval permissions, and feature toggles.
+- **Session & Task Continuity**:
+  - Workspace-scoped `SessionManager` and `TaskManager`.
+  - Added `LocalForge: Continue Previous Task` command to resume context from previous agent runs.
+- **Installation Diagnostics**:
+  - Added `LocalForge: Diagnose Installation` (`localforge.diagnose`) command checking workspace trust, Ollama reachability, model capabilities, SSH tunnels, GPU state, and context indexes.
+- **Test Suite Expansion**:
+  - Expanded unit test coverage to 42 automated tests covering capabilities, diffing, patch safety, permissions, GPU status, sessions, and agent loops.
+
 ## [0.1.4] - 2026-09-28
 
 ### Added
@@ -23,46 +64,28 @@ All notable changes to the LocalForge extension are documented in this file.
 ## [0.1.3] - 2026-09-28
 
 ### Fixed
-- **Webview CSP & Communication Bridge**: Added `${webview.cspSource}` to `script-src` and `style-src` in the Webview Content Security Policy. Previously, omitting `cspSource` blocked VS Code's internal communication runtime and prevented `acquireVsCodeApi()` from running, leaving the webview indefinitely stuck on static placeholder text ("Discovering models…").
-- **Instant Model Delivery**: When the webview announces readiness (`ready`), cached models are now sent immediately in 0 ms, eliminating UI loading delays while background refresh confirms live status.
-- **Fail-Safe UI Error Boundary**: Wrapped the webview initialization script in a `try/catch` error boundary that displays any script or DOM error directly on the status card instead of hanging silently.
-- **Optimized Provider Detection**: Reduced connection timeouts on offline OpenAI-compatible endpoints from 2–5s to 1s, preventing closed local ports from delaying Ollama discovery.
+- **Webview CSP & Communication Bridge**: Added `${webview.cspSource}` to `script-src` and `style-src` in the Webview Content Security Policy.
+- **Instant Model Delivery**: When the webview announces readiness (`ready`), cached models are now sent immediately in 0 ms.
+- **Fail-Safe UI Error Boundary**: Wrapped the webview initialization script in a `try/catch` error boundary that displays any script or DOM error directly on the status card.
+- **Optimized Provider Detection**: Reduced connection timeouts on offline OpenAI-compatible endpoints from 2–5s to 1s.
 - **Heartbeat Retry**: Added an automatic handshake heartbeat if initial iframe mounting misses early message delivery.
 
 ## [0.1.2] - 2026-09-28
 
 ### Fixed
-- **VS Code Webview Loading**: Added missing `"type": "webview"` to view contributions in `package.json`. In previous versions, VS Code treated the view as a tree view, preventing `resolveWebviewView` from being called and breaking the sidebar UI.
-- **Model Discovery Lifecycle**: Fixed an early-return bug in `refresh()` that aborted discovery when the view was not yet visible. Models are now discovered and cached in the background upon extension startup.
-- **Handshake Order**: Attached webview message listeners prior to setting HTML content to prevent dropped initial handshake events.
-- **Ollama Detection**: Added fallback probes across `/api/version`, `/api/tags`, and `/` with timeouts for reverse proxies and various Ollama configurations.
+- **VS Code Webview Loading**: Added missing `"type": "webview"` to view contributions in `package.json`.
+- **Model Discovery Lifecycle**: Fixed an early-return bug in `refresh()` that aborted discovery when the view was not yet visible.
+- **Handshake Order**: Attached webview message listeners prior to setting HTML content.
+- **Ollama Detection**: Added fallback probes across `/api/version`, `/api/tags`, and `/`.
 - **Composite Routing**: Auto-hydrates model routes on cache miss before raising errors.
 
 ### Added
-- **Explain Selected Code**: New `localforge.explain` command streams contextual code explanations directly into the sidebar chat.
-- **Fix Selected Code or Diagnostics**: New `localforge.fix` command automatically queries active language compiler and linter errors at the cursor or selection, proposing reviewed fixes in VS Code's diff editor (`vscode.diff`).
-- **Editor Context Menus**: Added right-click editor context menu actions for **Explain**, **Fix**, and **Propose Edit**.
-- **Conversation Persistence**: Chat history is now saved per-workspace in `workspaceState` and restored across reloads.
-- **Clear Conversation**: Added `⌫ Clear` control in the sidebar to reset active model conversations.
-- **Safe Markdown Rendering**: Code snippets render with language badges and one-click **Copy** buttons.
-- **Traversal Protection**: Added `validateRelativeWorkspacePath` to prevent directory traversal in agent read tools.
+- **Explain Selected Code**: New `localforge.explain` command.
+- **Fix Selected Code or Diagnostics**: New `localforge.fix` command.
+- **Editor Context Menus**: Added right-click editor context menu actions.
+- **Conversation Persistence**: Chat history saved per-workspace.
+- **Clear Conversation**: Added `⌫ Clear` control in sidebar.
+- **Safe Markdown Rendering**: Code snippets render with language badges and copy buttons.
+- **Traversal Protection**: Added `validateRelativeWorkspacePath`.
 - **Official MIT License**: Included repository `LICENSE` file.
-- **Unit Testing**: Expanded test suite to 20 unit tests with 100% pass rate.
-
-## [0.1.1] - 2026-09-28
-
-### Added
-- Remote GPU host configuration over secured SSH loopback tunnels.
-- Pinned SHA-256 host key verification and SecretStorage credential storage.
-- Read-only GPU status probe (`nvidia-smi`).
-- OpenAI-compatible provider endpoints (LM Studio, llama.cpp server, vLLM).
-- Safe initial agent mode with allow-listed search and read tools.
-
-## [0.1.0] - 2026-09-28
-
-### Added
-- Initial local-first VS Code extension slice.
-- Local Ollama server auto-detection and model listing.
-- Streaming chat sidebar.
-- Diff-reviewed single-file edit proposals.
-- Opt-in inline autocomplete completions.
+- **Unit Testing**: Initial suite of 20 unit tests.

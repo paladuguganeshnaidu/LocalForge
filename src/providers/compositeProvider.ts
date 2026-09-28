@@ -1,4 +1,5 @@
 import { ChatMessage, LocalModel, ModelProvider, ModelToolDefinition } from './modelProvider';
+import { inferModelCapabilities } from './modelCapabilities';
 
 export class CompositeProvider implements ModelProvider {
   readonly id = 'localforge';
@@ -26,11 +27,14 @@ export class CompositeProvider implements ModelProvider {
       for (const model of item.value.models) {
         const key = `${item.value.provider.id}:${encodeURIComponent(model.name)}`;
         this.discovered.set(key, { provider: item.value.provider, actualName: model.name });
+        const capabilities = model.capabilities ?? inferModelCapabilities(model.name, model.size);
         output.push({
           ...model,
+          id: key,
           name: key,
           displayName: `${model.name} · ${item.value.provider.id}`,
-          providerId: item.value.provider.id
+          providerId: item.value.provider.id,
+          capabilities
         });
       }
     }
@@ -69,5 +73,9 @@ export class CompositeProvider implements ModelProvider {
   removeProvider(providerId: string): void {
     this.providers = this.providers.filter((provider) => provider.id !== providerId);
     for (const [key, route] of this.discovered) if (route.provider.id === providerId) this.discovered.delete(key);
+  }
+
+  getProviders(): ModelProvider[] {
+    return [...this.providers];
   }
 }
