@@ -30,7 +30,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
   async detect(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(2000) });
+      const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(1000) });
       return response.ok;
     } catch {
       return false;
@@ -38,7 +38,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
   }
 
   async listModels(): Promise<LocalModel[]> {
-    const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(2500) });
     if (!response.ok) throw new Error(`${this.id} returned HTTP ${response.status} while listing models.`);
     const data = await response.json() as ModelsResponse;
     return (data.data ?? []).flatMap((model) => model.id ? [{ name: model.id }] : []);

@@ -502,6 +502,16 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       if (!isWebviewMessage(message)) return;
       if (message.type === 'ready' || message.type === 'refresh') {
+        if (this.models.length > 0) {
+          this.post({ type: 'models', models: this.models, selectedModel: this.selectedModel });
+          const history = this.conversations.get(this.selectedModel ?? '') ?? [];
+          this.post({ type: 'history', messages: history });
+          this.post({
+            type: 'status',
+            state: 'ready',
+            message: `Connected to ${[...new Set(this.models.map((model) => model.providerId))].join(', ')} · ${this.models.length} model${this.models.length === 1 ? '' : 's'} found`
+          });
+        }
         await this.refresh();
         const history = this.conversations.get(this.selectedModel ?? '') ?? [];
         this.post({ type: 'history', messages: history });
@@ -521,7 +531,7 @@ class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'chat') void this.chat(message);
     });
-    view.webview.html = getHtml();
+    view.webview.html = getHtml(view.webview);
   }
 
   async sendUserPrompt(promptText: string, options: { includeContext?: boolean; includeWorkspace?: boolean; agentMode?: boolean } = {}): Promise<void> {
@@ -683,14 +693,15 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
     && typeof message.agentMode === 'boolean';
 }
 
-function getHtml(): string {
-  const nonce = randomBytes(16).toString('base64');
+function getHtml(webview: vscode.Webview): string {
+  const nonce = randomBytes(16).toString('hex');
+  const cspSource = webview.cspSource;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${cspSource} 'unsafe-inline';">
   <style>
     :root { color-scheme: light dark; }
     body { padding: 12px; color: var(--vscode-foreground); font: 13px var(--vscode-font-family); }
@@ -739,130 +750,149 @@ function getHtml(): string {
   <div class="row actions"><button id="send">Send</button><button id="cancel" class="secondary" disabled>Cancel</button></div>
   <div class="hint">Enter to send · Shift+Enter for a new line</div>
   <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    const modelSelect = document.getElementById('model');
-    const status = document.getElementById('status');
-    const messages = document.getElementById('messages');
-    const prompt = document.getElementById('prompt');
-    const send = document.getElementById('send');
-    const cancel = document.getElementById('cancel');
-    const clear = document.getElementById('clear');
-    let assistant;
+    try {
+      const vscode = acquireVsCodeApi();
+      const modelSelect = document.getElementById('model');
+      const status = document.getElementById('status');
+      const messages = document.getElementById('messages');
+      const prompt = document.getElementById('prompt');
+      const send = document.getElementById('send');
+      const cancel = document.getElementById('cancel');
+      const clear = document.getElementById('clear');
+      let assistant;
 
-    document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
-    clear.addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
-    modelSelect.addEventListener('change', () => vscode.postMessage({ type: 'selectModel', model: modelSelect.value }));
-    send.addEventListener('click', submit);
-    cancel.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
-    prompt.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } });
+      document.getElementById('refresh').addEventListener('click', () => {
+        status.textContent = 'Discovering models…';
+        status.dataset.state = 'checking';
+        vscode.postMessage({ type: 'refresh' });
+      });
+      clear.addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
+      modelSelect.addEventListener('change', () => vscode.postMessage({ type: 'selectModel', model: modelSelect.value }));
+      send.addEventListener('click', submit);
+      cancel.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
+      prompt.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } });
 
-    function submit() {
-      if (!prompt.value.trim() || !modelSelect.value || send.disabled) return;
-      vscode.postMessage({ type: 'chat', model: modelSelect.value, prompt: prompt.value, includeContext: document.getElementById('context').checked, includeWorkspace: document.getElementById('workspaceContext').checked, agentMode: document.getElementById('agentMode').checked });
-      prompt.value = '';
-    }
-
-    function escapeHtml(str) {
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-    }
-
-    function escapeAttr(str) {
-      return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#039;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    function formatMarkdown(text) {
-      if (!text) return '';
-      let completeText = text;
-      const fence = String.fromCharCode(96, 96, 96);
-      const fenceCount = completeText.split(fence).length - 1;
-      if (fenceCount % 2 !== 0) {
-        completeText += '\n' + fence;
+      function submit() {
+        if (!prompt.value.trim() || !modelSelect.value || send.disabled) return;
+        vscode.postMessage({ type: 'chat', model: modelSelect.value, prompt: prompt.value, includeContext: document.getElementById('context').checked, includeWorkspace: document.getElementById('workspaceContext').checked, agentMode: document.getElementById('agentMode').checked });
+        prompt.value = '';
       }
-      const codeBlocks = [];
-      const codeBlockPattern = new RegExp(fence + '([a-zA-Z0-9_-]*)\\r?\\n([\\s\\S]*?)' + fence, 'g');
-      let processed = completeText.replace(codeBlockPattern, (match, lang, code) => {
-        const placeholder = '__CODE_BLOCK_' + codeBlocks.length + '__';
-        codeBlocks.push({ lang: lang || 'code', code: code.replace(/\r?\n$/, '') });
-        return placeholder;
+
+      function escapeHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+      }
+
+      function escapeAttr(str) {
+        return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#039;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+
+      function formatMarkdown(text) {
+        if (!text) return '';
+        let completeText = text;
+        const fence = String.fromCharCode(96, 96, 96);
+        const fenceCount = completeText.split(fence).length - 1;
+        if (fenceCount % 2 !== 0) {
+          completeText += '\\n' + fence;
+        }
+        const codeBlocks = [];
+        const codeBlockPattern = new RegExp(fence + '([a-zA-Z0-9_-]*)\\\\r?\\\\n([\\\\s\\\\S]*?)' + fence, 'g');
+        let processed = completeText.replace(codeBlockPattern, (match, lang, code) => {
+          const placeholder = '__CODE_BLOCK_' + codeBlocks.length + '__';
+          codeBlocks.push({ lang: lang || 'code', code: code.replace(/\\r?\\n$/, '') });
+          return placeholder;
+        });
+
+        processed = escapeHtml(processed);
+        const inlinePattern = new RegExp(String.fromCharCode(96) + '([^' + String.fromCharCode(96) + '\\\\n]+)' + String.fromCharCode(96), 'g');
+        processed = processed.replace(inlinePattern, (m, c) => '<code>' + c + '</code>');
+        processed = processed.replace(/\\*\\*([^\\*\\n]+)\\*\\*/g, '<strong>$1</strong>');
+        processed = processed.replace(/(^|[^*])\\*([^*\\n]+)\\*([^*]|$)/g, '$1<em>$2</em>$3');
+        processed = processed.replace(/^[\\t ]*[-*] (.+)$/gm, '<li>$1</li>');
+        processed = processed.replace(/(<li>[\\s\\S]*?<\\/li>)/g, '<ul>$1</ul>');
+        processed = processed.replace(/<\\/ul>\\s*<ul>/g, '');
+        processed = processed.replace(/\\r?\\n/g, '<br>');
+
+        for (let i = 0; i < codeBlocks.length; i++) {
+          const item = codeBlocks[i];
+          const escapedCode = escapeHtml(item.code);
+          const attrCode = escapeAttr(item.code);
+          const blockHtml = '<div class="code-container"><div class="code-header"><span>' + escapeHtml(item.lang) + '</span><button class="copy-code-btn" data-code="' + attrCode + '">Copy</button></div><pre><code>' + escapedCode + '</code></pre></div>';
+          processed = processed.replace('__CODE_BLOCK_' + i + '__', blockHtml);
+        }
+
+        return processed;
+      }
+
+      function addMessage(content, role) {
+        const item = document.createElement('div');
+        item.className = 'message ' + role;
+        item.dataset.raw = content;
+        item.innerHTML = formatMarkdown(content);
+        messages.appendChild(item);
+        messages.scrollTop = messages.scrollHeight;
+        return item;
+      }
+
+      messages.addEventListener('click', (event) => {
+        const target = event.target;
+        if (target && target.classList.contains('copy-code-btn')) {
+          const code = target.getAttribute('data-code');
+          if (code !== null) {
+            navigator.clipboard.writeText(code).then(() => {
+              const original = target.textContent;
+              target.textContent = 'Copied!';
+              setTimeout(() => { target.textContent = original; }, 1500);
+            }).catch(() => {});
+          }
+        }
       });
 
-      processed = escapeHtml(processed);
-      const inlinePattern = new RegExp(String.fromCharCode(96) + '([^' + String.fromCharCode(96) + '\\n]+)' + String.fromCharCode(96), 'g');
-      processed = processed.replace(inlinePattern, (m, c) => '<code>' + c + '</code>');
-      processed = processed.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-      processed = processed.replace(/(^|[^*])\*([^*\n]+)\*([^*]|$)/g, '$1<em>$2</em>$3');
-      processed = processed.replace(/^[\t ]*[-*] (.+)$/gm, '<li>$1</li>');
-      processed = processed.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
-      processed = processed.replace(/<\/ul>\s*<ul>/g, '');
-      processed = processed.replace(/\r?\n/g, '<br>');
-
-      for (let i = 0; i < codeBlocks.length; i++) {
-        const item = codeBlocks[i];
-        const escapedCode = escapeHtml(item.code);
-        const attrCode = escapeAttr(item.code);
-        const blockHtml = '<div class="code-container"><div class="code-header"><span>' + escapeHtml(item.lang) + '</span><button class="copy-code-btn" data-code="' + attrCode + '">Copy</button></div><pre><code>' + escapedCode + '</code></pre></div>';
-        processed = processed.replace('__CODE_BLOCK_' + i + '__', blockHtml);
-      }
-
-      return processed;
-    }
-
-    function addMessage(content, role) {
-      const item = document.createElement('div');
-      item.className = 'message ' + role;
-      item.dataset.raw = content;
-      item.innerHTML = formatMarkdown(content);
-      messages.appendChild(item);
-      messages.scrollTop = messages.scrollHeight;
-      return item;
-    }
-
-    messages.addEventListener('click', (event) => {
-      const target = event.target;
-      if (target && target.classList.contains('copy-code-btn')) {
-        const code = target.getAttribute('data-code');
-        if (code !== null) {
-          navigator.clipboard.writeText(code).then(() => {
-            const original = target.textContent;
-            target.textContent = 'Copied!';
-            setTimeout(() => { target.textContent = original; }, 1500);
-          }).catch(() => {});
+      window.addEventListener('message', event => {
+        const data = event.data;
+        if (data.type === 'status') { status.textContent = data.message; status.dataset.state = data.state; }
+        if (data.type === 'models') {
+          const previous = modelSelect.value; modelSelect.replaceChildren();
+          if (!data.models.length) { const option = document.createElement('option'); option.value = ''; option.textContent = 'No models found'; modelSelect.appendChild(option); }
+          for (const model of data.models) { const option = document.createElement('option'); option.value = model.name; option.textContent = model.displayName || model.name; modelSelect.appendChild(option); }
+          if (data.models.some(model => model.name === data.selectedModel)) modelSelect.value = data.selectedModel;
+          else if (data.models.some(model => model.name === previous)) modelSelect.value = previous;
         }
-      }
-    });
-
-    window.addEventListener('message', event => {
-      const data = event.data;
-      if (data.type === 'status') { status.textContent = data.message; status.dataset.state = data.state; }
-      if (data.type === 'models') {
-        const previous = modelSelect.value; modelSelect.replaceChildren();
-        if (!data.models.length) { const option = document.createElement('option'); option.value = ''; option.textContent = 'No models found'; modelSelect.appendChild(option); }
-        for (const model of data.models) { const option = document.createElement('option'); option.value = model.name; option.textContent = model.displayName || model.name; modelSelect.appendChild(option); }
-        if (data.models.some(model => model.name === data.selectedModel)) modelSelect.value = data.selectedModel;
-        else if (data.models.some(model => model.name === previous)) modelSelect.value = previous;
-      }
-      if (data.type === 'history') {
-        messages.replaceChildren();
-        if (Array.isArray(data.messages)) {
-          for (const msg of data.messages) {
-            if (msg.role === 'user' || msg.role === 'assistant') {
-              addMessage(msg.content, msg.role);
+        if (data.type === 'history') {
+          messages.replaceChildren();
+          if (Array.isArray(data.messages)) {
+            for (const msg of data.messages) {
+              if (msg.role === 'user' || msg.role === 'assistant') {
+                addMessage(msg.content, msg.role);
+              }
             }
           }
         }
+        if (data.type === 'userMessage') addMessage(data.content, 'user');
+        if (data.type === 'assistantStart') { assistant = addMessage('', 'assistant'); send.disabled = true; cancel.disabled = false; }
+        if (data.type === 'token' && assistant) {
+          assistant.dataset.raw = (assistant.dataset.raw || '') + data.content;
+          assistant.innerHTML = formatMarkdown(assistant.dataset.raw);
+          messages.scrollTop = messages.scrollHeight;
+        }
+        if (data.type === 'toolStatus') addMessage(data.content, 'tool');
+        if (data.type === 'assistantDone') { send.disabled = false; cancel.disabled = true; assistant = undefined; }
+        if (data.type === 'error') addMessage(data.message, 'error');
+      });
+
+      vscode.postMessage({ type: 'ready' });
+
+      setTimeout(() => {
+        if (modelSelect.options.length <= 1 && !modelSelect.value) {
+          vscode.postMessage({ type: 'ready' });
+        }
+      }, 1200);
+    } catch (err) {
+      const status = document.getElementById('status');
+      if (status) {
+        status.textContent = 'Webview initialization error: ' + (err && err.message ? err.message : String(err));
+        status.dataset.state = 'error';
       }
-      if (data.type === 'userMessage') addMessage(data.content, 'user');
-      if (data.type === 'assistantStart') { assistant = addMessage('', 'assistant'); send.disabled = true; cancel.disabled = false; }
-      if (data.type === 'token' && assistant) {
-        assistant.dataset.raw = (assistant.dataset.raw || '') + data.content;
-        assistant.innerHTML = formatMarkdown(assistant.dataset.raw);
-        messages.scrollTop = messages.scrollHeight;
-      }
-      if (data.type === 'toolStatus') addMessage(data.content, 'tool');
-      if (data.type === 'assistantDone') { send.disabled = false; cancel.disabled = true; assistant = undefined; }
-      if (data.type === 'error') addMessage(data.message, 'error');
-    });
-    vscode.postMessage({ type: 'ready' });
+    }
   </script>
 </body>
 </html>`;

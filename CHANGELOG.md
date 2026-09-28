@@ -2,6 +2,15 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.1.3] - 2026-09-28
+
+### Fixed
+- **Webview CSP & Communication Bridge**: Added `${webview.cspSource}` to `script-src` and `style-src` in the Webview Content Security Policy. Previously, omitting `cspSource` blocked VS Code's internal communication runtime and prevented `acquireVsCodeApi()` from running, leaving the webview indefinitely stuck on static placeholder text ("Discovering models…").
+- **Instant Model Delivery**: When the webview announces readiness (`ready`), cached models are now sent immediately in 0 ms, eliminating UI loading delays while background refresh confirms live status.
+- **Fail-Safe UI Error Boundary**: Wrapped the webview initialization script in a `try/catch` error boundary that displays any script or DOM error directly on the status card instead of hanging silently.
+- **Optimized Provider Detection**: Reduced connection timeouts on offline OpenAI-compatible endpoints from 2–5s to 1s, preventing closed local ports from delaying Ollama discovery.
+- **Heartbeat Retry**: Added an automatic handshake heartbeat if initial iframe mounting misses early message delivery.
+
 ## [0.1.2] - 2026-09-28
 
 ### Fixed
