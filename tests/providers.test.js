@@ -1,0 +1,78 @@
+const assert = require('node:assert/strict');
+const http = require('node:http');
+const { after, before, test } = require('node:test');
+const { CompositeProvider } = require('../dist/providers/compositeProvider.js');
+const { OpenAiCompatibleProvider } = require('../dist/providers/openAiCompatibleProvider.js');
+const { routeModel } = require('../dist/providers/modelRouter.js');
+
+let server;
+let baseUrl;
+
+before(async () => {
+  server = http.createServer((request, response) => {
+    if (request.url === '/v1/models') {
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end('{"data":[{"id":"local-model"}]}');
+      return;
+    }
+    if (request.url === '/v1/chat/completions') {
+      let body = '';
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        if (!JSON.parse(body).stream) {
+          response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: {
+            role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'search_workspace', arguments: '{"query":"local"}' } }]
+          } }] }));
+          return;
+        }
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.write('data: {"choices":[{"delta":{"content":"Local "}}]}\n\n');
+        response.write('data: {"choices":[{"delta":{"content":"answer"}}]}\n\n');
+        response.end('data: [DONE]\n\n');
+      });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+});
+
+after(async () => {
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+});
+
+test('discovers and streams from an OpenAI-compatible server', async () => {
+  const provider = new OpenAiCompatibleProvider('test-compatible', baseUrl);
+  assert.equal(await provider.detect(), true);
+  assert.deepEqual(await provider.listModels(), [{ name: 'local-model' }]);
+  let output = '';
+  await provider.streamChat('local-model', [{ role: 'user', content: 'hello' }], (token) => { output += token; });
+  assert.equal(output, 'Local answer');
+});
+
+test('returns non-streaming function tool calls from an OpenAI-compatible server', async () => {
+  const provider = new OpenAiCompatibleProvider('test-compatible', baseUrl);
+  const message = await provider.chatWithTools('local-model', [{ role: 'user', content: 'search' }], []);
+  assert.equal(message.tool_calls[0].function.name, 'search_workspace');
+  assert.equal(message.tool_calls[0].function.arguments, '{"query":"local"}');
+});
+
+test('routes namespaced composite model ids to the provider that discovered them', async () => {
+  const composite = new CompositeProvider([new OpenAiCompatibleProvider('test-compatible', baseUrl)]);
+  const models = await composite.listModels();
+  assert.equal(models[0].providerId, 'test-compatible');
+  assert.equal(models[0].displayName, 'local-model · test-compatible');
+  let output = '';
+  await composite.streamChat(models[0].name, [{ role: 'user', content: 'hello' }], (token) => { output += token; });
+  assert.equal(output, 'Local answer');
+});
+
+test('model routing honors a task preference and falls back to the explicit selection', () => {
+  const models = [
+    { name: 'ollama:qwen', providerId: 'ollama' },
+    { name: 'lmstudio:codestral', providerId: 'lmstudio' }
+  ];
+  assert.equal(routeModel(models, 'edit', { edit: 'lmstudio' }, 'ollama:qwen').name, 'lmstudio:codestral');
+  assert.equal(routeModel(models, 'chat', {}, 'ollama:qwen').name, 'ollama:qwen');
+  assert.equal(routeModel(models, 'completion', {}, 'missing').name, 'ollama:qwen');
+});

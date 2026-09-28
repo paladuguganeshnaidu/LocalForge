@@ -1,33 +1,57 @@
 # LocalForge
 
-LocalForge is a VS Code extension for discovering locally installed Ollama models and chatting with them from a sidebar. The first release uses an extensible `ModelProvider` interface so other local or remote runtimes can be added without changing the chat UI.
+LocalForge is a local-first VS Code coding assistant. It discovers models already running on your machine, routes chat and code tasks through provider adapters, and can optionally connect to a remote Ollama server through a pinned SSH tunnel.
 
-## Features
+## Implemented features
 
-- Detects an Ollama server at `http://127.0.0.1:11434` on activation.
-- Lists installed Ollama models and lets you choose one in the sidebar.
-- Streams local chat responses into the conversation.
-- Includes selected code, or the active file when there is no selection, when context is enabled.
-- Reports unavailable Ollama servers, empty model libraries, and request errors in the sidebar.
-- Supports a custom Ollama URL through the `localforge.ollama.baseUrl` setting.
+- Automatically detects local Ollama and configured OpenAI-compatible servers, then lists their installed models together.
+- Streams chat responses with safe markdown rendering, language badges, and one-click code copy buttons.
+- Persistent per-workspace conversation history with quick clear/reset controls.
+- Context-aware: includes selected code, current file, or local lexical workspace retrieval.
+- Commands for code review and edits:
+  - **LocalForge: Explain Selected Code**: Streams explanation directly into chat sidebar.
+  - **LocalForge: Fix Selected Code or Diagnostics**: Automatically inspects editor compiler errors/warnings, proposes fixes in VS Code diff review.
+  - **LocalForge: Propose a Diff-Reviewed Edit**: Arbitrary instruction-driven diff editing with explicit Apply/Discard.
+  - **LocalForge: Search Workspace Context**: Interactive lexical snippet finder.
+- Integrated right-click editor context menu for Explain, Fix, and Propose Edit.
+- Routes chat, edit, agent, and completion tasks through explicit model preferences, with the sidebar selection as a fallback.
+- Supports named SSH remote profiles using a private key or password with SecretStorage and host key pinning.
+- Forwards remote Ollama over a loopback-only local port with optional read-only `nvidia-smi` status.
 
-The default Ollama address is loopback. If you change it to another host, prompts and enabled editor context are sent to that configured Ollama server.
+## First run
 
-## Build
+1. Install and start Ollama, or start a compatible local OpenAI API server.
+2. Open the LocalForge activity-bar icon, refresh models, and select one.
+3. Use right-click editor context menu or Command Palette to **Explain**, **Fix**, or **Propose an Edit**.
+4. Enable **LocalForge › Autocomplete: Enabled** only if you want inline suggestions; it is disabled by default.
+5. To use a remote GPU host, run **LocalForge: Configure Remote GPU Host**, then **LocalForge: Connect to Remote GPU Host**.
+
+## Providers and routing
+
+The default Ollama endpoint is `http://127.0.0.1:11434`. Local OpenAI-compatible endpoints default to `http://127.0.0.1:1234/v1`, `http://127.0.0.1:8080/v1`, and `http://127.0.0.1:8000/v1`. Configure the comma-separated list with `localforge.providers.openAICompatibleUrls`.
+
+Set `localforge.routing.chatModel`, `localforge.routing.editModel`, `localforge.routing.agentModel`, or `localforge.routing.completionModel` to a discovered model id or provider id. Leave these blank to use the sidebar selection/fallback. Agent mode is available from the chat sidebar and uses only bounded workspace search/read tools.
+
+## Privacy and safety
+
+- Prompts and enabled editor/workspace context are sent to the selected model server. LocalForge has no cloud inference service.
+- Repository retrieval is lexical, workspace-trust gated, and capped by file size, candidate count, and context length. No embedding service is used.
+- Proposed edits never modify files until **Apply** is chosen after reviewing the diff; the source document must not have changed while the diff is open.
+- Remote credentials are stored in VS Code SecretStorage, not workspace settings. The SSH host key must be verified and then pinned. The tunnel binds only to `127.0.0.1` and is closed when disconnected or when the extension deactivates.
+- The GPU probe runs only the fixed, read-only `nvidia-smi` query. LocalForge does not install remote packages, run arbitrary shell commands, or automatically download models.
+- Inline completions are opt-in and send nearby editor text to the selected model provider.
+
+## Build and test
 
 ```sh
-npm install
+npm ci
 npm test
-npm run compile
 npm run package
 ```
 
-The generated `.vsix` can be installed with **Extensions: Install from VSIX...** in VS Code or `code --install-extension <file.vsix>`.
+The VSIX can be installed through **Extensions: Install from VSIX...** in VS Code or with `code --install-extension <file.vsix>`.
 
-## Current scope
+## License
 
-This first vertical slice focuses on model discovery and local chat. Remote SSH/GPU execution, edits and diffs, agent tools, retrieval, autocomplete, and model routing are extension points for later releases.
+This project is licensed under the [MIT License](LICENSE).
 
-## Publishing notes
-
-The `publisher` value in `package.json` must match a Visual Studio Marketplace publisher account you control before publishing. Choose and add a license before presenting the source as open source.

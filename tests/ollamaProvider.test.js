@@ -17,10 +17,20 @@ before(async () => {
       return;
     }
     if (request.url === '/api/chat') {
-      response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
-      response.write('{"message":{"content":"O"}}\n');
-      response.write('{"message":{"content":"K"}}\n');
-      response.end('{"done":true}\n');
+      let body = '';
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        if (!JSON.parse(body).stream) {
+          response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ message: {
+            role: 'assistant', content: '', tool_calls: [{ function: { name: 'search_workspace', arguments: { query: 'parser' } } }]
+          } }));
+          return;
+        }
+        response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+        response.write('{"message":{"content":"O"}}\n');
+        response.write('{"message":{"content":"K"}}\n');
+        response.end('{"done":true}\n');
+      });
       return;
     }
     response.writeHead(404).end();
@@ -50,4 +60,11 @@ test('streams chat tokens in order', async () => {
     answer += token;
   });
   assert.equal(answer, 'OK');
+});
+
+test('decodes Ollama tool calls without streaming', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  const message = await provider.chatWithTools('qwen:test', [{ role: 'user', content: 'find parser' }], []);
+  assert.equal(message.tool_calls[0].function.name, 'search_workspace');
+  assert.deepEqual(message.tool_calls[0].function.arguments, { query: 'parser' });
 });

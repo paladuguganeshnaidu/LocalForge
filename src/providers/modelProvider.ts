@@ -1,12 +1,32 @@
 export interface LocalModel {
   name: string;
+  displayName?: string;
+  providerId?: string;
   size?: number;
   modifiedAt?: string;
 }
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: ModelToolCall[];
+}
+
+export interface ModelToolCall {
+  id?: string;
+  type?: 'function';
+  function: { name: string; arguments: string | Record<string, unknown> };
+}
+
+export interface ModelToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
 }
 
 export interface ModelProvider {
@@ -19,4 +39,10 @@ export interface ModelProvider {
     onToken: (token: string) => void,
     signal?: AbortSignal
   ): Promise<void>;
+  chatWithTools?(
+    model: string,
+    messages: ChatMessage[],
+    tools: ModelToolDefinition[],
+    signal?: AbortSignal
+  ): Promise<ChatMessage>;
 }

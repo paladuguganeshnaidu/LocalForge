@@ -1,4 +1,4 @@
-import { ChatMessage, LocalModel, ModelProvider } from './modelProvider';
+import { ChatMessage, LocalModel, ModelProvider, ModelToolDefinition } from './modelProvider';
 
 interface OllamaTagsResponse {
   models?: Array<{
@@ -14,14 +14,29 @@ interface OllamaChatChunk {
   error?: string;
 }
 
-export class OllamaProvider implements ModelProvider {
-  readonly id = 'ollama';
+interface OllamaToolResponse {
+  message?: ChatMessage;
+  error?: string;
+}
 
-  constructor(private readonly baseUrl: string) {}
+export class OllamaProvider implements ModelProvider {
+  readonly id: string;
+
+  constructor(private readonly baseUrl: string, id = 'ollama') {
+    this.id = id;
+  }
 
   async detect(): Promise<boolean> {
     try {
       const response = await fetch(`${this.baseUrl}/api/version`, { signal: AbortSignal.timeout(2500) });
+      if (response.ok) return true;
+    } catch {}
+    try {
+      const response = await fetch(`${this.baseUrl}/api/tags`, { signal: AbortSignal.timeout(2500) });
+      if (response.ok) return true;
+    } catch {}
+    try {
+      const response = await fetch(`${this.baseUrl}/`, { signal: AbortSignal.timeout(2500) });
       return response.ok;
     } catch {
       return false;
@@ -85,5 +100,22 @@ export class OllamaProvider implements ModelProvider {
       if (chunk.error) throw new Error(chunk.error);
       if (chunk.message?.content) onToken(chunk.message.content);
     }
+  }
+
+  async chatWithTools(model: string, messages: ChatMessage[], tools: ModelToolDefinition[], signal?: AbortSignal): Promise<ChatMessage> {
+    const response = await fetch(`${this.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages, tools, stream: false }),
+      signal
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Ollama agent request failed (${response.status}): ${detail || response.statusText}`);
+    }
+    const data = await response.json() as OllamaToolResponse;
+    if (data.error) throw new Error(data.error);
+    if (!data.message || typeof data.message.content !== 'string') throw new Error('Ollama returned an invalid tool-call response.');
+    return data.message;
   }
 }
