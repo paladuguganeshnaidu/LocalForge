@@ -1,0 +1,75 @@
+{
+  "name": "localforge-vscode",
+  "displayName": "LocalForge",
+  "description": "Discover local Ollama models and chat with them from VS Code.",
+  "version": "0.1.0",
+  "publisher": "localforge",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paladuguganeshnaidu/LocalForge.git"
+  },
+  "homepage": "https://github.com/paladuguganeshnaidu/LocalForge#readme",
+  "bugs": {
+    "url": "https://github.com/paladuguganeshnaidu/LocalForge/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:localforge.chatView",
+    "onCommand:localforge.refreshModels"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "localforge",
+          "title": "LocalForge",
+          "icon": "media/localforge.svg"
+        }
+      ]
+    },
+    "views": {
+      "localforge": [
+        {
+          "id": "localforge.chatView",
+          "name": "Local Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "localforge.refreshModels",
+        "title": "LocalForge: Refresh Ollama Models"
+      }
+    ],
+    "configuration": {
+      "title": "LocalForge",
+      "properties": {
+        "localforge.ollama.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Base URL for the local Ollama server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test tests/*.test.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.8.3"
+  }
+}
