@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LocalForge: Ollama Chat",
   "description": "Discover local Ollama models and chat with them from VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
