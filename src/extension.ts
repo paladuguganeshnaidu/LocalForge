@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { randomBytes } from 'node:crypto';
 import { ChatMessage, LocalModel, ModelProvider } from './providers/modelProvider';
 import { OllamaProvider } from './providers/ollamaProvider';
 
@@ -119,12 +120,13 @@ function errorMessage(error: unknown): string {
 }
 
 function getHtml(): string {
+  const nonce = randomBytes(16).toString('base64');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <style>
     :root { color-scheme: light dark; }
     body { padding: 12px; color: var(--vscode-foreground); font: 13px var(--vscode-font-family); }
@@ -154,7 +156,7 @@ function getHtml(): string {
   <textarea id="prompt" placeholder="Ask your local model…" aria-label="Message"></textarea>
   <button id="send">Send</button>
   <div class="hint">Enter to send · Shift+Enter for a new line</div>
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const modelSelect = document.getElementById('model');
     const status = document.getElementById('status');
