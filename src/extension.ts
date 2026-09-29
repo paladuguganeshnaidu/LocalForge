@@ -54,7 +54,12 @@ export function formatFixPrompt(
 
 let engineInstance: LocalForgeEngine | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
+export interface LocalForgeExtensionApi {
+  engine: LocalForgeEngine;
+  viewProvider: LocalForgeViewProvider;
+}
+
+export function activate(context: vscode.ExtensionContext): LocalForgeExtensionApi {
   const ollamaUrl = vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434');
   const openAiUrls = vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '');
   const firstOpenAi = openAiUrls ? openAiUrls.split(',')[0].trim() : undefined;
@@ -297,6 +302,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Initialize engine background tasks
   void engine.bootstrap().then(() => viewProvider.refresh());
+
+  return { engine, viewProvider };
 }
 
 export function deactivate(): void {

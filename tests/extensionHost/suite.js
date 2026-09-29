@@ -81,6 +81,43 @@ async function run() {
   await vscode.commands.executeCommand('localforge.cancelAgent');
   console.log('[ExtensionHost] PASS: Cancellation command verified.');
 
+  // 8. Webview message flow & prompt dispatch verification
+  const api = ext.exports;
+  assert.ok(api, 'Extension must export API');
+  assert.ok(api.engine, 'Extension API must expose engine');
+  assert.ok(api.viewProvider, 'Extension API must expose viewProvider');
+
+  let messageHandler;
+  const webviewEvents = [];
+  const mockWebview = {
+    options: {},
+    html: '',
+    cspSource: 'https://*.vscode-cdn.net',
+    postMessage: async (msg) => {
+      webviewEvents.push(msg);
+    },
+    onDidReceiveMessage: (handler) => {
+      messageHandler = handler;
+      return { dispose: () => {} };
+    }
+  };
+
+  api.viewProvider.resolveWebviewView({ webview: mockWebview });
+  assert.ok(typeof messageHandler === 'function', 'Webview view must attach onDidReceiveMessage handler');
+
+  await messageHandler({ type: 'ready' });
+  assert.ok(webviewEvents.some((e) => e.type === 'models'), 'Webview should receive models on ready');
+
+  await messageHandler({
+    type: 'chat',
+    model: 'auto',
+    prompt: 'test prompt from extension host',
+    includeContext: true,
+    includeWorkspace: true,
+    agentMode: false
+  });
+  console.log('[ExtensionHost] PASS: Webview message handler successfully processed chat message.');
+
   console.log('[ExtensionHost] ALL EXTENSION HOST INTEGRATION TESTS PASSED CLEANLY.');
 }
 
