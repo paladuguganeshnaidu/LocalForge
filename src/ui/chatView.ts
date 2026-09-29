@@ -515,7 +515,7 @@ function getHtml(webview: vscode.Webview): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${cspSource} 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <style>
     :root {
       --bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
@@ -1289,7 +1289,7 @@ function getHtml(webview: vscode.Webview): string {
         <div class="composer-bottom-left">
           <span id="activeFileName"></span>
         </div>
-        <button class="send-btn" id="sendBtn">Send</button>
+        <button type="button" class="send-btn" id="sendBtn">Send</button>
       </div>
     </div>
   </div>
@@ -1365,7 +1365,21 @@ function getHtml(webview: vscode.Webview): string {
   </div>
 
   <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
+    window.addEventListener('error', function(e) {
+      console.error('[LocalForge Webview Error]', e.error || e.message);
+    });
+
+    const vscode = (function() {
+      try {
+        if ((window as any).__cachedVsCodeApi) return (window as any).__cachedVsCodeApi;
+        const api = acquireVsCodeApi();
+        (window as any).__cachedVsCodeApi = api;
+        return api;
+      } catch (err) {
+        console.warn('[LocalForge] acquireVsCodeApi reuse or error:', err);
+        return (window as any).__cachedVsCodeApi || { postMessage: function() {} };
+      }
+    })();
 
     const mainScroll = document.getElementById('mainScroll');
     const timelineContainer = document.getElementById('timelineContainer');
@@ -1595,7 +1609,9 @@ function getHtml(webview: vscode.Webview): string {
       if (existing) existing.remove();
     }
 
-    sendBtn.addEventListener('click', () => {
+    sendBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       if (sendBtn.textContent === 'Cancel') {
         vscode.postMessage({ type: 'cancel' });
         isBusy = false;
@@ -1610,6 +1626,7 @@ function getHtml(webview: vscode.Webview): string {
     promptInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
+        e.stopPropagation();
         sendMessage();
       }
       if (e.key === 'Escape') {
