@@ -73,16 +73,49 @@ export class OllamaProvider implements ModelProvider {
     }));
   }
 
+  private formatMessagesForOllama(messages: ChatMessage[]): any[] {
+    return messages.map((m) => {
+      const formatted: any = {
+        role: m.role,
+        content: m.content || ''
+      };
+      if (m.name) formatted.name = m.name;
+      if (m.tool_call_id) formatted.tool_call_id = m.tool_call_id;
+      if (m.tool_calls && Array.isArray(m.tool_calls)) {
+        formatted.tool_calls = m.tool_calls.map((tc) => {
+          let args = tc.function?.arguments;
+          if (typeof args === 'string') {
+            try {
+              args = JSON.parse(args);
+            } catch {
+              args = {};
+            }
+          }
+          return {
+            id: tc.id,
+            type: tc.type || 'function',
+            function: {
+              name: tc.function?.name,
+              arguments: (args && typeof args === 'object' && !Array.isArray(args)) ? args : {}
+            }
+          };
+        });
+      }
+      return formatted;
+    });
+  }
+
   async streamChat(
     model: string,
     messages: ChatMessage[],
     onToken: (token: string) => void,
     signal?: AbortSignal
   ): Promise<void> {
+    const formattedMessages = this.formatMessagesForOllama(messages);
     const response = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: true }),
+      body: JSON.stringify({ model, messages: formattedMessages, stream: true }),
       signal
     });
 
@@ -127,11 +160,12 @@ export class OllamaProvider implements ModelProvider {
   }
 
   async chatWithTools(model: string, messages: ChatMessage[], tools: ModelToolDefinition[], signal?: AbortSignal): Promise<ChatMessage> {
+    const formattedMessages = this.formatMessagesForOllama(messages);
     try {
       const response = await fetch(`${this.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages, tools, stream: false }),
+        body: JSON.stringify({ model, messages: formattedMessages, tools, stream: false }),
         signal
       });
       if (response.ok) {
@@ -150,7 +184,7 @@ export class OllamaProvider implements ModelProvider {
     const fallbackResponse = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false }),
+      body: JSON.stringify({ model, messages: formattedMessages, stream: false }),
       signal
     });
     if (!fallbackResponse.ok) {

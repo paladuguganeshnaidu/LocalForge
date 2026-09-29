@@ -298,7 +298,14 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   public async refresh(): Promise<void> {
     try {
       if (this.engine) {
-        this.models = this.engine.modelRegistry.getModels();
+        let models = this.engine.modelRegistry.getModels();
+        if (models.length === 0) {
+          try {
+            await this.engine.modelRegistry.discoverAll();
+            models = this.engine.modelRegistry.getModels();
+          } catch {}
+        }
+        this.models = models;
       } else {
         this.models = await this.provider.listModels();
       }

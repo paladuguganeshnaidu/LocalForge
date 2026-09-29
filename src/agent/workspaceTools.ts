@@ -158,7 +158,8 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
   }
 
   if (name === 'list_directory') {
-    const rel = typeof args.path === 'string' ? args.path.trim() : '';
+    const raw = typeof args.path === 'string' ? args.path.trim() : '';
+    const rel = (!raw || raw === '.' || raw === './') ? '' : raw;
     const uri = rel ? await resolveWorkspaceUri(rel) : getWorkspaceRootUri();
     const entries = await vscode.workspace.fs.readDirectory(uri);
     return entries.map(([entryName, type]) => ({
@@ -302,11 +303,15 @@ function getWorkspaceRootUri(): vscode.Uri {
 }
 
 async function resolveWorkspaceUri(inputPath: string, allowNew = false): Promise<vscode.Uri> {
-  const segments = validateRelativeWorkspacePath(inputPath);
+  let cleaned = inputPath.replace(/\\/g, '/').trim();
+  while (cleaned.startsWith('./')) {
+    cleaned = cleaned.slice(2).trim();
+  }
+  const segments = validateRelativeWorkspacePath(cleaned);
   const roots = vscode.workspace.workspaceFolders ?? [];
   if (!roots.length) throw new Error('Open a workspace folder first.');
   let root = roots[0];
-  if (roots.length > 1) {
+  if (roots.length > 1 && segments.length > 0) {
     const matching = roots.find((folder) => folder.name === segments[0]);
     if (matching) {
       root = matching;
@@ -314,7 +319,7 @@ async function resolveWorkspaceUri(inputPath: string, allowNew = false): Promise
     }
   }
   const uri = vscode.Uri.joinPath(root.uri, ...segments);
-  if (vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() !== root.uri.toString()) {
+  if (vscode.workspace.getWorkspaceFolder && vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() !== root.uri.toString()) {
     throw new Error('The requested path is outside the selected workspace folder.');
   }
   if (!allowNew && uri.scheme === 'file') {
@@ -353,15 +358,14 @@ export function validateRelativeWorkspacePath(inputPath: string): string[] {
     throw new Error('Provide a normalized relative path inside the workspace (UNC paths are not permitted).');
   }
 
-  // Reject absolute paths
+  // Reject absolute paths and empty inputs
   if (!relativePath || relativePath.startsWith('/') || /^[A-Za-z]:/.test(relativePath)) {
     throw new Error('Provide a normalized relative path inside the workspace.');
   }
 
   const segments = relativePath.split('/');
-
-  // Reject Windows reserved device names and traversal
   const reservedDevices = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
   for (const segment of segments) {
     if (!segment || segment === '.' || segment === '..') {
       throw new Error('Provide a normalized relative path inside the workspace.');

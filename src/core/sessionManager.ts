@@ -21,7 +21,8 @@ export class SessionManager {
   constructor(private readonly workspaceState: vscode.Memento) {}
 
   public getSessions(): ChatSession[] {
-    return this.workspaceState.get<ChatSession[]>(SESSIONS_STORAGE_KEY, []);
+    const sessions = this.workspaceState.get<ChatSession[]>(SESSIONS_STORAGE_KEY, []);
+    return Array.isArray(sessions) ? sessions : [];
   }
 
   public getActiveSession(): ChatSession {

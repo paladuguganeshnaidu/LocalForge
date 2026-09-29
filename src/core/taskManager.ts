@@ -22,7 +22,8 @@ export class TaskManager {
   constructor(private readonly workspaceState: vscode.Memento) {}
 
   public getTasks(): TaskRecord[] {
-    return this.workspaceState.get<TaskRecord[]>(TASKS_STORAGE_KEY, []);
+    const tasks = this.workspaceState.get<TaskRecord[]>(TASKS_STORAGE_KEY, []);
+    return Array.isArray(tasks) ? tasks : [];
   }
 
   public getLastTask(): TaskRecord | undefined {
