@@ -48,7 +48,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm install --no-save @vscode/test-electron@3.1.0
+      - run: npm install --no-save @vscode/test-electron@3.1.0 mocha@12.0.2
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - if: runner.os == 'Linux'
