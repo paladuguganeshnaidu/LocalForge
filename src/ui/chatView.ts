@@ -1462,7 +1462,7 @@ function getHtml(webview: vscode.Webview): string {
 
       if (msg.type === 'status') {
         footerStatusText.textContent = msg.message || 'Ready';
-        if (msg.state === 'running' || msg.state === 'thinking') {
+        if (msg.state === 'starting' || msg.state === 'running' || msg.state === 'thinking') {
           isBusy = true;
           sendBtn.textContent = 'Cancel';
         } else {
@@ -1476,8 +1476,9 @@ function getHtml(webview: vscode.Webview): string {
         timelineContainer.style.display = 'flex';
         const row = document.createElement('div');
         row.className = 'timeline-row';
+        const detail = act.details ? '<div class="timeline-detail">' + escapeHtml(act.details) + '</div>' : '';
         row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
-          '<span class="timeline-text">' + escapeHtml(act.title) + '</span>';
+          '<span class="timeline-text">' + escapeHtml(act.title) + detail + '</span>';
         timelineContainer.appendChild(row);
         mainScroll.scrollTop = mainScroll.scrollHeight;
       }
@@ -1527,6 +1528,15 @@ function getHtml(webview: vscode.Webview): string {
         card.textContent = msg.content;
         mainScroll.appendChild(card);
         mainScroll.scrollTop = mainScroll.scrollHeight;
+      }
+
+      if (msg.type === 'editResult') {
+        if (msg.success) {
+          activeProposal = null;
+          changesBadge.textContent = '0';
+          diffFileList.innerHTML = '';
+          proposalSummary.textContent = 'No active proposals';
+        }
       }
 
       if (msg.type === 'done') {
