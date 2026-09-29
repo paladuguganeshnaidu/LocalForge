@@ -8,8 +8,15 @@ export interface RegisteredTool {
   source?: 'builtin' | 'mcp' | 'custom';
 }
 
+export type EditProposalHandler = (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
+  private editProposalHandler?: EditProposalHandler;
+
+  public setEditProposalHandler(handler?: EditProposalHandler): void {
+    this.editProposalHandler = handler;
+  }
 
   public registerTool(
     definition: ModelToolDefinition,
@@ -57,6 +64,10 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) {
       throw new Error(`Tool “${name}” is not allow-listed or registered.`);
+    }
+
+    if (this.editProposalHandler && (name === 'write_workspace_file' || name === 'edit_workspace_file')) {
+      return this.editProposalHandler(name, args);
     }
 
     if (permissionManager) {
