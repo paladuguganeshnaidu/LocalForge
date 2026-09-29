@@ -331,12 +331,16 @@ export class LocalForgeEngine {
           if (effectivePrompt) {
             const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (rootPath) {
-              const proc = await this.terminalManager.runCommand(effectivePrompt, rootPath);
+              const proc = await this.toolRegistry.executeTool(
+                'run_command',
+                { command: effectivePrompt, cwd: rootPath },
+                this.permissionManager
+              ) as any;
               return {
                 runId: `run-${Date.now()}`,
                 task: `Run terminal command: ${effectivePrompt}`,
                 mode: effectiveMode,
-                response: `Command: \`${proc.command}\`\nExit Code: ${proc.exitCode}\n\n\`\`\`\n${proc.stdout || proc.stderr || '(no output)'}\n\`\`\``,
+                response: `Command: \\`${proc.command}\\`\\nExit Code: ${proc.exitCode}\\n\\n\\`\\`\\`\\n${proc.stdout || proc.stderr || '(no output)'}\\n\\`\\`\\``,
                 filesModified: [],
                 validationAttempts: [],
                 status: proc.exitCode === 0 ? 'completed' : 'failed',
