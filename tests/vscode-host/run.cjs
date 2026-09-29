@@ -3,7 +3,7 @@ const { runTests } = require('@vscode/test-electron');
 
 async function main() {
   const root = path.resolve(__dirname, '../..');
-  const suite = path.resolve(__dirname, 'suite');
+  const suite = path.resolve(__dirname, 'suite', 'extension.test.js');
   const workspace = path.resolve(root, 'tests', 'fixtures', 'extension-host');
   await runTests({
     extensionDevelopmentPath: root,
