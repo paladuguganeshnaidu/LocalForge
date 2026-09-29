@@ -2,6 +2,17 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.2.4] - 2026-09-30
+
+### Fixed & Hardened
+- **Resilient Webview Lifecycle & API Singleton**: Wrapped `acquireVsCodeApi()` in a cached singleton (`window.__cachedVsCodeApi`) to protect retained webviews against uncaught exceptions when reloading VS Code windows.
+- **Strict Chromium Level 3 CSP**: Standardized `<meta>` Content Security Policy to `script-src 'nonce-${nonce}';`, eliminating directive collision and enabling full inline script execution in modern VS Code versions.
+- **Robust Prompt Dispatch**: Fixed send button latching; added explicit `type="button"`, `e.preventDefault()`, and `e.stopPropagation()` on Send click and Enter keydown handlers to guarantee prompt transmission under all conditions.
+- **Automated Stale Task Recovery**: Incoming user prompts now auto-cancel stale or hung prior tasks and unconditionally unlock the UI busy state.
+- **Workspace Grounding**: Injected root workspace name and `package.json` title, version, and description into initial prompt context so compact local models immediately ground their understanding of the workspace.
+- **Extension API Export**: Exported `LocalForgeExtensionApi` exposing `engine` and `viewProvider` for headless integration, automated testing, and programmatic invocation.
+- **Real-Environment Electron Testing**: Integrated `@vscode/test-electron` test suite verifying full command registration, terminal execution, and live webview IPC inside real VS Code runtime.
+
 ## [0.2.3] - 2026-09-29
 
 ### Fixed & Enhanced
