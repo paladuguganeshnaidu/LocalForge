@@ -22,6 +22,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onCommand:localforge.selfTest",
     "onView:localforge.chatView",
     "onCommand:localforge.openAgent",
     "onCommand:localforge.newConversation",
@@ -83,6 +84,10 @@
       {
         "command": "localforge.diagnose",
         "title": "LocalForge: Diagnose Installation"
+      },
+      {
+        "command": "localforge.selfTest",
+        "title": "LocalForge: Run End-to-End Self Test"
       },
       {
         "command": "localforge.refreshModels",
