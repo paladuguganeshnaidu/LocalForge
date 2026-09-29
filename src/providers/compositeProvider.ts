@@ -26,11 +26,10 @@ export class CompositeProvider implements ModelProvider {
       if (item.status !== 'fulfilled') continue;
       for (const model of item.value.models) {
         const key = `${item.value.provider.id}:${encodeURIComponent(model.name)}`;
+        const unencodedKey = `${item.value.provider.id}:${model.name}`;
         this.discovered.set(key, { provider: item.value.provider, actualName: model.name });
-        // Fallback for unnamespaced model name
-        if (!this.discovered.has(model.name)) {
-          this.discovered.set(model.name, { provider: item.value.provider, actualName: model.name });
-        }
+        this.discovered.set(unencodedKey, { provider: item.value.provider, actualName: model.name });
+        this.discovered.set(model.name, { provider: item.value.provider, actualName: model.name });
         const capabilities = model.capabilities ?? inferModelCapabilities(model.name, model.size);
         output.push({
           ...model,
@@ -50,6 +49,7 @@ export class CompositeProvider implements ModelProvider {
   }
 
   public resolveRoute(model: string): { provider: ModelProvider; actualName: string } | undefined {
+    if (!model) return undefined;
     let route = this.discovered.get(model);
     if (route) return route;
 
@@ -60,9 +60,30 @@ export class CompositeProvider implements ModelProvider {
       if (route) return route;
     } catch {}
 
+    // Check re-encoded
+    try {
+      const parts = model.split(':');
+      if (parts.length > 2) {
+        const encoded = `${parts[0]}:${encodeURIComponent(parts.slice(1).join(':'))}`;
+        route = this.discovered.get(encoded);
+        if (route) return route;
+      }
+    } catch {}
+
+    // Strip provider prefix if present e.g. "ollama:qwen2.5-coder:1.5b" -> "qwen2.5-coder:1.5b"
+    const stripped = model.replace(/^[a-zA-Z0-9_-]+:/, '');
+    route = this.discovered.get(stripped);
+    if (route) return route;
+
+    try {
+      const decodedStripped = decodeURIComponent(stripped);
+      route = this.discovered.get(decodedStripped);
+      if (route) return route;
+    } catch {}
+
     // Check if matches actualName
     for (const entry of this.discovered.values()) {
-      if (entry.actualName === model) return entry;
+      if (entry.actualName === model || entry.actualName === stripped) return entry;
     }
 
     return undefined;

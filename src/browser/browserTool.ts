@@ -90,7 +90,7 @@ export class BrowserTool {
 
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { 'User-Agent': 'LocalForge-Browser/0.1.7' }
+        headers: { 'User-Agent': 'LocalForge-Browser/0.2.0' }
       });
       clearTimeout(timeout);
 

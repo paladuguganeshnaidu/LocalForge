@@ -363,9 +363,24 @@ export class LocalForgeEngine {
       }
     }
 
+    if (this.modelRegistry.getModels().length === 0) {
+      try {
+        await this.modelRegistry.discoverAll();
+      } catch {}
+    }
+
     const taskType: TaskType = effectiveMode === 'agent' ? 'agent' : 'chat';
     const routing = this.modelRouter.route(taskType, modelPreference);
-    const chosenModel = routing.modelId;
+    let chosenModel = routing.modelId;
+
+    if (!chosenModel) {
+      const models = this.modelRegistry.getModels();
+      if (models.length > 0) {
+        chosenModel = models[0].id || models[0].name;
+      } else {
+        throw new Error('No local LLM detected. Please ensure Ollama is running (`ollama serve`) or configure a remote GPU / OpenAI-compatible endpoint in LocalForge settings.');
+      }
+    }
 
     const session = this.sessionManager.getActiveSession();
     session.mode = effectiveMode;
@@ -540,7 +555,13 @@ export class LocalForgeEngine {
       return result;
     } catch (err: any) {
       this.turnManager.completeTurn(turn.turnId, signal.aborted ? 'cancelled' : 'failed');
-      emitActivity(signal.aborted ? 'Cancelled' : 'Failed', signal.aborted ? 'Task cancelled' : 'Task execution failed', signal.aborted ? 'cancelled' : 'error');
+      const errDetail = err?.message || (signal.aborted ? 'Task cancelled' : 'Task execution failed');
+      emitActivity(
+        signal.aborted ? 'Cancelled' : 'Failed',
+        signal.aborted ? 'Task cancelled' : (err?.message ? `Failed: ${err.message}` : 'Task execution failed'),
+        signal.aborted ? 'cancelled' : 'error',
+        errDetail
+      );
       throw err;
     } finally {
       this.currentAbortController = undefined;

@@ -1182,7 +1182,7 @@ function getHtml(webview: vscode.Webview): string {
   <!-- Conversation & Activity Scroll Area -->
   <div class="main-scroll" id="mainScroll">
     <div class="msg-assistant">
-      <strong>LocalForge 0.1.6</strong><br>
+      <strong>LocalForge v0.2.0</strong><br>
       Local-first AI software engineer for VS Code. Select a mode or type a task below.
     </div>
     <div class="timeline" id="timelineContainer" style="display:none;"></div>
@@ -1740,15 +1740,33 @@ function getHtml(webview: vscode.Webview): string {
       if (msg.type === 'done') {
         if (streamingBubble) {
           streamingBubble.classList.remove('streaming');
-          streamingBubble.innerHTML = escapeHtml(msg.fullResponse || streamingText).replace(/\\n/g, '<br>');
+          streamingBubble.innerHTML = escapeHtml(msg.fullResponse || streamingText).replace(/\n/g, '<br>');
           streamingBubble = null;
           streamingText = '';
         } else if (msg.fullResponse) {
           const card = document.createElement('div');
           card.className = 'msg-assistant';
-          card.innerHTML = escapeHtml(msg.fullResponse).replace(/\\n/g, '<br>');
+          card.innerHTML = escapeHtml(msg.fullResponse).replace(/\n/g, '<br>');
           mainScroll.appendChild(card);
         }
+        mainScroll.scrollTop = mainScroll.scrollHeight;
+      }
+
+      if (msg.type === 'error') {
+        if (streamingBubble) {
+          streamingBubble.classList.remove('streaming');
+          streamingBubble = null;
+          streamingText = '';
+        }
+        const card = document.createElement('div');
+        card.className = 'msg-assistant';
+        card.style.borderLeft = '3px solid var(--vscode-errorForeground, #f48771)';
+        card.style.background = 'rgba(244, 135, 113, 0.08)';
+        const isConnError = msg.message && (msg.message.includes('Ollama') || msg.message.includes('connect') || msg.message.includes('fetch'));
+        card.innerHTML = '<div style="color:var(--vscode-errorForeground, #f48771); font-weight:600; margin-bottom:4px;">Task Failed</div>' +
+          '<div style="font-size:12px; line-height:1.4;">' + escapeHtml(msg.message || 'Unknown error') + '</div>' +
+          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\'ollama serve\'). Try running <code>LocalForge: Doctor</code> from the command palette.</div>' : '');
+        mainScroll.appendChild(card);
         mainScroll.scrollTop = mainScroll.scrollHeight;
       }
     });
