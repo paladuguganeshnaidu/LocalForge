@@ -1,10 +1,10 @@
 {
-  "name": "localforge-vscode",
-  "displayName": "LocalForge: Local Copilot Agent",
+  "name": "lomvern-vscode",
+  "displayName": "Lomvern: Local Copilot Agent",
   "description": "Production-grade local-first autonomous software engineering operating system powered by local Ollama & remote GPU models (Multi-Agent, Ask, Plan, Agent, Review, Automate).",
   "version": "0.2.4",
   "publisher": "paladuguganeshnaidu",
-  "icon": "media/localforge-marketplace-icon.png",
+  "icon": "media/lomvern-icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/paladuguganeshnaidu/LocalForge.git"
@@ -47,7 +47,7 @@
       "secondarySidebar": [
         {
           "id": "localforge-secondary",
-          "title": "LocalForge",
+          "title": "Lomvern",
           "icon": "media/localforge.svg"
         }
       ]
@@ -57,117 +57,117 @@
         {
           "type": "webview",
           "id": "localforge.chatView",
-          "name": "LocalForge Agent"
+          "name": "Lomvern Agent"
         }
       ]
     },
     "commands": [
       {
         "command": "localforge.openAgent",
-        "title": "LocalForge: Open Agent"
+        "title": "Lomvern: Open Agent"
       },
       {
         "command": "localforge.newConversation",
-        "title": "LocalForge: New Conversation"
+        "title": "Lomvern: New Conversation"
       },
       {
         "command": "localforge.continueTask",
-        "title": "LocalForge: Continue Previous Task"
+        "title": "Lomvern: Continue Previous Task"
       },
       {
         "command": "localforge.reviewChanges",
-        "title": "LocalForge: Review Changes"
+        "title": "Lomvern: Review Changes"
       },
       {
         "command": "localforge.showArtifacts",
-        "title": "LocalForge: Show Artifacts"
+        "title": "Lomvern: Show Artifacts"
       },
       {
         "command": "localforge.diagnose",
-        "title": "LocalForge: Diagnose Installation"
+        "title": "Lomvern: Diagnose Installation"
       },
       {
         "command": "localforge.doctor",
-        "title": "LocalForge: Doctor"
+        "title": "Lomvern: Doctor"
       },
       {
         "command": "localforge.selfTest",
-        "title": "LocalForge: Run Self-Test"
+        "title": "Lomvern: Run Self-Test"
       },
       {
         "command": "localforge.refreshModels",
-        "title": "LocalForge: Refresh Models"
+        "title": "Lomvern: Refresh Models"
       },
       {
         "command": "localforge.connectRemote",
-        "title": "LocalForge: Connect to Remote GPU Host"
+        "title": "Lomvern: Connect to Remote GPU Host"
       },
       {
         "command": "localforge.disconnectRemote",
-        "title": "LocalForge: Disconnect Remote GPU Host"
+        "title": "Lomvern: Disconnect Remote GPU Host"
       },
       {
         "command": "localforge.remoteGpuStatus",
-        "title": "LocalForge: Show Remote GPU Status"
+        "title": "Lomvern: Show Remote GPU Status"
       },
       {
         "command": "localforge.reindexWorkspace",
-        "title": "LocalForge: Re-index Workspace Context"
+        "title": "Lomvern: Re-index Workspace Context"
       },
       {
         "command": "localforge.cancelAgent",
-        "title": "LocalForge: Cancel Agent"
+        "title": "Lomvern: Cancel Agent"
       },
       {
         "command": "localforge.setAgentMode",
-        "title": "LocalForge: Set Agent Mode"
+        "title": "Lomvern: Set Agent Mode"
       },
       {
         "command": "localforge.setModel",
-        "title": "LocalForge: Set Model"
+        "title": "Lomvern: Set Model"
       },
       {
         "command": "localforge.editSelection",
-        "title": "LocalForge: Propose a Diff-Reviewed Edit"
+        "title": "Lomvern: Propose a Diff-Reviewed Edit"
       },
       {
         "command": "localforge.explain",
-        "title": "LocalForge: Explain Selected Code"
+        "title": "Lomvern: Explain Selected Code"
       },
       {
         "command": "localforge.fix",
-        "title": "LocalForge: Fix Selected Code or Diagnostics"
+        "title": "Lomvern: Fix Selected Code or Diagnostics"
       },
       {
         "command": "localforge.searchWorkspace",
-        "title": "LocalForge: Search Workspace Context"
+        "title": "Lomvern: Search Workspace Context"
       },
       {
         "command": "localforge.configureRemote",
-        "title": "LocalForge: Configure Remote GPU Host"
+        "title": "Lomvern: Configure Remote GPU Host"
       }
     ],
     "menus": {
       "editor/context": [
         {
           "command": "localforge.explain",
-          "group": "LocalForge@1",
+          "group": "Lomvern@1",
           "when": "editorHasSelection"
         },
         {
           "command": "localforge.fix",
-          "group": "LocalForge@2",
+          "group": "Lomvern@2",
           "when": "editorTextFocus"
         },
         {
           "command": "localforge.editSelection",
-          "group": "LocalForge@3",
+          "group": "Lomvern@3",
           "when": "editorTextFocus"
         }
       ]
     },
     "configuration": {
-      "title": "LocalForge",
+      "title": "Lomvern",
       "properties": {
         "localforge.ollama.baseUrl": {
           "type": "string",

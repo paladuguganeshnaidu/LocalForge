@@ -4,6 +4,10 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [0.2.4] - 2026-09-30
 
+### Rebranding & Aesthetics
+- **Renamed to Lomvern**: Officially rebranded extension from LocalForge to **Lomvern** across the VS Code Marketplace manifest, activity bar view, command titles, context menus, and chat interface.
+- **Custom Brand Logo**: Integrated custom high-resolution logo image into the marketplace icon, webview header, and welcome hero component.
+
 ### Fixed & Hardened
 - **Resilient Webview Lifecycle & API Singleton**: Wrapped `acquireVsCodeApi()` in a cached singleton (`window.__cachedVsCodeApi`) to protect retained webviews against uncaught exceptions when reloading VS Code windows.
 - **Strict Chromium Level 3 CSP**: Standardized `<meta>` Content Security Policy to `script-src 'nonce-${nonce}';`, eliminating directive collision and enabling full inline script execution in modern VS Code versions.

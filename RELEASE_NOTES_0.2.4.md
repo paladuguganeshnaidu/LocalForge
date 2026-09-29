@@ -1,4 +1,4 @@
-# LocalForge v0.2.4 Release Notes
+# Lomvern v0.2.4 Release Notes
 
 **Release Date:** September 30, 2026  
 **Version:** 0.2.4  
@@ -6,9 +6,9 @@
 
 ---
 
-## Highlights of LocalForge v0.2.4
+## Highlights of Lomvern v0.2.4
 
-LocalForge v0.2.4 delivers rock-solid webview lifecycle stability, resolves UI prompt latching, guarantees full Chromium Level 3 Content Security Policy compliance, and validates 100% of extension host operations inside real VS Code Electron environments.
+Lomvern (formerly LocalForge) v0.2.4 officially introduces the new **Lomvern** brand identity and custom logo, delivers rock-solid webview lifecycle stability, resolves UI prompt latching, guarantees full Chromium Level 3 Content Security Policy compliance, and validates 100% of extension host operations inside real VS Code Electron environments.
 
 ---
 
