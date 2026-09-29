@@ -340,7 +340,7 @@ export class LocalForgeEngine {
                 runId: `run-${Date.now()}`,
                 task: `Run terminal command: ${effectivePrompt}`,
                 mode: effectiveMode,
-                response: `Command: \\`${proc.command}\\`\\nExit Code: ${proc.exitCode}\\n\\n\\`\\`\\`\\n${proc.stdout || proc.stderr || '(no output)'}\\n\\`\\`\\``,
+                response: 'Command: `' + proc.command + '`\\nExit Code: ' + proc.exitCode + '\\n\\n```\\n' + (proc.stdout || proc.stderr || '(no output)') + '\\n```',
                 filesModified: [],
                 validationAttempts: [],
                 status: proc.exitCode === 0 ? 'completed' : 'failed',
