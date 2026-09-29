@@ -1,5 +1,10 @@
 export type ToolCategory = 'read' | 'edit' | 'execute';
-export type PermissionMode = 'always_ask' | 'ask_once_per_session' | 'allow_safe_auto';
+export type PermissionMode =
+  | 'request_review'
+  | 'allow_safe_auto'
+  | 'always_proceed'
+  | 'ask_once_per_session'
+  | 'always_ask';
 
 export type CommandCategory =
   | 'read-only'
@@ -43,19 +48,23 @@ const SHELL_OPERATORS = [
   /\|\|/,
   /;/,
   /\|/,
+  /</,
   />/,
   />>/,
   /2>/,
   /&/,
-  /`[^`]*`/,
+  /`/,
   /\$\(/
 ];
 
 const SAFE_TEST_BUILD_COMMAND_PREFIXES = [
   'npm test',
   'npm run test',
+  'npm start',
+  'npm run start',
   'npm run lint',
   'npm run build',
+  'node',
   'cargo check',
   'cargo test',
   'pytest',
@@ -184,26 +193,40 @@ export class PermissionManager {
     );
   }
 
+  public shouldAutoApplyEdits(): boolean {
+    return this.mode === 'always_proceed';
+  }
+
   public async checkPermission(toolName: string, args: Record<string, unknown>): Promise<boolean> {
     const category = this.classifyTool(toolName);
 
-    // 1. Read operations: auto allowed in allow_safe_auto and ask_once_per_session
-    if (category === 'read') {
-      if (this.mode === 'allow_safe_auto' || this.mode === 'ask_once_per_session') {
-        return true;
+    // 0. Always proceed mode: auto allow after validating safety
+    if (this.mode === 'always_proceed') {
+      if (toolName === 'run_command' && typeof args.command === 'string') {
+        this.validateCommandSafety(args.command);
       }
+      return true;
+    }
+
+    // 1. Read operations: auto allowed in request_review, allow_safe_auto, and ask_once_per_session
+    if (category === 'read') {
+      return true;
     }
 
     // 2. Command execution
     if (toolName === 'run_command' && typeof args.command === 'string') {
       this.validateCommandSafety(args.command);
       // Auto-approved only if explicitly safe without chaining
-      if (this.mode === 'allow_safe_auto' && this.isSafeCommand(args.command)) {
+      if ((this.mode === 'allow_safe_auto' || this.mode === 'request_review') && this.isSafeCommand(args.command)) {
         return true;
       }
     }
 
-    // 3. Edit operations: NEVER auto-approved without proposal review in standard mode
+    // 3. Edit operations: allowed to generate proposals for user diff review in request_review and allow_safe_auto
+    if (category === 'edit' && (this.mode === 'request_review' || this.mode === 'allow_safe_auto')) {
+      return true;
+    }
+
     const sessionKey = `${toolName}:${args.path || args.command || ''}`;
     if (this.mode === 'ask_once_per_session' && this.sessionApprovedTools.has(sessionKey)) {
       return true;

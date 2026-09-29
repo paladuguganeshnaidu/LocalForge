@@ -2,6 +2,75 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.2.0] - 2026-09-29
+
+### Added
+- **Multi-Agent Orchestration Operating System**:
+  - `TaskGraph`: Directed Acyclic Graph (DAG) for dynamic task decomposition with topological sorting, dependency resolution, and cycle detection.
+  - **12 Built-in Specialized Agent Roles**: Orchestrator, Planner, Repository Analyst, Researcher, Coder, Test Engineer, Debugger, Reviewer, Security Reviewer, Documentation Agent, Git Agent, Performance Agent.
+  - `AgentPool`: Concurrency manager (max 4 concurrent agents) with hierarchical cooperative cancellation via `AbortSignal`.
+  - `AgentManager`: Role dispatcher with scoped context isolation and typed handoff contracts (`PlannerHandoff`, `CoderHandoff`, `TesterHandoff`, `ReviewerHandoff`, `SecurityHandoff`).
+  - `CheckpointManager`: Persistent task graph checkpoints in `workspaceState` for crash resilience and resumption across VS Code reloads.
+- **Expanded 35+ Tool Registry**:
+  - Rich metadata (`riskLevel`, `requiresApproval`, `timeout`, `retryPolicy`, `validate`, `redact`).
+  - Core filesystem tools (`read_file`, `read_files`, `write_file`, `create_file`, `replace_range`, `delete_file`, `move_file`, `list_directory`).
+  - Core search & Git tools (`search_text`, `search_files`, `workspace_search`, `git_status`, `git_diff`, `git_log`, `git_commit`).
+  - Project inspection & execution tools (`run_command`, `run_test`, `get_diagnostics`, `get_editor_context`, `inspect_project`, `create_artifact`).
+- **LocalForge Doctor & Automated Self-Test**:
+  - `localforge.doctor`: Comprehensive platform diagnostic command inspecting VS Code, Node.js, platform, trust, Git, providers, models, GPU, and indexer.
+  - `localforge.selfTest`: 13-point automated self-test command verifying all core runtime subsystems.
+- **Security Hardening & Threat Model Containment**:
+  - UNC path (`//`, `\\\\`) and Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) guards in path validator.
+  - Enforced immutable Trust Hierarchy: `SYSTEM > SECURITY POLICY > USER > TOOL POLICY > WORKSPACE DATA > MODEL OUTPUT`.
+  - Untrusted workspace data delimiters (`<untrusted_workspace_data>`).
+- **Complete Documentation Suite**:
+  - Comprehensive documentation in `/docs/` and `/docs/audit/` covering architecture, multi-agent runtime, security, offline guarantees, model routing, and testing.
+
+## [0.1.7] - 2026-09-28
+
+### Added
+- **Secondary Sidebar as Canonical UI Container**:
+  - Migrated `viewsContainers` to `contributes.viewsContainers.secondarySidebar`, targeting VS Code `^1.106.0`.
+  - Removed duplicate Activity Bar container; LocalForge now natively opens on the right side of the editor.
+  - Zero-emoji visual design standard enforced across all views, cards, and notifications.
+- **Dedicated Multi-Format `ToolCallParser`**:
+  - Implemented comprehensive parsing supporting native provider `tool_calls`, `<tool_call>...</tool_call>` XML blocks, fenced JSON blocks, bare JSON objects, arrays of tool calls, and `LOCALFORGE_TOOL_CALL` protocol.
+  - Resolves parameter aliases and nested structures gracefully.
+  - Completely strips `<think>...</think>` internal reasoning tags and removes raw tool call JSON payloads from user-visible chat content.
+- **Runtime Capability Discovery**:
+  - Integrated Ollama `/api/show` query to determine runtime tool calling capabilities (`supported`, `unsupported`, `unknown`).
+  - Added warning banner in Agent mode when an unsupported tool model is selected.
+- **Patch-First Atomic Editing & Virtual Diff Provider**:
+  - Registered `ProposedContentProvider` with `localforge-proposed:` URI scheme in `extension.ts` for native VS Code diff inspection.
+  - Workspace mutation tools (`write_workspace_file`, `edit_workspace_file`) produce `EditProposal` objects rather than mutating files directly.
+  - Two-phase multi-file commit with hash validation prevents stale file overwrites.
+- **Managed Terminal Lifecycle**:
+  - Added full status tracking (`queued`, `running`, `completed`, `failed`, `stopped`, `timed_out`) to `TerminalManager`.
+  - Routed `/terminal` slash command through `PermissionManager` to prevent security bypasses.
+- **Interactive Approval Workflow**:
+  - Connected `PermissionManager` to Webview with `permissionRequest` and `permissionResolved` messages, enabling inline approval cards (`Allow`, `Deny`, `Allow for Session`, `Always Allow`).
+- **Centralized ContextBudget Authority**:
+  - Implemented `ContextBudget` authority strictly allocating tokens across system instructions, user task, active file/selection, open editor tabs, git branch/status/diff context, diagnostics errors, and workspace search snippets.
+- **Real-Time Incremental Workspace Indexing**:
+  - Integrated `vscode.workspace.createFileSystemWatcher` into `WorkspaceIndexer` for automatic incremental updates on file creations, modifications, and deletions.
+- **Canonical Live Activity & Event-Driven Timeline**:
+  - Structured `TurnActivity` model with lifecycle states (`started`, `running`, `success`, `error`, `cancelled`, `waiting_for_approval`) and categories (`Planning`, `Searching`, `Reading`, `Working`, `Editing`, `Running`, `Browser`, `Waiting for approval`, `Validating`, `Repairing`, `Completed`, `Failed`, `Cancelled`).
+  - Zero fake activity: all progress indicators derive directly from live tool execution hooks.
+- **Genuine Incremental Streaming in Chat View**:
+  - Webview incrementally renders streamed tokens (`chunk` message) with animated cursor; separates text tokens from activity and artifact messages.
+- **Post-Approval Validation & Auto-Repair Loop**:
+  - Edits applied after user approval automatically trigger project test detection, execution, and up to 3 repair attempts with error feedback.
+  - Generates Walkthrough deliverable artifact upon verified completion.
+- **Windows Process Tree Termination & Cancellation**:
+  - TerminalManager utilizes `taskkill /pid ... /T /F` on Windows to cleanly terminate spawned shell process trees without orphaned child processes.
+  - Full `AbortSignal` cooperative cancellation propagates through agent loops and running commands.
+- **Real Capability-Gated Browser Verification**:
+  - Replaced simulated browser stubs with real HTTP fetch and title/snippet extraction.
+- **High-Volume Stress Testing Suite**:
+  - Added 10 high-volume stress tests covering 1,000 tool-call inputs, 1,000 malformed inputs, 1,000 path security checks, 1,000 webview message contract checks, 100 edit proposals, 100 permissions, 100 agent loops, 10 real terminal executions, model switching, and concurrent cancellations (85 total passing automated tests).
+- **Extension Host Test Runner**:
+  - Added `@vscode/test-electron` test suite and `npm run test:extension-host` for automated verification in real VS Code runtime environments.
+
 ## [0.1.6] - 2026-09-28
 
 ### Added

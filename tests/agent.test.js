@@ -82,13 +82,13 @@ test('agent injects plan mode system instructions when mode is plan', async () =
     id: 'fixture',
     chatWithTools: async (_model, messages) => {
       capturedSystemPrompt = messages[0].content;
-      return { role: 'assistant', content: '## 🎯 Plan\n- [ ] Step 1' };
+      return { role: 'assistant', content: '## Plan\n- [ ] Step 1' };
     }
   };
   const answer = await runToolAgent(provider, 'test:model', [{ role: 'user', content: 'Plan feature' }], [], async () => ({}), {
     mode: 'plan'
   });
   assert.match(capturedSystemPrompt, /Plan Mode/);
-  assert.match(answer, /## 🎯 Plan/);
+  assert.match(answer, /## Plan/);
 });
 

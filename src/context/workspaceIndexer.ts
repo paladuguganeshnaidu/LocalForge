@@ -4,10 +4,12 @@ import { IndexedDocument } from './retrieval';
 const maxFileSizeBytes = 256 * 1024;
 const maxIndexedFiles = 500;
 
-export class WorkspaceIndexer {
+export class WorkspaceIndexer implements vscode.Disposable {
   private indexed = new Map<string, IndexedDocument>();
   private isScanning = false;
   private lastIndexedTime?: Date;
+  private watcher?: vscode.FileSystemWatcher;
+  private disposables: vscode.Disposable[] = [];
 
   async indexWorkspace(token?: vscode.CancellationToken): Promise<number> {
     if (this.isScanning) return this.indexed.size;
@@ -27,6 +29,25 @@ export class WorkspaceIndexer {
     } finally {
       this.isScanning = false;
     }
+  }
+
+  public startWatching(): void {
+    if (this.watcher) return;
+    try {
+      this.watcher = vscode.workspace.createFileSystemWatcher('**/*');
+      this.disposables.push(
+        this.watcher.onDidCreate((uri) => {
+          void this.indexFile(uri);
+        }),
+        this.watcher.onDidChange((uri) => {
+          void this.indexFile(uri);
+        }),
+        this.watcher.onDidDelete((uri) => {
+          this.removeFile(uri);
+        }),
+        this.watcher
+      );
+    } catch {}
   }
 
   async indexFile(uri: vscode.Uri): Promise<void> {
@@ -70,4 +91,14 @@ export class WorkspaceIndexer {
       lastIndexed: this.lastIndexedTime
     };
   }
+
+  dispose(): void {
+    for (const d of this.disposables) {
+      d.dispose();
+    }
+    this.disposables = [];
+    this.watcher = undefined;
+    this.indexed.clear();
+  }
 }
+

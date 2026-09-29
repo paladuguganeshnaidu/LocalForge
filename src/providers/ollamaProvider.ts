@@ -1,4 +1,5 @@
 import { ChatMessage, LocalModel, ModelProvider, ModelToolDefinition } from './modelProvider';
+import { evaluateRuntimeCapabilities } from './modelCapabilities';
 
 interface OllamaTagsResponse {
   models?: Array<{
@@ -41,6 +42,21 @@ export class OllamaProvider implements ModelProvider {
     } catch {
       return false;
     }
+  }
+
+  async showModel(model: string): Promise<{ capabilities?: string[]; template?: string } | undefined> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(2500)
+      });
+      if (response.ok) {
+        return (await response.json()) as { capabilities?: string[]; template?: string };
+      }
+    } catch {}
+    return undefined;
   }
 
   async listModels(): Promise<LocalModel[]> {
@@ -89,33 +105,63 @@ export class OllamaProvider implements ModelProvider {
 
       for (const line of lines) {
         if (!line.trim()) continue;
-        const chunk = JSON.parse(line) as OllamaChatChunk;
-        if (chunk.error) throw new Error(chunk.error);
-        if (chunk.message?.content) onToken(chunk.message.content);
+        try {
+          const chunk = JSON.parse(line) as OllamaChatChunk;
+          if (chunk.error) throw new Error(chunk.error);
+          if (chunk.message?.content) onToken(chunk.message.content);
+        } catch (e: any) {
+          if (e.message && !e.message.includes('JSON') && !e.message.includes('Unexpected')) throw e;
+        }
       }
       if (done) break;
     }
     if (pending.trim()) {
-      const chunk = JSON.parse(pending) as OllamaChatChunk;
-      if (chunk.error) throw new Error(chunk.error);
-      if (chunk.message?.content) onToken(chunk.message.content);
+      try {
+        const chunk = JSON.parse(pending) as OllamaChatChunk;
+        if (chunk.error) throw new Error(chunk.error);
+        if (chunk.message?.content) onToken(chunk.message.content);
+      } catch (e: any) {
+        if (e.message && !e.message.includes('JSON') && !e.message.includes('Unexpected')) throw e;
+      }
     }
   }
 
   async chatWithTools(model: string, messages: ChatMessage[], tools: ModelToolDefinition[], signal?: AbortSignal): Promise<ChatMessage> {
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages, tools, stream: false }),
+        signal
+      });
+      if (response.ok) {
+        const data = await response.json() as OllamaToolResponse;
+        if (data.error) throw new Error(data.error);
+        if (data.message && typeof data.message.content === 'string') {
+          return data.message;
+        }
+      }
+    } catch (err: any) {
+      if (signal?.aborted) throw err;
+      // If error indicates tools are unsupported by this model, fallback to standard chat
+    }
+
+    // Fallback: standard chat without native tools parameter (model will use LocalForge text-tool protocol)
+    const fallbackResponse = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, tools, stream: false }),
+      body: JSON.stringify({ model, messages, stream: false }),
       signal
     });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Ollama agent request failed (${response.status}): ${detail || response.statusText}`);
+    if (!fallbackResponse.ok) {
+      const detail = await fallbackResponse.text();
+      throw new Error(`Ollama request failed (${fallbackResponse.status}): ${detail || fallbackResponse.statusText}`);
     }
-    const data = await response.json() as OllamaToolResponse;
-    if (data.error) throw new Error(data.error);
-    if (!data.message || typeof data.message.content !== 'string') throw new Error('Ollama returned an invalid tool-call response.');
-    return data.message;
+    const fallbackData = await fallbackResponse.json() as OllamaToolResponse;
+    if (fallbackData.error) throw new Error(fallbackData.error);
+    if (!fallbackData.message || typeof fallbackData.message.content !== 'string') {
+      throw new Error('Ollama returned an invalid response.');
+    }
+    return fallbackData.message;
   }
 }

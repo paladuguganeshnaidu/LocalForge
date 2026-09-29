@@ -5,6 +5,8 @@ import { exec } from 'node:child_process';
 import { findRelevantSnippets } from '../context/workspaceContext';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { WorkspaceToolExecutor } from './toolAgent';
+import { EditEngine } from '../editing/editEngine';
+import { TerminalManager } from '../terminal/terminalManager';
 
 const maximumReadBytes = 128 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -110,7 +112,16 @@ export const allWorkspaceTools: ModelToolDefinition[] = [
 // Backwards-compatible alias for existing tests
 export const workspaceTools = allWorkspaceTools;
 
-export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args) => {
+export interface WorkspaceToolContext {
+  editEngine?: EditEngine;
+  terminalManager?: TerminalManager;
+  conversationId?: string;
+  turnId?: string;
+  autoApply?: boolean;
+  signal?: AbortSignal;
+}
+
+export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, toolContext?: WorkspaceToolContext) => {
   if (!vscode.workspace.isTrusted) throw new Error('Workspace tools are disabled until this workspace is trusted.');
 
   if (name === 'search_workspace') {
@@ -160,6 +171,36 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args) =>
     const relativePath = getString(args.path, 'path', 500);
     const content = typeof args.content === 'string' ? args.content : '';
     if (content.length > maximumWriteBytes) throw new Error('File content exceeds maximum write size.');
+
+    if (toolContext?.editEngine) {
+      const workspaceRoot = getWorkspaceRootUri();
+      const proposal = await toolContext.editEngine.proposeEdits(
+        workspaceRoot,
+        [{ path: relativePath, newContent: content }],
+        `Write ${relativePath}`,
+        { conversationId: toolContext.conversationId, turnId: toolContext.turnId }
+      );
+
+      if (toolContext.autoApply) {
+        const applyRes = await toolContext.editEngine.applyProposal(proposal.id);
+        if (!applyRes.success) {
+          throw new Error(`Failed to apply proposal for ${relativePath}: ${applyRes.errors.map((e) => e.error).join(', ')}`);
+        }
+        return { success: true, path: relativePath, proposalId: proposal.id, applied: true, bytesWritten: content.length };
+      }
+
+      return {
+        success: true,
+        path: relativePath,
+        proposalId: proposal.id,
+        status: 'pending',
+        proposed: true,
+        additions: proposal.additions,
+        deletions: proposal.deletions,
+        message: `Proposed file write for ${relativePath}. Awaiting user review and approval.`
+      };
+    }
+
     const uri = await resolveWorkspaceUri(relativePath, true);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
     return { success: true, path: vscode.workspace.asRelativePath(uri), bytesWritten: content.length };
@@ -182,6 +223,36 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args) =>
     }
 
     const updated = existing.replace(target, replacement);
+
+    if (toolContext?.editEngine) {
+      const workspaceRoot = getWorkspaceRootUri();
+      const proposal = await toolContext.editEngine.proposeEdits(
+        workspaceRoot,
+        [{ path: relativePath, newContent: updated }],
+        `Edit ${relativePath}`,
+        { conversationId: toolContext.conversationId, turnId: toolContext.turnId }
+      );
+
+      if (toolContext.autoApply) {
+        const applyRes = await toolContext.editEngine.applyProposal(proposal.id);
+        if (!applyRes.success) {
+          throw new Error(`Failed to apply proposal for ${relativePath}: ${applyRes.errors.map((e) => e.error).join(', ')}`);
+        }
+        return { success: true, path: relativePath, proposalId: proposal.id, applied: true, replacedChars: target.length, newChars: replacement.length };
+      }
+
+      return {
+        success: true,
+        path: relativePath,
+        proposalId: proposal.id,
+        status: 'pending',
+        proposed: true,
+        additions: proposal.additions,
+        deletions: proposal.deletions,
+        message: `Proposed file edit for ${relativePath}. Awaiting user review and approval.`
+      };
+    }
+
     await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));
     return { success: true, path: vscode.workspace.asRelativePath(uri), replacedChars: target.length, newChars: replacement.length };
   }
@@ -190,6 +261,18 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args) =>
     const command = getString(args.command, 'command', 1000);
     validateCommandSafety(command);
     const rootPath = getWorkspaceRootUri().fsPath;
+
+    if (toolContext?.terminalManager) {
+      const proc = await toolContext.terminalManager.runCommand(command, rootPath, false, 60000, toolContext.signal);
+      return {
+        command: proc.command,
+        exitCode: proc.exitCode ?? 0,
+        stdout: (proc.stdout || '').trim().slice(0, 8000),
+        stderr: (proc.stderr || '').trim().slice(0, 4000),
+        durationMs: proc.duration
+      };
+    }
+
     return new Promise((resolve) => {
       exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024 }, (error, stdout, stderr) => {
         resolve({
@@ -264,10 +347,29 @@ function validateCommandSafety(cmd: string): void {
 
 export function validateRelativeWorkspacePath(inputPath: string): string[] {
   const relativePath = inputPath.replace(/\\/g, '/').trim();
-  const segments = relativePath.split('/');
-  if (!relativePath || relativePath.startsWith('/') || /^[A-Za-z]:/.test(relativePath)
-    || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+
+  // Reject UNC paths and protocol escapes
+  if (relativePath.startsWith('//') || relativePath.startsWith('\\\\')) {
+    throw new Error('Provide a normalized relative path inside the workspace (UNC paths are not permitted).');
+  }
+
+  // Reject absolute paths
+  if (!relativePath || relativePath.startsWith('/') || /^[A-Za-z]:/.test(relativePath)) {
     throw new Error('Provide a normalized relative path inside the workspace.');
   }
+
+  const segments = relativePath.split('/');
+
+  // Reject Windows reserved device names and traversal
+  const reservedDevices = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+  for (const segment of segments) {
+    if (!segment || segment === '.' || segment === '..') {
+      throw new Error('Provide a normalized relative path inside the workspace.');
+    }
+    if (reservedDevices.test(segment)) {
+      throw new Error(`Provide a normalized relative path inside the workspace (Windows reserved device name "${segment}" is not allowed).`);
+    }
+  }
+
   return segments;
 }

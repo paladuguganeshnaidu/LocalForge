@@ -31,7 +31,16 @@ export type WebviewMessage =
   | { type: 'proceedArtifact'; artifactId: string }
   | { type: 'commentArtifact'; artifactId: string; comment: string }
   | { type: 'setStrategy'; strategy: 'fast' | 'planning' }
-  | { type: 'updateSettings'; settings: Record<string, unknown> };
+  | { type: 'updateSettings'; settings: Record<string, unknown> }
+  | {
+      type: 'permissionResolved';
+      requestId: string;
+      decision: 'allow' | 'deny' | 'allow_session' | 'always_allow';
+    }
+  | {
+      type: 'setPermissionMode';
+      mode: 'request_review' | 'allow_safe_auto' | 'always_proceed';
+    };
 
 export function isWebviewMessage(value: unknown): value is WebviewMessage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -94,6 +103,22 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
 
     case 'updateSettings':
       return typeof msg.settings === 'object' && msg.settings !== null;
+
+    case 'permissionResolved':
+      return (
+        typeof msg.requestId === 'string' &&
+        (msg.decision === 'allow' ||
+          msg.decision === 'deny' ||
+          msg.decision === 'allow_session' ||
+          msg.decision === 'always_allow')
+      );
+
+    case 'setPermissionMode':
+      return (
+        msg.mode === 'request_review' ||
+        msg.mode === 'allow_safe_auto' ||
+        msg.mode === 'always_proceed'
+      );
 
     default:
       return false;

@@ -4,20 +4,27 @@ import { Artifact } from './artifactManager';
 export type ExecutionStrategy = 'fast' | 'planning';
 
 export type ActivityCategory =
-  | 'Thinking'
-  | 'Working'
+  | 'Planning'
   | 'Searching'
   | 'Reading'
-  | 'Planning'
+  | 'Working'
   | 'Editing'
-  | 'Waiting for approval'
-  | 'Applying changes'
   | 'Running'
-  | 'Verifying'
   | 'Browser'
+  | 'Waiting for approval'
+  | 'Validating'
+  | 'Repairing'
   | 'Completed'
   | 'Failed'
   | 'Cancelled';
+
+export type ActivityStatus =
+  | 'started'
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'cancelled'
+  | 'waiting_for_approval';
 
 export interface TurnActivity {
   id: string;
@@ -27,7 +34,9 @@ export interface TurnActivity {
   toolName?: string;
   targetPath?: string;
   durationMs?: number;
-  status: 'running' | 'success' | 'error';
+  status: ActivityStatus;
+  resultSummary?: string;
+  error?: string;
   timestamp: number;
 }
 
@@ -91,18 +100,32 @@ export class TurnManager {
 
   public addActivity(
     turnId: string,
-    activity: Omit<TurnActivity, 'id' | 'timestamp'>
+    activity: Omit<TurnActivity, 'id' | 'timestamp'> & { id?: string }
   ): TurnActivity {
     const turn = this.turns.get(turnId);
     const item: TurnActivity = {
       ...activity,
-      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: activity.id || `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       timestamp: Date.now()
     };
     if (turn) {
       turn.activities.push(item);
     }
     return item;
+  }
+
+  public updateActivity(
+    turnId: string,
+    activityId: string,
+    updates: Partial<Omit<TurnActivity, 'id'>>
+  ): TurnActivity | undefined {
+    const turn = this.turns.get(turnId);
+    if (!turn) return undefined;
+    const activity = turn.activities.find((a) => a.id === activityId);
+    if (!activity) return undefined;
+
+    Object.assign(activity, updates);
+    return activity;
   }
 
   public addArtifact(turnId: string, artifact: Artifact): void {

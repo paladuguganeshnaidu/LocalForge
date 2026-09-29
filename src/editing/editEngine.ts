@@ -262,4 +262,30 @@ export class EditEngine {
       }
     }
   }
+
+  public createContentProvider(): ProposedContentProvider {
+    return new ProposedContentProvider(this);
+  }
 }
+
+export class ProposedContentProvider implements vscode.TextDocumentContentProvider {
+  private _onDidChange = new vscode.EventEmitter<vscode.Uri>();
+  readonly onDidChange = this._onDidChange.event;
+
+  constructor(private readonly editEngine: EditEngine) {}
+
+  public provideTextDocumentContent(uri: vscode.Uri): string {
+    const proposalId = new URLSearchParams(uri.query).get('proposal');
+    if (!proposalId) return '';
+    const proposal = this.editEngine.getProposal(proposalId);
+    if (!proposal) return '';
+    const rawPath = uri.path.replace(/^\//, '');
+    const file = proposal.files.find((f) => f.path === rawPath || f.path === uri.path);
+    return file ? file.newContent : '';
+  }
+
+  public update(uri: vscode.Uri): void {
+    this._onDidChange.fire(uri);
+  }
+}
+

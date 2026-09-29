@@ -1,8 +1,8 @@
 {
   "name": "localforge-vscode",
   "displayName": "LocalForge: Local Copilot Agent",
-  "description": "Autonomous Copilot coding agent powered by local Ollama & remote GPU models (Ask, Plan, and Agent modes).",
-  "version": "0.1.6",
+  "description": "Production-grade local-first autonomous software engineering operating system powered by local Ollama & remote GPU models (Multi-Agent, Ask, Plan, Agent, Review, Automate).",
+  "version": "0.2.0",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
@@ -15,7 +15,7 @@
   },
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.106.0"
   },
   "categories": [
     "Machine Learning",
@@ -29,6 +29,8 @@
     "onCommand:localforge.reviewChanges",
     "onCommand:localforge.showArtifacts",
     "onCommand:localforge.diagnose",
+    "onCommand:localforge.doctor",
+    "onCommand:localforge.selfTest",
     "onCommand:localforge.refreshModels",
     "onCommand:localforge.connectRemote",
     "onCommand:localforge.disconnectRemote",
@@ -48,24 +50,10 @@
           "title": "LocalForge",
           "icon": "media/localforge.svg"
         }
-      ],
-      "activitybar": [
-        {
-          "id": "localforge",
-          "title": "LocalForge",
-          "icon": "media/localforge.svg"
-        }
       ]
     },
     "views": {
       "localforge-secondary": [
-        {
-          "type": "webview",
-          "id": "localforge.chatView",
-          "name": "LocalForge Agent"
-        }
-      ],
-      "localforge": [
         {
           "type": "webview",
           "id": "localforge.chatView",
@@ -97,6 +85,14 @@
       {
         "command": "localforge.diagnose",
         "title": "LocalForge: Diagnose Installation"
+      },
+      {
+        "command": "localforge.doctor",
+        "title": "LocalForge: Doctor"
+      },
+      {
+        "command": "localforge.selfTest",
+        "title": "LocalForge: Run Self-Test"
       },
       {
         "command": "localforge.refreshModels",
@@ -216,6 +212,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
+    "test:extension-host": "npm run compile && node tests/runExtensionHostTests.js",
     "package": "vsce package"
   },
   "dependencies": {
@@ -224,7 +221,8 @@
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/ssh2": "^1.15.5",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.106.0",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.0",
     "typescript": "^5.8.3"
   }

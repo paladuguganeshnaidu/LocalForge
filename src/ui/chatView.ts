@@ -22,6 +22,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   public activeStrategy: ExecutionStrategy = 'planning';
   private engine?: LocalForgeEngine;
   private currentProposal?: EditProposal;
+  private pendingPermissionRequests = new Map<string, (allowed: boolean) => void>();
 
   constructor(
     private readonly provider: ModelProvider,
@@ -29,6 +30,9 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     engine?: LocalForgeEngine
   ) {
     this.engine = engine;
+    if (this.engine) {
+      this.initPermissionHandler();
+    }
     const saved = this.context.workspaceState.get<Record<string, ChatMessage[]>>('localforge.conversations', {});
     if (saved && typeof saved === 'object') {
       for (const [key, msgs] of Object.entries(saved)) {
@@ -41,6 +45,27 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
   public setEngine(engine: LocalForgeEngine): void {
     this.engine = engine;
+    this.initPermissionHandler();
+  }
+
+  private initPermissionHandler(): void {
+    if (!this.engine) return;
+    this.engine.permissionManager.setApprovalHandler(async (request) => {
+      return new Promise<boolean>((resolve) => {
+        this.pendingPermissionRequests.set(request.id, resolve);
+        this.post({
+          type: 'permissionRequest',
+          request: {
+            id: request.id,
+            toolName: request.toolName,
+            category: request.category,
+            description: request.description,
+            command: request.command,
+            path: request.path
+          }
+        });
+      });
+    });
   }
 
   public modelForTask(task: ModelTask): string | undefined {
@@ -173,19 +198,21 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
       if (message.type === 'applyEdit') {
         if (this.engine && message.proposalId) {
-          const res = await this.engine.editEngine.applyProposal(message.proposalId, message.files);
+          const res = await this.engine.applyProposalAndValidate(
+            message.proposalId,
+            message.files,
+            (act: TurnActivity) => this.post({ type: 'activity', activity: act }),
+            (p: string) => this.post({ type: 'status', state: 'running', message: p }),
+            (art: Artifact) => this.post({ type: 'artifact', artifact: art })
+          );
           this.post({
             type: 'editResult',
-            success: res.failedCount === 0 && res.staleCount === 0,
-            summary: `Applied changes to ${res.appliedCount} file(s).`
+            success: res.success,
+            summary: res.success
+              ? `Applied changes to ${res.appliedCount} file(s).`
+              : `Apply failed: ${res.errors?.map((e: any) => e.error).join(', ') || 'Validation failed'}`
           });
-          this.post({ type: 'activity', activity: {
-            id: `act-${Date.now()}`,
-            category: 'Applying changes',
-            title: `Applied ${res.appliedCount} file(s) safely`,
-            status: res.failedCount === 0 ? 'success' : 'error',
-            timestamp: Date.now()
-          }});
+          this.post({ type: 'status', state: 'ready', message: 'Ready' });
         }
       }
 
@@ -231,6 +258,34 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           if (art) {
             this.post({ type: 'artifactUpdated', artifact: art });
           }
+        }
+      }
+
+      if (message.type === 'permissionResolved') {
+        const resolver = this.pendingPermissionRequests.get(message.requestId);
+        if (resolver) {
+          this.pendingPermissionRequests.delete(message.requestId);
+          if (message.decision === 'allow') {
+            resolver(true);
+          } else if (message.decision === 'deny') {
+            resolver(false);
+          } else if (message.decision === 'allow_session') {
+            if (this.engine) {
+              this.engine.permissionManager.setMode('ask_once_per_session');
+            }
+            resolver(true);
+          } else if (message.decision === 'always_allow') {
+            if (this.engine) {
+              this.engine.permissionManager.setMode('always_proceed');
+            }
+            resolver(true);
+          }
+        }
+      }
+
+      if (message.type === 'setPermissionMode') {
+        if (this.engine) {
+          this.engine.permissionManager.setMode(message.mode);
         }
       }
 
@@ -288,6 +343,10 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     if (this.engine) {
       this.engine.cancelCurrentTask();
     }
+    for (const resolver of this.pendingPermissionRequests.values()) {
+      resolver(false);
+    }
+    this.pendingPermissionRequests.clear();
     this.busy = false;
     this.post({ type: 'status', state: 'ready', message: 'Ready' });
     this.post({ type: 'activity', activity: {
@@ -635,6 +694,36 @@ function getHtml(webview: vscode.Webview): string {
       flex: 1;
       word-break: break-word;
     }
+    .timeline-status {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .timeline-status.started, .timeline-status.running {
+      background: var(--card-bg);
+      color: var(--accent);
+    }
+    .timeline-status.success {
+      background: rgba(46, 160, 67, 0.15);
+      color: var(--success);
+    }
+    .timeline-status.error, .timeline-status.failed {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--error);
+    }
+    .timeline-status.waiting_for_approval {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+    }
+    .msg-assistant.streaming::after {
+      content: ' ▌';
+      animation: blink 1s step-start infinite;
+      color: var(--accent);
+    }
+    @keyframes blink { 50% { opacity: 0; } }
 
     /* Message Cards */
     .msg-user {
@@ -715,6 +804,41 @@ function getHtml(webview: vscode.Webview): string {
       color: var(--fg);
     }
     .action-btn.secondary:hover { background: var(--card-bg); }
+
+    /* Permission Request Card */
+    .permission-card {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      background: var(--card-bg);
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 11.5px;
+    }
+    .permission-title {
+      font-weight: 600;
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .permission-desc {
+      color: var(--subtle);
+      font-family: monospace;
+      font-size: 11px;
+      word-break: break-all;
+      background: var(--bg);
+      padding: 4px 6px;
+      border-radius: 3px;
+    }
+    .permission-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
 
     /* Bottom Utility Toolbar */
     .toolbar-bar {
@@ -1411,6 +1535,9 @@ function getHtml(webview: vscode.Webview): string {
       }
     });
 
+    let streamingBubble = null;
+    let streamingText = '';
+
     // Inbound Messages
     window.addEventListener('message', (event) => {
       const msg = event.data;
@@ -1448,17 +1575,43 @@ function getHtml(webview: vscode.Webview): string {
         } else {
           isBusy = false;
           sendBtn.textContent = 'Send';
+          if (streamingBubble) {
+            streamingBubble.classList.remove('streaming');
+            streamingBubble = null;
+            streamingText = '';
+          }
         }
       }
 
       if (msg.type === 'activity') {
         const act = msg.activity;
         timelineContainer.style.display = 'flex';
-        const row = document.createElement('div');
-        row.className = 'timeline-row';
+        let row = act.id ? document.getElementById('act-row-' + act.id) : null;
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'timeline-row';
+          if (act.id) row.id = 'act-row-' + act.id;
+          timelineContainer.appendChild(row);
+        }
+        const statusClass = act.status ? ' timeline-status ' + act.status : '';
+        const statusBadge = act.status ? '<span class="' + statusClass + '">' + escapeHtml(act.status) + '</span>' : '';
+        const durationText = act.durationMs ? ' (' + (act.durationMs / 1000).toFixed(1) + 's)' : '';
+        const detailsText = act.details ? ' - ' + escapeHtml(act.details) : '';
         row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
-          '<span class="timeline-text">' + escapeHtml(act.title) + '</span>';
-        timelineContainer.appendChild(row);
+          '<span class="timeline-text">' + escapeHtml(act.title) + durationText + detailsText + '</span>' +
+          statusBadge;
+        mainScroll.scrollTop = mainScroll.scrollHeight;
+      }
+
+      if (msg.type === 'chunk') {
+        if (!streamingBubble) {
+          streamingBubble = document.createElement('div');
+          streamingBubble.className = 'msg-assistant streaming';
+          mainScroll.appendChild(streamingBubble);
+          streamingText = '';
+        }
+        streamingText += msg.content;
+        streamingBubble.innerHTML = escapeHtml(streamingText).replace(/\n/g, '<br>');
         mainScroll.scrollTop = mainScroll.scrollHeight;
       }
 
@@ -1476,6 +1629,81 @@ function getHtml(webview: vscode.Webview): string {
             vscode.postMessage({ type: 'showDiff', proposalId: activeProposal.id, filePath: f.path });
           });
           diffFileList.appendChild(item);
+        });
+
+        // In-feed review card
+        const card = document.createElement('div');
+        card.className = 'artifact-card';
+        card.innerHTML = '<div class="artifact-header">' +
+          '<div class="artifact-title"><span>Changes: ' + activeProposal.files.length + ' file(s) changed (+' + activeProposal.additions + ' -' + activeProposal.deletions + ')</span></div>' +
+          '<span class="model-badge">Review</span></div>' +
+          '<div class="artifact-body">' +
+          activeProposal.files.map(f => '<div>' + escapeHtml(f.path) + ' <span class="stat-add">+' + f.additions + '</span> <span class="stat-del">-' + f.deletions + '</span></div>').join('') +
+          '</div>' +
+          '<div class="artifact-actions">' +
+          '<button class="action-btn" id="apply-all-' + activeProposal.id + '">Apply All</button>' +
+          '<button class="action-btn secondary" id="review-diff-' + activeProposal.id + '">Review Diff</button>' +
+          '<button class="action-btn secondary" id="reject-' + activeProposal.id + '">Reject</button>' +
+          '</div>';
+        mainScroll.appendChild(card);
+        mainScroll.scrollTop = mainScroll.scrollHeight;
+
+        const applyBtn = document.getElementById('apply-all-' + activeProposal.id);
+        if (applyBtn) {
+          applyBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'applyEdit', proposalId: activeProposal.id });
+            card.remove();
+          });
+        }
+        const reviewBtn = document.getElementById('review-diff-' + activeProposal.id);
+        if (reviewBtn) {
+          reviewBtn.addEventListener('click', () => {
+            changesDrawer.classList.add('open');
+            if (activeProposal.files.length > 0) {
+              vscode.postMessage({ type: 'showDiff', proposalId: activeProposal.id, filePath: activeProposal.files[0].path });
+            }
+          });
+        }
+        const rejectBtn = document.getElementById('reject-' + activeProposal.id);
+        if (rejectBtn) {
+          rejectBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'rejectEdit', proposalId: activeProposal.id });
+            card.remove();
+          });
+        }
+      }
+
+      if (msg.type === 'permissionRequest') {
+        const req = msg.request;
+        const card = document.createElement('div');
+        card.className = 'permission-card';
+        card.id = 'perm-' + req.id;
+        card.innerHTML = '<div class="permission-title"><span>Permission Request: ' + escapeHtml(req.toolName) + '</span></div>' +
+          '<div class="permission-desc">' + escapeHtml(req.description || req.command || req.path || '') + '</div>' +
+          '<div class="permission-actions">' +
+          '<button class="action-btn" id="allow-' + req.id + '">Allow</button>' +
+          '<button class="action-btn secondary" id="deny-' + req.id + '">Deny</button>' +
+          '<button class="action-btn secondary" id="allow-session-' + req.id + '">Allow for Session</button>' +
+          '<button class="action-btn secondary" id="always-allow-' + req.id + '">Always Allow</button>' +
+          '</div>';
+        mainScroll.appendChild(card);
+        mainScroll.scrollTop = mainScroll.scrollHeight;
+
+        document.getElementById('allow-' + req.id)?.addEventListener('click', () => {
+          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'allow' });
+          card.remove();
+        });
+        document.getElementById('deny-' + req.id)?.addEventListener('click', () => {
+          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'deny' });
+          card.remove();
+        });
+        document.getElementById('allow-session-' + req.id)?.addEventListener('click', () => {
+          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'allow_session' });
+          card.remove();
+        });
+        document.getElementById('always-allow-' + req.id)?.addEventListener('click', () => {
+          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'always_allow' });
+          card.remove();
         });
       }
 
@@ -1510,10 +1738,17 @@ function getHtml(webview: vscode.Webview): string {
       }
 
       if (msg.type === 'done') {
-        const card = document.createElement('div');
-        card.className = 'msg-assistant';
-        card.innerHTML = escapeHtml(msg.fullResponse).replace(/\\n/g, '<br>');
-        mainScroll.appendChild(card);
+        if (streamingBubble) {
+          streamingBubble.classList.remove('streaming');
+          streamingBubble.innerHTML = escapeHtml(msg.fullResponse || streamingText).replace(/\\n/g, '<br>');
+          streamingBubble = null;
+          streamingText = '';
+        } else if (msg.fullResponse) {
+          const card = document.createElement('div');
+          card.className = 'msg-assistant';
+          card.innerHTML = escapeHtml(msg.fullResponse).replace(/\\n/g, '<br>');
+          mainScroll.appendChild(card);
+        }
         mainScroll.scrollTop = mainScroll.scrollHeight;
       }
     });

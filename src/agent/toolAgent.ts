@@ -3,7 +3,7 @@ import { ToolRegistry } from './toolRegistry';
 import { PermissionManager } from './permissionManager';
 import { AgentLoop, AgentMode, AgentState, AgentToolCallRecord, AgentStep } from './agentLoop';
 
-export type WorkspaceToolExecutor = (name: string, argumentsValue: Record<string, unknown>) => Promise<unknown>;
+export type WorkspaceToolExecutor = (name: string, argumentsValue: Record<string, unknown>, toolContext?: any) => Promise<unknown>;
 export type { AgentMode, AgentToolCallRecord, AgentStep, AgentState };
 
 export interface AgentToolEvent {

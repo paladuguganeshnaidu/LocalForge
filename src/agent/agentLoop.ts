@@ -1,6 +1,7 @@
 import { ChatMessage, ModelProvider, ModelToolCall, ModelToolDefinition } from '../providers/modelProvider';
 import { ToolRegistry } from './toolRegistry';
 import { PermissionManager } from './permissionManager';
+import { ToolCallParser } from './toolCallParser';
 
 export type AgentMode = 'ask' | 'plan' | 'agent';
 
@@ -44,9 +45,12 @@ export interface AgentState {
   };
 }
 
+export type ExecutionStrategy = 'fast' | 'planning';
+
 export interface AgentLoopOptions {
   signal?: AbortSignal;
   mode?: AgentMode;
+  strategy?: ExecutionStrategy;
   maxRounds?: number;
   maxCallsPerRound?: number;
   timeoutMs?: number;
@@ -75,6 +79,7 @@ export class AgentLoop {
 
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const mode = options.mode ?? 'agent';
+    const strategy = options.strategy ?? (mode === 'plan' ? 'planning' : 'fast');
     const task = messages.at(-1)?.content ?? '';
 
     const state: AgentState = {
@@ -95,51 +100,63 @@ export class AgentLoop {
 
     const tools = this.toolRegistry.getDefinitions(mode === 'ask' || mode === 'plan' ? 'read' : undefined);
     const allowList = new Set(tools.map((t) => t.function.name));
-    const systemPrompt = this.getSystemPrompt(mode, tools);
+    const systemPrompt = this.getSystemPrompt(mode, tools, strategy);
 
     const history: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...messages
     ];
 
-    const maxRounds = options.maxRounds ?? (mode === 'agent' ? 8 : 4);
-    const maxCalls = options.maxCallsPerRound ?? 3;
+    const maxRounds = options.maxRounds ?? (mode === 'agent' ? (strategy === 'planning' ? 10 : 6) : 4);
+    const maxCalls = options.maxCallsPerRound ?? 4;
 
     let finalResponse = '';
+
+    // Overall task timeout controller
+    const loopController = new AbortController();
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    if (options.timeoutMs && options.timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => loopController.abort(), options.timeoutMs);
+    }
+    if (options.signal) {
+      if (options.signal.aborted) {
+        loopController.abort();
+      } else {
+        options.signal.addEventListener('abort', () => loopController.abort());
+      }
+    }
+    const signal = loopController.signal;
 
     try {
       updateState('executing');
 
       for (let round = 0; round < maxRounds; round += 1) {
-        if (options.signal?.aborted) {
+        if (signal.aborted) {
           state.status = 'cancelled';
           throw new Error('Agent task was cancelled.');
         }
 
         options.onProgress?.(`Round ${round + 1} / ${maxRounds}`);
 
-        const response = await this.provider.chatWithTools(model, history, tools, options.signal);
-
-        let calls = response.tool_calls ?? [];
-        if (!calls.length && response.content) {
-          calls = this.extractTextToolCalls(response.content, allowList);
-        }
-
-        if (response.content?.trim()) {
-          options.onThought?.(response.content);
-        }
+        const response = await this.provider.chatWithTools(model, history, tools, signal);
+        const parsed = ToolCallParser.parse(response.content, response.tool_calls, allowList);
+        const calls = parsed.toolCalls;
 
         if (!calls.length) {
-          finalResponse = response.content?.slice(0, 30000) || 'Task completed.';
+          finalResponse = parsed.userVisibleText || 'Task completed.';
           state.status = 'completed';
           break;
         }
 
-        history.push(response);
+        history.push({
+          role: 'assistant',
+          content: parsed.userVisibleText,
+          tool_calls: calls
+        });
 
         const currentStep: AgentStep = {
           round: round + 1,
-          thought: response.content,
+          thought: undefined,
           toolCalls: [],
           timestamp: Date.now()
         };
@@ -191,7 +208,15 @@ export class AgentLoop {
           options.onToolStart?.(name, args, callId);
 
           try {
-            const result = await this.toolRegistry.executeTool(name, args, this.permissionManager);
+            // Per-tool timeout of 60 seconds
+            let timer: NodeJS.Timeout | undefined;
+            const timeoutPromise = new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error(`Tool "${name}" execution timed out after 60s.`)), 60000);
+            });
+            const toolPromise = this.toolRegistry.executeTool(name, args, this.permissionManager);
+            const result = await Promise.race([toolPromise, timeoutPromise]);
+            if (timer) clearTimeout(timer);
+
             callRecord.status = 'success';
             callRecord.result = result;
             callRecord.completedAt = Date.now();
@@ -219,7 +244,7 @@ export class AgentLoop {
         }
       }
     } catch (error: any) {
-      if (options.signal?.aborted) {
+      if (signal.aborted) {
         state.status = 'cancelled';
       } else {
         state.status = 'failed';
@@ -227,6 +252,7 @@ export class AgentLoop {
       }
       throw error;
     } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       state.timestamps.finishedAt = Date.now();
       updateState();
     }
@@ -234,7 +260,7 @@ export class AgentLoop {
     return { response: finalResponse, state };
   }
 
-  private getSystemPrompt(mode: AgentMode, tools: ModelToolDefinition[]): string {
+  private getSystemPrompt(mode: AgentMode, tools: ModelToolDefinition[], strategy: ExecutionStrategy = 'planning'): string {
     const toolList = tools.map((t) => `- ${t.function.name}: ${t.function.description}`).join('\n');
     if (mode === 'ask') {
       return `You are LocalForge in Ask Mode. Answer questions clearly, accurately, and thoroughly about the workspace and code.
@@ -252,15 +278,24 @@ ${toolList}
 
 Format your plan with the following clear markdown structure:
 ## Objective & Architecture
-## Files Affected (existing files to edit or new files to create)
-## Implementation Checklist (use markdown checkboxes: "- [ ] Step 1...")
-## Edge Cases & Verification
+## Files to Change (existing files to edit or new files to create)
+## Implementation Steps (use markdown checkboxes: "- [ ] Step 1...")
+## Dependencies & Risks
+## Verification
 
-Do NOT execute write tools or edit files in Plan Mode. Only output the plan for review.`;
+Do NOT execute write tools or edit files in Plan Mode. Only output the plan for review.
+When a read tool is required, output exactly one LOCALFORGE_TOOL_CALL object:
+{ "tool": "tool_name", "arguments": {...} }
+Do not surround it with markdown. Do not explain the tool call.`;
     }
+
+    const strategyInstructions = strategy === 'fast'
+      ? 'Execute the task directly and surgically with minimal overhead.'
+      : 'First inspect the architecture and affected files, understand dependencies, and verify changes.';
 
     return `You are LocalForge Copilot Agent, an autonomous software engineering assistant.
 You can inspect code, write/edit files, and run commands to complete coding tasks end-to-end.
+Strategy: ${strategy} (${strategyInstructions})
 Available workspace tools:
 ${toolList}
 
@@ -270,36 +305,10 @@ Workflow:
 3. Run tests or check status with run_command if needed.
 4. Conclude with a clear explanation of all changes made.
 
-You can invoke tools using native function calls, or by including:
-<tool_call>
-{"name": "tool_name", "arguments": {"arg1": "value"}}
-</tool_call>`;
-  }
-
-  private extractTextToolCalls(content: string, allowList: Set<string>): ModelToolCall[] {
-    const calls: ModelToolCall[] = [];
-    const tagPattern = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
-    let match: RegExpExecArray | null;
-    while ((match = tagPattern.exec(content)) !== null) {
-      try {
-        const parsed = JSON.parse(match[1].trim()) as {
-          name?: string;
-          tool?: string;
-          arguments?: Record<string, unknown>;
-          args?: Record<string, unknown>;
-        };
-        const toolName = parsed.name || parsed.tool;
-        const toolArgs = parsed.arguments || parsed.args || {};
-        if (toolName && allowList.has(toolName)) {
-          calls.push({
-            id: `text-call-${calls.length + 1}`,
-            type: 'function',
-            function: { name: toolName, arguments: JSON.stringify(toolArgs) }
-          });
-        }
-      } catch {}
-    }
-    return calls;
+When a tool is required, output exactly one LOCALFORGE_TOOL_CALL object:
+{ "tool": "tool_name", "arguments": {...} }
+Do not surround it with markdown. Do not explain the tool call.
+You may also invoke tools using native provider function calls or <tool_call>{"name": "...", "arguments": {...}}</tool_call>.`;
   }
 
   private parseArguments(call: ModelToolCall): Record<string, unknown> {

@@ -27,46 +27,27 @@ export function routeModelWithReason(
 ): RoutedResult | undefined {
   if (!models.length) return undefined;
 
-  const find = (value?: string) => {
-    if (!value) return undefined;
-    return models.find((m) =>
-      m.id === value ||
-      m.name === value ||
-      m.displayName === value ||
-      m.providerId === value
-    );
-  };
-
   // 1. Explicit task configuration preference
   const configured = preferences[task];
   if (configured) {
-    const model = find(configured);
+    const model = models.find(
+      (m) => m.id === configured || m.name === configured || m.providerId === configured
+    );
     if (model) {
       return {
         model,
-        reason: `Configured preference for ${task}: ${model.displayName || model.name}`
+        reason: `Configured preference for ${task}: ${model.id || model.name}`
       };
     }
   }
 
   // 2. Explicit user selection (when not 'auto')
   if (userSelection && userSelection.toLowerCase() !== 'auto') {
-    const model = find(userSelection);
+    const model = models.find((m) => m.id === userSelection || m.name === userSelection);
     if (model) {
-      // Validate tool calling requirement for agent task
-      if (task === 'agent' && model.capabilities && !model.capabilities.toolCalling) {
-        // Warn / select tool-capable alternative if available
-        const capable = models.filter((m) => m.capabilities?.toolCalling);
-        if (capable.length) {
-          return {
-            model: capable[0],
-            reason: `User selection (${model.displayName || model.name}) lacks tool-calling. Auto-routed to ${capable[0].displayName || capable[0].name}.`
-          };
-        }
-      }
       return {
         model,
-        reason: `User selected: ${model.displayName || model.name}`
+        reason: `User selected: ${model.id || model.name}`
       };
     }
   }
@@ -137,6 +118,13 @@ export class ModelRouter {
   ): { modelId: string; reason: string; model?: LocalModel } {
     const models = this.getModelsFn();
     const res = routeModelWithReason(models, task, preferences, userSelection);
+    if (!res && userSelection && userSelection.toLowerCase() !== 'auto') {
+      return {
+        modelId: userSelection,
+        reason: `Explicitly selected model "${userSelection}" is not registered.`,
+        model: undefined
+      };
+    }
     return {
       modelId: res?.model?.id || res?.model?.name || userSelection || '',
       reason: res?.reason ?? 'Fallback to default',

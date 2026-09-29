@@ -72,29 +72,50 @@ export class OpenAiCompatibleProvider implements ModelProvider {
   }
 
   async chatWithTools(model: string, messages: ChatMessage[], tools: ModelToolDefinition[], signal?: AbortSignal): Promise<ChatMessage> {
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages, tools, stream: false }),
+        signal
+      });
+      if (response.ok) {
+        const data = await response.json() as ToolResponse;
+        if (data.error) throw new Error(data.error.message || `${this.id} returned an agent error.`);
+        const message = data.choices?.[0]?.message;
+        if (message) {
+          const toolCalls = (message.tool_calls ?? []).flatMap((call) => {
+            if (!call.function?.name) return [];
+            return [{
+              id: call.id,
+              type: 'function' as const,
+              function: { name: call.function.name, arguments: call.function.arguments ?? '{}' }
+            }];
+          });
+          return { role: 'assistant', content: message.content ?? '', ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
+        }
+      }
+    } catch (err: any) {
+      if (signal?.aborted) throw err;
+      // Fallback if tools are unsupported
+    }
+
+    // Fallback: standard chat without native tools parameter
+    const fallbackResponse = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, tools, stream: false }),
+      body: JSON.stringify({ model, messages, stream: false }),
       signal
     });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`${this.id} agent request failed (${response.status}): ${detail || response.statusText}`);
+    if (!fallbackResponse.ok) {
+      const detail = await fallbackResponse.text();
+      throw new Error(`${this.id} agent request failed (${fallbackResponse.status}): ${detail || fallbackResponse.statusText}`);
     }
-    const data = await response.json() as ToolResponse;
-    if (data.error) throw new Error(data.error.message || `${this.id} returned an agent error.`);
-    const message = data.choices?.[0]?.message;
-    if (!message) throw new Error(`${this.id} returned an invalid tool-call response.`);
-    const toolCalls = (message.tool_calls ?? []).flatMap((call) => {
-      if (!call.function?.name) return [];
-      return [{
-        id: call.id,
-        type: 'function' as const,
-        function: { name: call.function.name, arguments: call.function.arguments ?? '{}' }
-      }];
-    });
-    return { role: 'assistant', content: message.content ?? '', ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
+    const fallbackData = await fallbackResponse.json() as ToolResponse;
+    if (fallbackData.error) throw new Error(fallbackData.error.message || `${this.id} returned an agent error.`);
+    const fallbackMessage = fallbackData.choices?.[0]?.message;
+    if (!fallbackMessage) throw new Error(`${this.id} returned an invalid response.`);
+    return { role: 'assistant', content: fallbackMessage.content ?? '' };
   }
 }
 
@@ -107,7 +128,8 @@ async function consumeSseLine(line: string, onToken: (token: string) => void): P
   try {
     chunk = JSON.parse(data) as CompletionChunk;
   } catch {
-    throw new Error('The OpenAI-compatible server returned malformed streaming data.');
+    // Malformed SSE data recovery
+    return;
   }
   if (chunk.error) throw new Error(chunk.error.message || 'The OpenAI-compatible server returned an error.');
   const content = chunk.choices?.[0]?.delta?.content;

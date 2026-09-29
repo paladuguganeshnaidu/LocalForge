@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
+import { exec } from 'node:child_process';
 import { ModelRegistry } from '../providers/modelRegistry';
 import { RemoteManager } from '../remote/remoteManager';
 import { WorkspaceIndexer } from '../context/workspaceIndexer';
+import { ToolRegistry } from '../agent/toolRegistry';
+import { PermissionManager } from '../agent/permissionManager';
 
 export type DiagnosticStatus = 'green' | 'yellow' | 'red';
 
@@ -22,29 +25,60 @@ export class DiagnosticsService {
   constructor(
     private readonly registry: ModelRegistry,
     private readonly remoteManager: RemoteManager,
-    private readonly indexer?: WorkspaceIndexer
+    private readonly indexer?: WorkspaceIndexer,
+    private readonly toolRegistry?: ToolRegistry,
+    private readonly permissionManager?: PermissionManager
   ) {}
 
   public async runDiagnostics(): Promise<DiagnosticsReport> {
     const items: DiagnosticItem[] = [];
 
-    // 1. Workspace Trust
+    // 1. Environment & Platform
+    items.push({
+      name: 'Host Environment',
+      status: 'green',
+      details: `VS Code: ${vscode.version}, Node.js: ${process.version}, Platform: ${process.platform} (${process.arch})`
+    });
+
+    // 2. Workspace Trust & State
     if (vscode.workspace.isTrusted) {
+      const folders = vscode.workspace.workspaceFolders || [];
       items.push({
-        name: 'Workspace Trust',
+        name: 'Workspace State',
         status: 'green',
-        details: 'Workspace is trusted. All file operations and tools are enabled.'
+        details: `Workspace is trusted with ${folders.length} folder(s) loaded.`
       });
     } else {
       items.push({
-        name: 'Workspace Trust',
+        name: 'Workspace State',
         status: 'red',
         details: 'Workspace is untrusted. File reads, edits, and terminal tools are disabled.',
         remediation: 'Click the Manage Workspace Trust button in the VS Code status bar and trust this workspace.'
       });
     }
 
-    // 2. Local Ollama Runtime & Endpoints
+    // 3. Git Installation & Repository Status
+    const gitItem = await new Promise<DiagnosticItem>((resolve) => {
+      exec('git --version', { timeout: 10000 }, (err, stdout) => {
+        if (err) {
+          resolve({
+            name: 'Git Integration',
+            status: 'yellow',
+            details: 'Git CLI is not found in PATH.',
+            remediation: 'Install Git and ensure it is available in your system PATH.'
+          });
+        } else {
+          resolve({
+            name: 'Git Integration',
+            status: 'green',
+            details: `Git is available: ${stdout.trim()}`
+          });
+        }
+      });
+    });
+    items.push(gitItem);
+
+    // 4. Local Ollama & Provider Runtime
     await this.registry.refresh();
     const providers = this.registry.getProviders();
     const localOllama = providers.find((p) => p.id === 'ollama');
@@ -64,7 +98,7 @@ export class DiagnosticsService {
       });
     }
 
-    // 3. Model Discovery & Capabilities
+    // 5. Model Discovery & Capabilities
     const allModels = this.registry.getAllModels();
     if (allModels.length > 0) {
       const toolCallingCount = allModels.filter((m) => m.capabilities?.toolCalling).length;
@@ -83,27 +117,56 @@ export class DiagnosticsService {
       });
     }
 
-    // 4. Remote GPU & SSH Tunnel
+    // 6. GPU & Acceleration Status
+    const gpuItem = await new Promise<DiagnosticItem>((resolve) => {
+      exec('nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader', { timeout: 10000 }, (err, stdout) => {
+        if (!err && stdout.trim()) {
+          resolve({
+            name: 'Local GPU Acceleration',
+            status: 'green',
+            details: `Detected local NVIDIA GPU: ${stdout.trim().split('\n')[0]}`
+          });
+        } else {
+          resolve({
+            name: 'Local GPU Acceleration',
+            status: 'green',
+            details: 'No local NVIDIA discrete GPU detected or nvidia-smi unavailable. Running in CPU/APU or remote mode.'
+          });
+        }
+      });
+    });
+    items.push(gpuItem);
+
+    // 7. Remote GPU Connections
     const activeRemote = this.remoteManager.getActiveSession();
     if (activeRemote) {
       const gpu = activeRemote.gpuStatus?.[0];
       const gpuText = gpu ? gpu.displayText : 'GPU detected via SSH';
       items.push({
-        name: 'Remote GPU System',
+        name: 'Remote GPU Connection',
         status: 'green',
         details: `Connected to ${activeRemote.profile.name} (${activeRemote.profile.host}). ${gpuText}`
       });
     } else {
       const profiles = this.remoteManager.getProfiles();
       items.push({
-        name: 'Remote GPU System',
-        status: profiles.length > 0 ? 'yellow' : 'green',
-        details: profiles.length > 0 ? `${profiles.length} remote GPU profile(s) configured, currently idle.` : 'No remote GPU hosts configured (optional).',
-        remediation: profiles.length > 0 ? 'Use "Connect Remote GPU" in settings if you want to offload heavy inference.' : undefined
+        name: 'Remote GPU Connection',
+        status: 'green',
+        details: profiles.length > 0 ? `${profiles.length} remote GPU profile(s) configured, currently idle.` : 'No remote GPU hosts configured (optional).'
       });
     }
 
-    // 5. Context Indexing
+    // 8. Tool Registry Inventory
+    if (this.toolRegistry) {
+      const toolCount = this.toolRegistry.getAllTools().length;
+      items.push({
+        name: 'Tool Registry',
+        status: 'green',
+        details: `${toolCount} core tools registered across read, edit, execute, and browser categories.`
+      });
+    }
+
+    // 9. Context Indexing
     if (this.indexer) {
       const stats = this.indexer.getStats();
       items.push({
@@ -135,19 +198,21 @@ export class DiagnosticsService {
   }
 
   public formatReportMarkdown(report: DiagnosticsReport): string {
-    const icon = report.overallStatus === 'green' ? '🟢 Healthy' : report.overallStatus === 'yellow' ? '🟡 Warnings Detected' : '🔴 Action Required';
+    const statusText = report.overallStatus === 'green' ? '[HEALTHY]' : report.overallStatus === 'yellow' ? '[WARNINGS DETECTED]' : '[ACTION REQUIRED]';
     const lines = [
-      `# 🛠️ LocalForge Installation Diagnostics`,
-      `**Overall Health**: ${icon}`,
-      `*Checked at: ${new Date(report.timestamp).toLocaleTimeString()}*`,
+      `# LocalForge Doctor Report`,
+      `**Overall Health**: ${statusText}`,
+      `*Checked at: ${new Date(report.timestamp).toLocaleString()}*`,
       '',
       '---',
+      '',
+      '## Subsystem Diagnostics',
       ''
     ];
 
     for (const item of report.items) {
-      const itemIcon = item.status === 'green' ? '✓' : item.status === 'yellow' ? '⚠️' : '❌';
-      lines.push(`### ${itemIcon} ${item.name}`);
+      const itemBadge = item.status === 'green' ? '[PASS]' : item.status === 'yellow' ? '[WARN]' : '[FAIL]';
+      lines.push(`### ${itemBadge} ${item.name}`);
       lines.push(`${item.details}`);
       if (item.remediation) {
         lines.push(`> **Fix**: ${item.remediation}`);

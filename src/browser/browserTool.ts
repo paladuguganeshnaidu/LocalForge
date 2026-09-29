@@ -77,40 +77,65 @@ export class BrowserTool {
       };
     }
 
-    this.activeUrl = url;
-    this.consoleErrors = [];
-
-    // Simulate / launch local browser for verification
-    return {
-      action: 'open',
-      url,
-      success: true,
-      pageTitle: `Browser session at ${url}`,
-      consoleErrors: []
-    };
+    return this.navigate(url);
   }
 
   public async navigate(url: string): Promise<BrowserActionResult> {
     this.activeUrl = url;
-    return {
-      action: 'navigate',
-      url,
-      success: true,
-      pageTitle: `Navigated to ${url}`
-    };
+    this.consoleErrors = [];
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'LocalForge-Browser/0.1.7' }
+      });
+      clearTimeout(timeout);
+
+      const html = await response.text();
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const pageTitle = titleMatch ? titleMatch[1].trim() : `Web page at ${url}`;
+      const textSnippet = html
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 1000);
+
+      if (!response.ok) {
+        this.consoleErrors.push(`HTTP ${response.status} ${response.statusText}`);
+      }
+
+      return {
+        action: 'navigate',
+        url,
+        success: response.ok,
+        pageTitle,
+        textSnippet,
+        consoleErrors: [...this.consoleErrors],
+        error: response.ok ? undefined : `HTTP error ${response.status}: ${response.statusText}`
+      };
+    } catch (err: any) {
+      const errorMsg = err.name === 'AbortError' ? 'Connection timed out' : (err.message || 'Connection failed');
+      this.consoleErrors.push(errorMsg);
+      return {
+        action: 'navigate',
+        url,
+        success: false,
+        error: `Could not reach ${url}: ${errorMsg}`,
+        consoleErrors: [...this.consoleErrors]
+      };
+    }
   }
 
   public async readPage(): Promise<BrowserActionResult> {
     if (!this.activeUrl) {
       return { action: 'read', success: false, error: 'No active browser page open.' };
     }
-
-    return {
-      action: 'read',
-      url: this.activeUrl,
-      success: true,
-      textSnippet: `Verified active web application content at ${this.activeUrl}`
-    };
+    return this.navigate(this.activeUrl);
   }
 
   public getConsoleErrors(): string[] {

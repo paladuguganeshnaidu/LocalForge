@@ -24,6 +24,11 @@ import { TurnManager, AgentTurn, TurnActivity, ExecutionStrategy } from './turnM
 import { TerminalManager } from '../terminal/terminalManager';
 import { BrowserTool, BROWSER_TOOL_DEFINITION } from '../browser/browserTool';
 import { ContextReferenceResolver } from '../context/referenceResolver';
+import { MultiAgentOrchestrator, OrchestratorOptions, OrchestrationResult } from '../agent/orchestration/orchestrator';
+import { CheckpointManager } from '../agent/orchestration/checkpointManager';
+import { registerAllCoreTools } from '../agent/coreTools';
+import { ProductMode } from '../agent/orchestration/types';
+import { LocalForgeSelfTest } from './selfTest';
 
 export interface EngineInitOptions {
   ollamaEndpoint?: string;
@@ -57,6 +62,9 @@ export class LocalForgeEngine {
   public readonly terminalManager: TerminalManager;
   public readonly browserTool: BrowserTool;
   public readonly referenceResolver: ContextReferenceResolver;
+  public readonly orchestrator: MultiAgentOrchestrator;
+  public readonly checkpointManager: CheckpointManager;
+  public readonly selfTest: LocalForgeSelfTest;
 
   public indexer?: WorkspaceIndexer;
   public contextEngine?: ContextEngine;
@@ -86,7 +94,6 @@ export class LocalForgeEngine {
 
     this.permissionManager = new PermissionManager('allow_safe_auto');
     this.toolRegistry = new ToolRegistry();
-    this.registerDefaultTools();
 
     this.editEngine = new EditEngine();
     this.agentEngine = new AgentEngine(this.toolRegistry, this.permissionManager, this.editEngine);
@@ -101,19 +108,46 @@ export class LocalForgeEngine {
     this.browserTool = new BrowserTool();
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
 
+    this.orchestrator = new MultiAgentOrchestrator(
+      this.compositeProvider,
+      this.toolRegistry,
+      this.permissionManager,
+      this.editEngine
+    );
+    this.checkpointManager = new CheckpointManager(context.workspaceState);
+    this.selfTest = new LocalForgeSelfTest(this);
+
+    this.registerDefaultTools();
     this.initWorkspaceContext();
 
     this.diagnosticsService = new DiagnosticsService(
       this.modelRegistry,
       this.remoteManager,
-      this.indexer
+      this.indexer,
+      this.toolRegistry,
+      this.permissionManager
     );
   }
 
   private registerDefaultTools(): void {
     for (const toolDef of allWorkspaceTools) {
-      this.toolRegistry.registerTool(toolDef, (args) => executeWorkspaceTool(toolDef.function.name, args));
+      this.toolRegistry.registerTool(toolDef, (args) =>
+        executeWorkspaceTool(toolDef.function.name, args, {
+          editEngine: this.editEngine,
+          terminalManager: this.terminalManager,
+          autoApply: this.permissionManager.shouldAutoApplyEdits(),
+          signal: this.currentAbortController?.signal
+        })
+      );
     }
+    registerAllCoreTools(this.toolRegistry, {
+      editEngine: this.editEngine,
+      terminalManager: this.terminalManager,
+      artifactManager: this.artifactManager,
+      browserTool: this.browserTool,
+      autoApply: this.permissionManager.shouldAutoApplyEdits(),
+      signal: this.currentAbortController?.signal
+    });
   }
 
   private initWorkspaceContext(): void {
@@ -225,6 +259,48 @@ export class LocalForgeEngine {
         }
         case 'terminal': {
           if (effectivePrompt) {
+            if (!vscode.workspace.isTrusted) {
+              return {
+                runId: `run-${Date.now()}`,
+                task: `Run terminal command: ${effectivePrompt}`,
+                mode: effectiveMode,
+                response: 'Terminal execution is blocked: workspace is not trusted.',
+                filesModified: [],
+                validationAttempts: [],
+                status: 'failed',
+                durationMs: 0
+              };
+            }
+
+            try {
+              this.permissionManager.validateCommandSafety(effectivePrompt);
+            } catch (err: any) {
+              return {
+                runId: `run-${Date.now()}`,
+                task: `Run terminal command: ${effectivePrompt}`,
+                mode: effectiveMode,
+                response: `Command blocked by safety policy: ${err.message}`,
+                filesModified: [],
+                validationAttempts: [],
+                status: 'failed',
+                durationMs: 0
+              };
+            }
+
+            const allowed = await this.permissionManager.checkPermission('run_command', { command: effectivePrompt });
+            if (!allowed) {
+              return {
+                runId: `run-${Date.now()}`,
+                task: `Run terminal command: ${effectivePrompt}`,
+                mode: effectiveMode,
+                response: `Permission denied for command: \`${effectivePrompt}\`.`,
+                filesModified: [],
+                validationAttempts: [],
+                status: 'failed',
+                durationMs: 0
+              };
+            }
+
             const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (rootPath) {
               const proc = await this.terminalManager.runCommand(effectivePrompt, rootPath);
@@ -303,16 +379,27 @@ export class LocalForgeEngine {
       strategy
     });
 
-    const emitActivity = (category: any, title: string, details?: string, targetPath?: string) => {
+    const activeActivities = new Map<string, TurnActivity>();
+
+    const emitActivity = (
+      category: any,
+      title: string,
+      status: any = 'running',
+      details?: string,
+      targetPath?: string,
+      id?: string
+    ) => {
       const act = this.turnManager.addActivity(turn.turnId, {
+        id,
         category,
         title,
         details,
         targetPath,
-        status: 'running'
+        status
       });
       onActivity?.(act);
       onProgress?.(`${category}: ${title}`);
+      return act;
     };
 
     // 2. Resolve @ references
@@ -327,13 +414,10 @@ export class LocalForgeEngine {
 
     // 3. Context retrieval
     if (this.contextEngine) {
-      emitActivity('Searching', 'Analyzing workspace context');
       const ctx = await this.contextEngine.assembleContext(effectivePrompt, { maxTokens: 16000, includeWorkspace: true });
       contextHeader += ctx.promptText;
       session.lastContextPreview = ctx.summary;
     }
-
-    emitActivity('Thinking', 'Preparing agent execution plan');
 
     const messages: ChatMessage[] = [
       ...session.messages.slice(-10),
@@ -352,24 +436,49 @@ export class LocalForgeEngine {
         messages,
         {
           mode: effectiveMode,
+          strategy,
           signal,
           onProgress: (p) => {
             onProgress?.(p);
           },
           onThought: onToken,
-          onToolStart: (name, args, _id) => {
+          onToolStart: (name, args, callId) => {
+            let cat: any = 'Working';
+            let title = `Running tool ${name}`;
+            let targetPath: string | undefined;
+
             if (name === 'search_workspace') {
-              emitActivity('Searching', `Searching workspace for "${(args as any).query || ''}"`);
+              cat = 'Searching';
+              title = `Searching workspace for "${(args as any).query || ''}"`;
             } else if (name === 'read_workspace_file') {
-              emitActivity('Reading', `Reading file ${(args as any).path || ''}`, undefined, (args as any).path);
+              cat = 'Reading';
+              targetPath = (args as any).path;
+              title = `Reading ${targetPath || 'file'}`;
             } else if (name === 'write_workspace_file' || name === 'edit_workspace_file') {
-              emitActivity('Editing', `Preparing edit for ${(args as any).path || ''}`, undefined, (args as any).path);
+              cat = 'Editing';
+              targetPath = (args as any).path;
+              title = `Preparing edit for ${targetPath || 'file'}`;
             } else if (name === 'run_command') {
-              emitActivity('Running', `Running: ${(args as any).command || ''}`);
+              cat = 'Running';
+              title = `Running: ${(args as any).command || ''}`;
             } else if (name === 'browser_action') {
-              emitActivity('Browser', `Browser action: ${(args as any).action || ''}`);
-            } else {
-              emitActivity('Working', `Running tool: ${name}`);
+              cat = 'Browser';
+              title = `Browser action: ${(args as any).action || ''}`;
+            }
+
+            const act = emitActivity(cat, title, 'running', undefined, targetPath, callId);
+            activeActivities.set(callId, act);
+          },
+          onToolEnd: (name, res, error, callId) => {
+            const existing = callId ? activeActivities.get(callId) : undefined;
+            if (existing) {
+              const updated = this.turnManager.updateActivity(turn.turnId, existing.id, {
+                status: error ? 'error' : 'success',
+                durationMs: Date.now() - existing.timestamp,
+                error: error || undefined,
+                resultSummary: res ? (typeof res === 'object' ? JSON.stringify(res).slice(0, 150) : String(res).slice(0, 150)) : undefined
+              });
+              if (updated) onActivity?.(updated);
             }
           }
         },
@@ -388,10 +497,16 @@ export class LocalForgeEngine {
         });
         this.turnManager.addArtifact(turn.turnId, planArtifact);
         onArtifact?.(planArtifact);
-        emitActivity('Planning', 'Implementation Plan prepared for review');
+        emitActivity('Planning', 'Implementation Plan prepared for review', 'waiting_for_approval');
       }
 
-      // Handle Walkthrough artifact creation if files were modified
+      // Check if edits are pending review
+      const pending = this.editEngine.getPendingProposals();
+      if (pending.length > 0) {
+        emitActivity('Waiting for approval', `${pending[0].files.length} file(s) changed - awaiting review`, 'waiting_for_approval');
+      }
+
+      // Handle Walkthrough artifact creation if files were already modified (e.g. In auto-apply mode)
       if (effectiveMode === 'agent' && result.filesModified.length > 0) {
         const walkthrough = this.artifactManager.createWalkthrough({
           summary: `Completed changes for: ${effectivePrompt.slice(0, 80)}`,
@@ -408,7 +523,7 @@ export class LocalForgeEngine {
       }
 
       this.turnManager.completeTurn(turn.turnId, 'completed', result.filesModified);
-      emitActivity('Completed', 'Task completed');
+      emitActivity('Completed', 'Task completed', 'success');
 
       session.messages.push({ role: 'user', content: userPrompt });
       session.messages.push({ role: 'assistant', content: result.response });
@@ -425,10 +540,111 @@ export class LocalForgeEngine {
       return result;
     } catch (err: any) {
       this.turnManager.completeTurn(turn.turnId, signal.aborted ? 'cancelled' : 'failed');
-      emitActivity(signal.aborted ? 'Cancelled' : 'Failed', signal.aborted ? 'Task cancelled' : 'Task execution failed');
+      emitActivity(signal.aborted ? 'Cancelled' : 'Failed', signal.aborted ? 'Task cancelled' : 'Task execution failed', signal.aborted ? 'cancelled' : 'error');
       throw err;
     } finally {
       this.currentAbortController = undefined;
     }
+  }
+
+  public async applyProposalAndValidate(
+    proposalId: string,
+    files?: string[],
+    onActivity?: (act: TurnActivity) => void,
+    onProgress?: (msg: string) => void,
+    onArtifact?: (art: Artifact) => void
+  ): Promise<any> {
+    const session = this.sessionManager.getActiveSession();
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const turn = this.turnManager.startTurn({
+      conversationId: session.id,
+      modelId: session.model || '',
+      mode: 'agent',
+      strategy: 'fast'
+    });
+
+    const emitAct = (cat: any, title: string, status: any = 'running', details?: string) => {
+      const act = this.turnManager.addActivity(turn.turnId, {
+        category: cat,
+        title,
+        status,
+        details
+      });
+      onActivity?.(act);
+      onProgress?.(`${cat}: ${title}`);
+      return act;
+    };
+
+    const editResult = await this.editEngine.applyProposal(proposalId, files);
+    if (!editResult.success) {
+      emitAct('Editing', 'Failed to apply proposal changes', 'error', editResult.errors.map((e) => e.error).join(', '));
+      this.turnManager.completeTurn(turn.turnId, 'failed');
+      return editResult;
+    }
+
+    emitAct('Editing', `Applied changes to ${editResult.appliedCount} file(s) safely`, 'success');
+
+    if (workspaceRoot && editResult.appliedFiles.length > 0) {
+      emitAct('Validating', 'Running project validation tests...', 'running');
+      const attempts = await this.agentEngine.validateAndRepair(
+        this.compositeProvider,
+        session.model || '',
+        session.messages,
+        'Applied proposed edits.',
+        editResult.appliedFiles,
+        workspaceRoot,
+        {
+          onProgress: (p) => {
+            onProgress?.(p);
+            if (p.includes('Repair')) {
+              emitAct('Repairing', p, 'running');
+            }
+          }
+        }
+      );
+
+      const allPassed = attempts.length === 0 || attempts.every((a) => a.result.passed);
+      emitAct('Validating', allPassed ? 'Validation passed' : 'Validation completed with warnings', allPassed ? 'success' : 'error');
+
+      // Generate Walkthrough
+      const walkthrough = this.artifactManager.createWalkthrough({
+        summary: `Applied and validated ${editResult.appliedFiles.length} file(s)`,
+        filesChanged: editResult.appliedFiles,
+        behaviorChanges: 'Implemented and reviewed code changes.',
+        testsRun: attempts.length ? `${attempts.length} test run(s)` : 'Project default test suite',
+        validationResult: allPassed ? 'All validation checks passed' : 'Validation check failed',
+        verificationSteps: 'Inspect modified files and run test suite.',
+        conversationId: session.id,
+        turnId: turn.turnId
+      });
+      this.turnManager.addArtifact(turn.turnId, walkthrough);
+      onArtifact?.(walkthrough);
+    }
+
+    this.turnManager.completeTurn(turn.turnId, 'completed', editResult.appliedFiles);
+    emitAct('Completed', 'Implementation verified', 'success');
+
+    session.filesModified = Array.from(new Set([...session.filesModified, ...editResult.appliedFiles]));
+    await this.sessionManager.saveSession(session);
+
+    return editResult;
+  }
+
+  public async executeMultiAgentTask(
+    userGoal: string,
+    mode: ProductMode = 'agent',
+    modelPreference?: string,
+    options: OrchestratorOptions = {}
+  ): Promise<OrchestrationResult> {
+    const routing = this.modelRouter.route(mode === 'agent' ? 'agent' : 'chat', modelPreference);
+    const chosenModel = routing.modelId;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!workspaceRoot) {
+      throw new Error('Open a workspace folder before executing multi-agent tasks.');
+    }
+    return this.orchestrator.executeGoal(userGoal, chosenModel, workspaceRoot, {
+      ...options,
+      mode
+    });
   }
 }

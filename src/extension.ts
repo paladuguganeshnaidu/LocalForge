@@ -77,6 +77,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider('localforge.chatView', viewProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
+    vscode.workspace.registerTextDocumentContentProvider(
+      'localforge-proposed',
+      engine.editEngine.createContentProvider()
+    ),
     vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, completionProvider),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor) {
@@ -154,6 +158,31 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.window.showTextDocument(doc, { preview: true });
     }),
 
+    vscode.commands.registerCommand('localforge.doctor', async () => {
+      const report = await engine.diagnosticsService.runDiagnostics();
+      const markdown = engine.diagnosticsService.formatReportMarkdown(report);
+      const doc = await vscode.workspace.openTextDocument({
+        content: markdown,
+        language: 'markdown'
+      });
+      await vscode.window.showTextDocument(doc, { preview: true });
+    }),
+
+    vscode.commands.registerCommand('localforge.selfTest', async () => {
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Running LocalForge Autonomous Agent Self-Test...' },
+        async () => {
+          const report = await engine.selfTest.runSelfTest();
+          const markdown = engine.selfTest.formatReportMarkdown(report);
+          const doc = await vscode.workspace.openTextDocument({
+            content: markdown,
+            language: 'markdown'
+          });
+          await vscode.window.showTextDocument(doc, { preview: true });
+        }
+      );
+    }),
+
     vscode.commands.registerCommand('localforge.continueTask', async () => {
       const lastTask = engine.taskManager.getLastTask();
       if (!lastTask) {
@@ -218,31 +247,38 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('localforge.setAgentMode', async () => {
-      const pick = await vscode.window.showQuickPick(['Ask', 'Plan', 'Agent'], {
-        placeHolder: 'Select LocalForge agent mode'
-      });
-      if (pick) {
-        const mode = pick.toLowerCase() as any;
-        viewProvider.activeMode = mode;
-        void vscode.window.showInformationMessage(`LocalForge agent mode set to: ${pick}`);
+    vscode.commands.registerCommand('localforge.setAgentMode', async (targetMode?: string) => {
+      let mode = targetMode;
+      if (!mode) {
+        const pick = await vscode.window.showQuickPick(['Ask', 'Plan', 'Agent'], {
+          placeHolder: 'Select LocalForge agent mode'
+        });
+        if (pick) mode = pick.toLowerCase();
+      }
+      if (mode) {
+        viewProvider.activeMode = mode.toLowerCase() as any;
+        void vscode.window.showInformationMessage(`LocalForge agent mode set to: ${mode}`);
       }
     }),
 
-    vscode.commands.registerCommand('localforge.setModel', async () => {
-      const models = engine.modelRegistry.getModels();
-      const items = [
-        { label: 'Auto', description: 'Smart capability-based task routing', id: 'auto' },
-        ...models.map((m) => ({
-          label: m.displayName || m.name,
-          description: `${m.providerId} (${m.source})`,
-          id: m.id || m.name
-        }))
-      ];
-      const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select active model' });
-      if (pick) {
-        viewProvider.selectedModel = pick.id;
-        void vscode.window.showInformationMessage(`Selected model: ${pick.label}`);
+    vscode.commands.registerCommand('localforge.setModel', async (targetModel?: string) => {
+      let modelId = targetModel;
+      if (!modelId) {
+        const models = engine.modelRegistry.getModels();
+        const items = [
+          { label: 'Auto', description: 'Smart capability-based task routing', id: 'auto' },
+          ...models.map((m) => ({
+            label: m.displayName || m.name,
+            description: `${m.providerId} (${m.source})`,
+            id: m.id || m.name
+          }))
+        ];
+        const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select active model' });
+        if (pick) modelId = pick.id;
+      }
+      if (modelId) {
+        viewProvider.selectedModel = modelId;
+        void vscode.window.showInformationMessage(`Selected model: ${modelId}`);
       }
     }),
 

@@ -74,3 +74,57 @@ export function inferModelCapabilities(name: string, size?: number): ModelCapabi
     confidence
   };
 }
+
+export type ToolCallingSupport = 'supported' | 'unsupported' | 'unknown';
+
+export function getToolCallingStatus(capabilities: ModelCapabilities): {
+  status: ToolCallingSupport;
+  confidence: CapabilityConfidence;
+} {
+  const conf = capabilities.confidence?.toolCalling ?? 'inferred';
+  if (conf === 'high' || conf === 'medium') {
+    return {
+      status: capabilities.toolCalling ? 'supported' : 'unsupported',
+      confidence: conf
+    };
+  }
+  return {
+    status: capabilities.toolCalling ? 'supported' : 'unknown',
+    confidence: conf
+  };
+}
+
+export function evaluateRuntimeCapabilities(
+  name: string,
+  size?: number,
+  runtimeMetadata?: {
+    capabilities?: string[];
+    template?: string;
+  }
+): ModelCapabilities {
+  const base = inferModelCapabilities(name, size);
+
+  if (runtimeMetadata) {
+    if (Array.isArray(runtimeMetadata.capabilities)) {
+      const hasTools = runtimeMetadata.capabilities.includes('tools');
+      base.toolCalling = hasTools;
+      base.confidence = {
+        ...base.confidence,
+        toolCalling: 'high'
+      };
+    } else if (runtimeMetadata.template) {
+      const hasToolsInTemplate =
+        runtimeMetadata.template.includes('.Tools') ||
+        runtimeMetadata.template.includes('[AVAILABLE_TOOLS]') ||
+        runtimeMetadata.template.includes('{{- if .Tools }}');
+      base.toolCalling = hasToolsInTemplate;
+      base.confidence = {
+        ...base.confidence,
+        toolCalling: 'high'
+      };
+    }
+  }
+
+  return base;
+}
+

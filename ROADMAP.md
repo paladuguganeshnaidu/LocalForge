@@ -8,6 +8,33 @@ LocalForge is a local-first AI software engineer for VS Code. It discovers model
 
 ## Status & Milestones
 
+### Completed in v0.1.7
+- [x] **Canonical Live Activity Model & Real Progress System**:
+  - Unified TurnManager activity lifecycle (`started`, `running`, `success`, `error`, `cancelled`, `waiting_for_approval`) and categories (`Planning`, `Searching`, `Reading`, `Working`, `Editing`, `Running`, `Browser`, `Waiting for approval`, `Validating`, `Repairing`, `Completed`, `Failed`, `Cancelled`).
+  - In-place duration tracking, error reporting, and live timeline rendering.
+  - Zero fake activity: strictly tied to real tool execution hooks and operational status.
+- [x] **Centralized ContextBudget Authority**:
+  - `ContextBudget` authoritative budget calculator enforcing token allocation across system instructions, conversation history, active file/selection, open tabs, git context, diagnostics, and workspace snippets.
+- [x] **Real-Time Incremental Workspace Indexing**:
+  - Integrated `vscode.workspace.createFileSystemWatcher` in `WorkspaceIndexer` for instant incremental updates on file creates, edits, and deletes.
+- [x] **Real Incremental Streaming & Webview Token Rendering**:
+  - Real-time incremental token rendering in webview (`msg.type === 'chunk'`) with animated cursor and separate channels for text, activity, proposals, and artifacts.
+- [x] **Robust Multi-Format Tool Calling & Protocol Safety**:
+  - Native function calls, XML `<tool_call>`, fenced JSON, raw JSON, and `LOCALFORGE_TOOL_CALL` protocols.
+  - Absolute leakage prevention: raw tool JSON never renders in chat bubbles.
+- [x] **Patch-First Diff Review, Validation & Bounded Repair Loop**:
+  - Agent edits create `EditProposal` objects with diff review before application.
+  - Applying proposals triggers automated project test detection (Node, Python, Rust, Go), execution, and bounded repair loop (up to 3 attempts).
+  - Walkthrough artifact generated upon successful verification.
+- [x] **Windows & Cross-Platform Process Lifecycle**:
+  - `TerminalManager` process tree killing via `taskkill /pid ... /T /F` on Windows and cooperative `AbortSignal` cancellation propagation.
+- [x] **Capability-Gated Browser Verification**:
+  - Real HTTP verification and page title/snippet extraction for local endpoints without simulated stubs.
+- [x] **High-Volume Stress Testing Suite**:
+  - 1,000 tool-call inputs, 1,000 malformed inputs, 1,000 path security checks, 1,000 message contract checks, 100 edit proposals, 100 permissions, 100 agent loops, 10 real terminal executions, model switching, and concurrent cancellations.
+- [x] **Real VS Code Extension Host Integration Testing**:
+  - Added `@vscode/test-electron` test harness running automated end-to-end tests inside real VS Code runtime.
+
 ### Completed in v0.1.6
 - [x] **Antigravity IDE Agent Side Panel Experience**:
   - Implemented Secondary Sidebar view (`contributes.viewsContainers.secondarySidebar`).

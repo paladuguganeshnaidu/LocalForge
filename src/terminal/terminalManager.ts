@@ -1,28 +1,52 @@
 import { spawn, ChildProcess } from 'node:child_process';
 import * as vscode from 'vscode';
 
+export type ProcessStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'timed_out';
+
 export interface ManagedProcess {
   id: string;
   command: string;
   cwd: string;
   isBackground: boolean;
-  status: 'running' | 'completed' | 'failed' | 'stopped';
+  status: ProcessStatus;
   startTime: number;
   endTime?: number;
+  duration?: number;
   exitCode?: number;
   stdout: string;
   stderr: string;
+  processId?: number;
 }
 
 export class TerminalManager {
   private processes = new Map<string, ManagedProcess>();
   private activeChildren = new Map<string, ChildProcess>();
 
+  private killChildTree(child: ChildProcess): void {
+    if (!child.pid) return;
+    try {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+      } else {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          child.kill('SIGTERM');
+        }
+      }
+    } catch {
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+    }
+  }
+
   public runCommand(
     command: string,
     cwd: string,
     isBackground = false,
-    timeoutMs = 60000
+    timeoutMs = 60000,
+    signal?: AbortSignal
   ): Promise<ManagedProcess> {
     const id = `proc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const record: ManagedProcess = {
@@ -30,7 +54,7 @@ export class TerminalManager {
       command,
       cwd,
       isBackground,
-      status: 'running',
+      status: 'queued',
       startTime: Date.now(),
       stdout: '',
       stderr: ''
@@ -38,14 +62,56 @@ export class TerminalManager {
 
     this.processes.set(id, record);
 
+    if (signal?.aborted) {
+      record.status = 'stopped';
+      record.endTime = Date.now();
+      record.duration = 0;
+      record.stderr = 'Command aborted before execution.';
+      return Promise.resolve(record);
+    }
+
     return new Promise((resolve) => {
-      // Use shell for command execution
+      record.status = 'running';
+      let timedOut = false;
+      let timer: NodeJS.Timeout | undefined;
+
+      const abortHandler = () => {
+        record.status = 'stopped';
+        record.endTime = Date.now();
+        record.duration = record.endTime - record.startTime;
+        record.stderr += '\nCommand cancelled by user.';
+        const child = this.activeChildren.get(id);
+        if (child) {
+          this.killChildTree(child);
+        }
+        resolve(record);
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      if (!isBackground && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          timedOut = true;
+          record.status = 'timed_out';
+          record.endTime = Date.now();
+          record.duration = record.endTime - record.startTime;
+          record.stderr += `\nCommand timed out after ${timeoutMs}ms.`;
+          const child = this.activeChildren.get(id);
+          if (child) {
+            this.killChildTree(child);
+          }
+          resolve(record);
+        }, timeoutMs);
+      }
+
       const child = spawn(command, {
         cwd,
-        shell: true,
-        timeout: isBackground ? undefined : timeoutMs
+        shell: true
       });
 
+      record.processId = child.pid;
       this.activeChildren.set(id, child);
 
       child.stdout?.on('data', (data: Buffer | string) => {
@@ -57,23 +123,32 @@ export class TerminalManager {
       });
 
       child.on('close', (code) => {
+        if (timer) clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', abortHandler);
         this.activeChildren.delete(id);
-        record.endTime = Date.now();
-        record.exitCode = code ?? (record.status === 'stopped' ? 130 : 0);
-        record.status = record.status === 'stopped' ? 'stopped' : code === 0 ? 'completed' : 'failed';
-        resolve(record);
+        if (!timedOut && record.status !== 'stopped') {
+          record.endTime = Date.now();
+          record.duration = record.endTime - record.startTime;
+          record.exitCode = code ?? 0;
+          record.status = code === 0 ? 'completed' : 'failed';
+          resolve(record);
+        }
       });
 
       child.on('error', (err) => {
+        if (timer) clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', abortHandler);
         this.activeChildren.delete(id);
-        record.endTime = Date.now();
-        record.status = 'failed';
-        record.stderr += `\nProcess error: ${err.message}`;
-        resolve(record);
+        if (!timedOut && record.status !== 'stopped') {
+          record.endTime = Date.now();
+          record.duration = record.endTime - record.startTime;
+          record.status = 'failed';
+          record.stderr += `\nProcess error: ${err.message}`;
+          resolve(record);
+        }
       });
 
       if (isBackground) {
-        // Resolve immediately so caller doesn't wait indefinitely for long-running servers
         resolve(record);
       }
     });
@@ -86,7 +161,7 @@ export class TerminalManager {
       proc.status = 'stopped';
     }
     if (child) {
-      child.kill('SIGTERM');
+      this.killChildTree(child);
       this.activeChildren.delete(id);
       return true;
     }

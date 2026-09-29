@@ -1,5 +1,5 @@
 import { LocalModel, ModelProvider } from './modelProvider';
-import { inferModelCapabilities, ModelCapabilities, ModelMetadata, ModelSource } from './modelCapabilities';
+import { inferModelCapabilities, evaluateRuntimeCapabilities, ModelCapabilities, ModelMetadata, ModelSource } from './modelCapabilities';
 import { ModelTask } from './modelRouter';
 
 export interface ProviderHealth {
@@ -91,7 +91,13 @@ export class ModelRegistry {
       const { providerId, entry, models } = res.value;
       for (const m of models) {
         const id = `${providerId}:${encodeURIComponent(m.name)}`;
-        const capabilities = m.capabilities || inferModelCapabilities(m.name, m.size);
+        let runtimeCaps: { capabilities?: string[]; template?: string } | undefined;
+        if (typeof (entry.provider as any).showModel === 'function') {
+          try {
+            runtimeCaps = await (entry.provider as any).showModel(m.name);
+          } catch {}
+        }
+        const capabilities = m.capabilities || evaluateRuntimeCapabilities(m.name, m.size, runtimeCaps);
         const displayName = m.displayName || `${m.name} (${entry.source === 'remote' ? 'Remote GPU' : providerId})`;
 
         const metadata: ModelMetadata = {

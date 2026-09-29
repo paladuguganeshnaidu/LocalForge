@@ -141,6 +141,15 @@ Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (
 - **Host Key Pinning**: Remote SSH connections verify and store SHA-256 host key fingerprints to prevent MITM attacks.
 - **Strict Command Policies**: Auto-safe execution rejects dangerous shell chaining (`&&`, `||`, `;`, `|`, `2>`, `&`, `$()`). Only verified safe read and test commands run automatically.
 
+## Testing & Verification
+
+LocalForge employs a rigorous multi-tier testing strategy:
+
+- **Unit & Integration Tests**: `npm test` runs 85 automated test suites spanning model providers, canonical model routing, multi-format tool call parsing, layered permission policies, unified diff generation, two-phase atomic editing, and full end-to-end task loops.
+- **High-Volume Stress Tests**: `tests/highVolumeStress.test.js` exercises 1,000 tool-call parser inputs across all syntaxes, 1,000 malformed inputs, 1,000 path security traversals, 1,000 webview message validations, 100 edit proposals, 100 permission checks, 100 synthetic agent loops, 10 real terminal executions, and concurrent cancellation scenarios.
+- **VS Code Extension Host Tests**: `npm run test:extension-host` verifies extension activation, command registration, Secondary Sidebar view contributions, diagnostics execution, and workspace filesystem operations inside real VS Code runtime environments.
+- **Production Packaging**: `npm run package` compiles the TypeScript codebase and packages the production-ready `.vsix` bundle via `@vscode/vsce`.
+
 ---
 
 ## License
