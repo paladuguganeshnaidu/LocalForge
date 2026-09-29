@@ -116,16 +116,44 @@ export function parseModelTurn(content: string, nativeCalls: ModelToolCall[] = [
     }
   }
 
-  const jsonCandidatePattern = /(?:^|\n)\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*(?=\n|$)/g;
-  let candidateMatch: RegExpExecArray | null;
-  while ((candidateMatch = jsonCandidatePattern.exec(visible)) !== null) {
-    const parsed = tryParseJsonBlock(candidateMatch[1]);
-    const before = toolCalls.length;
-    const added = appendParsed(parsed, before);
-    if (added) {
-      hadSyntax = true;
-      visible = visible.replace(candidateMatch[1], '');
+  // Balanced JSON scan catches nested objects/arrays that a non-greedy regex cannot parse.
+  let searchFrom = 0;
+  while (searchFrom < visible.length) {
+    let found = false;
+    for (let start = searchFrom; start < visible.length; start += 1) {
+      const opening = visible[start];
+      if (opening !== '{' && opening !== '[') continue;
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let end = start; end < visible.length; end += 1) {
+        const ch = visible[end];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '"') inString = false;
+          continue;
+        }
+        if (ch === '"') { inString = true; continue; }
+        if (ch === '{' || ch === '[') depth += 1;
+        else if (ch === '}' || ch === ']') depth -= 1;
+        if (depth === 0) {
+          const candidate = visible.slice(start, end + 1);
+          const parsed = tryParseJsonBlock(candidate);
+          const before = toolCalls.length;
+          const added = appendParsed(parsed, before);
+          if (added) {
+            hadSyntax = true;
+            visible = visible.slice(0, start) + visible.slice(end + 1);
+            searchFrom = Math.max(0, start - 1);
+            found = true;
+          }
+          break;
+        }
+      }
+      if (found) break;
     }
+    if (!found) break;
   }
 
   const deduped: ModelToolCall[] = [];
