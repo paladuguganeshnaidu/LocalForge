@@ -202,7 +202,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test:extension-host": "node tests/vscode-host/run.cjs"
   },
   "dependencies": {
     "ssh2": "^1.16.0"
