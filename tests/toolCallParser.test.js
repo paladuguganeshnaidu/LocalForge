@@ -143,3 +143,15 @@ test('ToolCallParser strips <think> reasoning even when no tools are called', ()
   assert.equal(parsed.userVisibleText, 'LocalForge is a local AI coding agent.');
   assert.ok(!parsed.userVisibleText.includes('<think>'));
 });
+
+test('ToolCallParser unwraps nested query objects and schema echoes', () => {
+  const content = '```json\n{"name": "search_workspace", "arguments": {"query": {"query": "package.json"}}}\n```';
+  const parsed = ToolCallParser.parse(content, undefined, new Set(['search_workspace']));
+
+  assert.equal(parsed.hadToolCallSyntax, true);
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0].function.name, 'search_workspace');
+  const args = JSON.parse(parsed.toolCalls[0].function.arguments);
+  assert.equal(args.query, 'package.json');
+});
+

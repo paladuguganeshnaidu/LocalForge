@@ -1190,7 +1190,7 @@ function getHtml(webview: vscode.Webview): string {
   <!-- Conversation & Activity Scroll Area -->
   <div class="main-scroll" id="mainScroll">
     <div class="msg-assistant welcome">
-      <strong>LocalForge v0.2.1</strong><br>
+      <strong>LocalForge v0.2.2</strong><br>
       Local-first AI software engineer for VS Code. Select a mode or type a task below.
     </div>
     <div class="timeline" id="timelineContainer" style="display:none;"></div>

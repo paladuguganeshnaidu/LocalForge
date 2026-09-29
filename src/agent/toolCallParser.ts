@@ -193,30 +193,61 @@ export class ToolCallParser {
     return undefined;
   }
 
+  private static unwrapString(val: unknown, keyName?: string): string | undefined {
+    if (typeof val === 'string') {
+      return val.trim();
+    }
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      const obj = val as Record<string, unknown>;
+      // If it's a schema definition echo ({ type: 'string', description: '...' }), ignore
+      if (obj.type === 'string' && obj.description && !obj.value && !obj.text) {
+        return undefined;
+      }
+      const candidates = keyName
+        ? [keyName, 'value', 'text', 'content', 'query', 'path', 'file', 'command', 'cmd', 'target', 'replacement']
+        : ['value', 'text', 'content', 'query', 'path', 'file', 'command', 'cmd', 'target', 'replacement'];
+      for (const k of candidates) {
+        if (typeof obj[k] === 'string' && (obj[k] as string).trim()) {
+          return (obj[k] as string).trim();
+        }
+        if (obj[k] && typeof obj[k] === 'object') {
+          const nested = this.unwrapString(obj[k], keyName);
+          if (nested) return nested;
+        }
+      }
+    }
+    return undefined;
+  }
+
   private static normalizeArguments(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
     const copy = { ...args };
 
-    // Handle nested format like content: { type: 'string', value: '...' }
-    if (copy.content && typeof copy.content === 'object' && !Array.isArray(copy.content)) {
-      const c = copy.content as Record<string, unknown>;
-      if (typeof c.value === 'string') {
-        copy.content = c.value;
-      } else if (typeof c.text === 'string') {
-        copy.content = c.text;
+    for (const key of Object.keys(copy)) {
+      const val = copy[key];
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const unwrapped = this.unwrapString(val, key);
+        if (unwrapped !== undefined) {
+          copy[key] = unwrapped;
+        }
       }
     }
 
-    // Handle command: { command: '...' } or cmd: '...'
+    // Handle command aliases
     if (!copy.command && typeof copy.cmd === 'string') {
       copy.command = copy.cmd;
     }
 
-    // Handle file: '...' -> path: '...'
+    // Handle file aliases
     if (!copy.path && typeof copy.file === 'string') {
       copy.path = copy.file;
     }
     if (!copy.path && typeof copy.filename === 'string') {
       copy.path = copy.filename;
+    }
+
+    // Handle query aliases
+    if (!copy.query && typeof copy.search === 'string') {
+      copy.query = copy.search;
     }
 
     return copy;

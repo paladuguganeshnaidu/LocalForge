@@ -693,10 +693,22 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
 }
 
 function getString(value: unknown, name: string, maxLength: number): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
+  let resolved: string | undefined;
+  if (typeof value === 'string') {
+    resolved = value;
+  } else if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    for (const k of [name, 'value', 'text', 'content', 'path', 'query', 'command', 'cmd', 'file']) {
+      if (typeof obj[k] === 'string' && (obj[k] as string).trim()) {
+        resolved = obj[k] as string;
+        break;
+      }
+    }
+  }
+  if (!resolved || !resolved.trim() || resolved.length > maxLength) {
     throw new Error(`Tool argument “${name}” must be a non-empty string up to ${maxLength} characters.`);
   }
-  return value.trim();
+  return resolved.trim();
 }
 
 function getWorkspaceRootUri(): vscode.Uri {

@@ -125,7 +125,12 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
   if (!vscode.workspace.isTrusted) throw new Error('Workspace tools are disabled until this workspace is trusted.');
 
   if (name === 'search_workspace') {
-    const query = getString(args.query, 'query', 1000);
+    let query = '';
+    try {
+      query = getString(args.query, 'query', 1000);
+    } catch {
+      query = '';
+    }
     const maxResults = typeof args.max_results === 'number' && Number.isInteger(args.max_results)
       ? Math.min(8, Math.max(1, args.max_results))
       : 4;
@@ -290,10 +295,22 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
 };
 
 function getString(value: unknown, name: string, maxLength: number): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
+  let resolved: string | undefined;
+  if (typeof value === 'string') {
+    resolved = value;
+  } else if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    for (const k of [name, 'value', 'text', 'content', 'path', 'query', 'command', 'cmd', 'file']) {
+      if (typeof obj[k] === 'string' && (obj[k] as string).trim()) {
+        resolved = obj[k] as string;
+        break;
+      }
+    }
+  }
+  if (!resolved || !resolved.trim() || resolved.length > maxLength) {
     throw new Error(`Tool argument “${name}” must be a non-empty string up to ${maxLength} characters.`);
   }
-  return value.trim();
+  return resolved.trim();
 }
 
 function getWorkspaceRootUri(): vscode.Uri {
