@@ -86,6 +86,20 @@ export class CompositeProvider implements ModelProvider {
       if (entry.actualName === model || entry.actualName === stripped) return entry;
     }
 
+    // Direct provider matching even if discovered map is empty
+    const colonIdx = model.indexOf(':');
+    if (colonIdx > 0) {
+      const providerId = model.slice(0, colonIdx).toLowerCase();
+      const provider = this.providers.find((p) => p.id.toLowerCase() === providerId);
+      if (provider) {
+        let actualName = model.slice(colonIdx + 1);
+        try {
+          actualName = decodeURIComponent(actualName);
+        } catch {}
+        return { provider, actualName };
+      }
+    }
+
     return undefined;
   }
 

@@ -128,27 +128,30 @@ export class ContextEngine {
     // 4. Workspace Retrieval
     if (options.includeWorkspace && budget.getRemainingTokens() > 500 && vscode.workspace.isTrusted) {
       if (this.indexer.getDocuments().length === 0) {
-        await this.indexer.indexWorkspace();
+        void this.indexer.indexWorkspace();
       }
 
-      const remainingTokens = budget.getRemainingTokens();
-      const matches = await this.retrieval.retrieve(query, this.indexer.getDocuments(), {
-        maxFiles: 5,
-        maxChars: remainingTokens * 4,
-        activeFileUri: editor?.document.uri.toString()
-      });
-
-      for (const match of matches) {
-        if (budget.getRemainingTokens() < 100) break;
-        const snippetText = `${match.path}:${match.startLine}\n\`\`\`\n${match.text}\n\`\`\``;
-        const alloc = budget.allocate('workspace_retrieval', snippetText, 800);
-        items.push({
-          source: 'retrieval',
-          label: `${match.path}:${match.startLine}`,
-          path: match.path,
-          content: alloc.text,
-          tokenEstimate: alloc.tokensUsed
+      const docs = this.indexer.getDocuments();
+      if (docs.length > 0) {
+        const remainingTokens = budget.getRemainingTokens();
+        const matches = await this.retrieval.retrieve(query, docs, {
+          maxFiles: 5,
+          maxChars: remainingTokens * 4,
+          activeFileUri: editor?.document.uri.toString()
         });
+
+        for (const match of matches) {
+          if (budget.getRemainingTokens() < 100) break;
+          const snippetText = `${match.path}:${match.startLine}\n\`\`\`\n${match.text}\n\`\`\``;
+          const alloc = budget.allocate('workspace_retrieval', snippetText, 800);
+          items.push({
+            source: 'retrieval',
+            label: `${match.path}:${match.startLine}`,
+            path: match.path,
+            content: alloc.text,
+            tokenEstimate: alloc.tokensUsed
+          });
+        }
       }
     }
 

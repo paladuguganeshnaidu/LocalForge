@@ -756,6 +756,30 @@ function getHtml(webview: vscode.Webview): string {
       font-size: 12px;
       line-height: 1.55;
     }
+    .msg-assistant.thinking-bubble {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-style: italic;
+      color: var(--subtle);
+      border: 1px dashed var(--border);
+      background: var(--card-bg);
+      padding: 8px 12px;
+      font-size: 12px;
+    }
+    .thinking-spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: lf-spin 0.8s linear infinite;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    @keyframes lf-spin {
+      to { transform: rotate(360deg); }
+    }
 
     /* Interactive Artifact Card */
     .artifact-card {
@@ -1190,7 +1214,7 @@ function getHtml(webview: vscode.Webview): string {
   <!-- Conversation & Activity Scroll Area -->
   <div class="main-scroll" id="mainScroll">
     <div class="msg-assistant welcome">
-      <strong>LocalForge v0.2.2</strong><br>
+      <strong>LocalForge v0.2.3</strong><br>
       Local-first AI software engineer for VS Code. Select a mode or type a task below.
     </div>
     <div class="timeline" id="timelineContainer" style="display:none;"></div>
@@ -1511,6 +1535,26 @@ function getHtml(webview: vscode.Webview): string {
       if (!text || isBusy) return;
       promptInput.value = '';
       slashPopup.classList.remove('open');
+
+      // Optimistically append user message bubble immediately
+      const userCard = document.createElement('div');
+      userCard.className = 'msg-user';
+      userCard.textContent = text;
+      mainScroll.appendChild(userCard);
+
+      // Optimistically append thinking indicator immediately
+      removeThinkingIndicator();
+      const thinkingIndicator = document.createElement('div');
+      thinkingIndicator.className = 'msg-assistant thinking-bubble';
+      thinkingIndicator.id = 'active-thinking-indicator';
+      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>LocalForge is thinking...</span>';
+      mainScroll.appendChild(thinkingIndicator);
+      mainScroll.scrollTop = mainScroll.scrollHeight;
+
+      isBusy = true;
+      sendBtn.textContent = 'Cancel';
+      footerStatusText.textContent = 'Analyzing task...';
+
       vscode.postMessage({
         type: 'chat',
         model: selectedModelId,
@@ -1519,6 +1563,11 @@ function getHtml(webview: vscode.Webview): string {
         includeWorkspace: true,
         agentMode: currentMode === 'agent'
       });
+    }
+
+    function removeThinkingIndicator() {
+      const existing = document.getElementById('active-thinking-indicator');
+      if (existing) existing.remove();
     }
 
     sendBtn.addEventListener('click', () => {
@@ -1609,9 +1658,15 @@ function getHtml(webview: vscode.Webview): string {
         if (msg.state === 'running' || msg.state === 'thinking') {
           isBusy = true;
           sendBtn.textContent = 'Cancel';
+          const indicator = document.getElementById('active-thinking-indicator');
+          if (indicator && msg.message) {
+            const span = indicator.querySelector('span:last-child');
+            if (span) span.textContent = msg.message;
+          }
         } else {
           isBusy = false;
           sendBtn.textContent = 'Send';
+          removeThinkingIndicator();
           if (streamingBubble) {
             streamingBubble.classList.remove('streaming');
             streamingBubble = null;
@@ -1641,6 +1696,7 @@ function getHtml(webview: vscode.Webview): string {
       }
 
       if (msg.type === 'chunk') {
+        removeThinkingIndicator();
         if (!streamingBubble) {
           streamingBubble = document.createElement('div');
           streamingBubble.className = 'msg-assistant streaming';
@@ -1767,14 +1823,19 @@ function getHtml(webview: vscode.Webview): string {
       }
 
       if (msg.type === 'userMessage') {
-        const card = document.createElement('div');
-        card.className = 'msg-user';
-        card.textContent = msg.content;
-        mainScroll.appendChild(card);
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        const userCards = mainScroll.querySelectorAll('.msg-user');
+        const lastUserCard = userCards[userCards.length - 1];
+        if (!lastUserCard || lastUserCard.textContent !== msg.content) {
+          const card = document.createElement('div');
+          card.className = 'msg-user';
+          card.textContent = msg.content;
+          mainScroll.appendChild(card);
+          mainScroll.scrollTop = mainScroll.scrollHeight;
+        }
       }
 
       if (msg.type === 'done') {
+        removeThinkingIndicator();
         if (streamingBubble) {
           streamingBubble.classList.remove('streaming');
           streamingBubble.innerHTML = escapeHtml(msg.fullResponse || streamingText).replace(/\n/g, '<br>');
@@ -1790,6 +1851,7 @@ function getHtml(webview: vscode.Webview): string {
       }
 
       if (msg.type === 'error') {
+        removeThinkingIndicator();
         if (streamingBubble) {
           streamingBubble.classList.remove('streaming');
           streamingBubble = null;

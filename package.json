@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LocalForge: Local Copilot Agent",
   "description": "Production-grade local-first autonomous software engineering operating system powered by local Ollama & remote GPU models (Multi-Agent, Ask, Plan, Agent, Review, Automate).",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
