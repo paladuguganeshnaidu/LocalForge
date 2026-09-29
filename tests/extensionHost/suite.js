@@ -23,6 +23,8 @@ async function run() {
     'localforge.reviewChanges',
     'localforge.showArtifacts',
     'localforge.diagnose',
+    'localforge.doctor',
+    'localforge.selfTest',
     'localforge.refreshModels',
     'localforge.connectRemote',
     'localforge.disconnectRemote',
@@ -42,9 +44,15 @@ async function run() {
   }
   console.log(`[ExtensionHost] PASS: All ${expectedCommands.length} commands verified registered.`);
 
-  // 3. Command execution verification (diagnose)
+  // 3. Command execution verification (diagnose, doctor, selfTest)
   await vscode.commands.executeCommand('localforge.diagnose');
   console.log('[ExtensionHost] PASS: localforge.diagnose executed without error.');
+
+  await vscode.commands.executeCommand('localforge.doctor');
+  console.log('[ExtensionHost] PASS: localforge.doctor executed without error.');
+
+  await vscode.commands.executeCommand('localforge.selfTest');
+  console.log('[ExtensionHost] PASS: localforge.selfTest executed without error.');
 
   // 4. Mode and model switching commands
   await vscode.commands.executeCommand('localforge.setAgentMode', 'ask');
@@ -74,9 +82,6 @@ async function run() {
   console.log('[ExtensionHost] PASS: Cancellation command verified.');
 
   console.log('[ExtensionHost] ALL EXTENSION HOST INTEGRATION TESTS PASSED CLEANLY.');
-  setTimeout(() => {
-    vscode.commands.executeCommand('workbench.action.quit');
-  }, 100);
 }
 
 module.exports = { run };
