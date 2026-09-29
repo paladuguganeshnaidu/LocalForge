@@ -145,13 +145,16 @@ export class EditEngine {
     const filePlan = proposal.files.find((f) => f.path === filePath);
     if (!filePlan) throw new Error(`File ${filePath} not in proposal.`);
 
-    const tempDocUri = vscode.Uri.parse(`localforge-proposed:${filePath}?proposal=${proposalId}`);
+    const proposedDocument = await vscode.workspace.openTextDocument({
+      content: filePlan.newContent,
+      language: 'plaintext'
+    });
 
     await vscode.commands.executeCommand(
       'vscode.diff',
       filePlan.uri,
-      tempDocUri,
-      `${filePath} (Proposed Changes)`
+      proposedDocument.uri,
+      filePath + ' (Proposed Changes)'
     );
   }
 
@@ -204,36 +207,23 @@ export class EditEngine {
       return result;
     }
 
-    // Phase 2: Apply all changes atomically
+    // Phase 2: Apply all changes as one VS Code workspace transaction.
     try {
       const workspaceEdit = new vscode.WorkspaceEdit();
       for (const file of filesToApply) {
         if (file.originalState === 'missing') {
           workspaceEdit.createFile(file.uri, { ignoreIfExists: false, overwrite: false });
+          workspaceEdit.insert(file.uri, new vscode.Position(0, 0), file.newContent);
+          continue;
         }
-        workspaceEdit.replace(
-          file.uri,
-          new vscode.Range(new vscode.Position(0, 0), new vscode.Position(1000000, 0)),
-          file.newContent
-        );
+
+        const document = await vscode.workspace.openTextDocument(file.uri);
+        const endPosition = document.positionAt(document.getText().length);
+        workspaceEdit.replace(file.uri, new vscode.Range(new vscode.Position(0, 0), endPosition), file.newContent);
       }
 
-      // If workspaceEdit execution is supported (inside VS Code host)
-      let applied = false;
-      try {
-        applied = await vscode.workspace.applyEdit(workspaceEdit);
-      } catch {
-        // Fallback to direct writes if headless testing
-        applied = false;
-      }
-
-      if (!applied) {
-        // Fallback file system write
-        for (const file of filesToApply) {
-          const encoded = Buffer.from(file.newContent, 'utf8');
-          await vscode.workspace.fs.writeFile(file.uri, encoded);
-        }
-      }
+      const applied = await vscode.workspace.applyEdit(workspaceEdit);
+      if (!applied) throw new Error('VS Code rejected the multi-file workspace edit. No changes were reported as applied.');
 
       for (const file of filesToApply) {
         file.status = 'applied';

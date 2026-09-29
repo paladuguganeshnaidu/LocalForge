@@ -174,18 +174,32 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'applyEdit') {
         if (this.engine && message.proposalId) {
           const res = await this.engine.editEngine.applyProposal(message.proposalId, message.files);
+          const success = res.success && res.failedCount === 0 && res.staleCount === 0;
           this.post({
             type: 'editResult',
-            success: res.failedCount === 0 && res.staleCount === 0,
-            summary: `Applied changes to ${res.appliedCount} file(s).`
+            success,
+            summary: success
+              ? 'Applied changes to ' + res.appliedCount + ' file(s).'
+              : res.staleCount > 0
+                ? 'Changes are stale. The task must be regenerated.'
+                : 'The changes could not be applied.'
           });
           this.post({ type: 'activity', activity: {
-            id: `act-${Date.now()}`,
-            category: 'Applying changes',
-            title: `Applied ${res.appliedCount} file(s) safely`,
-            status: res.failedCount === 0 ? 'success' : 'error',
+            id: 'act-' + Date.now(),
+            category: success ? 'Applying changes' : 'Failed',
+            title: success ? 'Applied ' + res.appliedCount + ' file(s) safely' : (res.errors[0]?.error || 'Apply failed'),
+            status: success ? 'success' : 'error',
             timestamp: Date.now()
           }});
+          if (success) {
+            await this.handleChatMessage({
+              model: this.selectedModel ?? '',
+              prompt: 'Continue the previous task after the approved changes. Verify the implementation, run the required validation, and finish the task.',
+              includeContext: true,
+              includeWorkspace: true,
+              agentMode: true
+            });
+          }
         }
       }
 
@@ -241,6 +255,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refresh(): Promise<void> {
+    let waitingForApproval = false;
     try {
       if (this.engine) {
         this.models = this.engine.modelRegistry.getModels();
@@ -334,9 +349,10 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     const mode = this.activeMode;
     const history = this.conversations.get(modelName) ?? [];
 
-    this.post({ type: 'status', state: 'thinking', message: 'Analyzing task...' });
+    this.post({ type: 'status', state: 'starting', message: 'Starting task...' });
     this.post({ type: 'userMessage', content: message.prompt });
 
+    let waitingForApproval = false;
     try {
       if (this.engine) {
         const summary = await this.engine.executeTask(
@@ -360,6 +376,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           }
         );
 
+        waitingForApproval = summary.status === 'waiting_for_approval';
+
         // Check for pending proposals in the edit engine
         const pending = this.engine.editEngine.getPendingProposals();
         if (pending.length > 0) {
@@ -373,6 +391,9 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         this.saveConversations();
 
         this.post({ type: 'done', fullResponse: summary.response });
+        if (waitingForApproval) {
+          this.post({ type: 'status', state: 'waiting_for_approval', message: 'Waiting for your review of the proposed changes.' });
+        }
       } else {
         // Fallback direct provider streaming
         this.activeChat = new AbortController();
@@ -405,7 +426,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     } finally {
       this.busy = false;
       this.activeChat = undefined;
-      this.post({ type: 'status', state: 'ready', message: 'Ready' });
+      if (!waitingForApproval) this.post({ type: 'status', state: 'ready', message: 'Ready' });
     }
   }
 
@@ -1442,7 +1463,7 @@ function getHtml(webview: vscode.Webview): string {
 
       if (msg.type === 'status') {
         footerStatusText.textContent = msg.message || 'Ready';
-        if (msg.state === 'running' || msg.state === 'thinking') {
+        if (msg.state === 'starting' || msg.state === 'running' || msg.state === 'thinking') {
           isBusy = true;
           sendBtn.textContent = 'Cancel';
         } else {
@@ -1456,8 +1477,9 @@ function getHtml(webview: vscode.Webview): string {
         timelineContainer.style.display = 'flex';
         const row = document.createElement('div');
         row.className = 'timeline-row';
+        const detail = act.details ? '<div class="timeline-detail">' + escapeHtml(act.details) + '</div>' : '';
         row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
-          '<span class="timeline-text">' + escapeHtml(act.title) + '</span>';
+          '<span class="timeline-text">' + escapeHtml(act.title) + detail + '</span>';
         timelineContainer.appendChild(row);
         mainScroll.scrollTop = mainScroll.scrollHeight;
       }
@@ -1507,6 +1529,15 @@ function getHtml(webview: vscode.Webview): string {
         card.textContent = msg.content;
         mainScroll.appendChild(card);
         mainScroll.scrollTop = mainScroll.scrollHeight;
+      }
+
+      if (msg.type === 'editResult') {
+        if (msg.success) {
+          activeProposal = null;
+          changesBadge.textContent = '0';
+          diffFileList.innerHTML = '';
+          proposalSummary.textContent = 'No active proposals';
+        }
       }
 
       if (msg.type === 'done') {

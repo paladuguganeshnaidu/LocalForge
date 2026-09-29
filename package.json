@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LocalForge: Local Copilot Agent",
   "description": "Autonomous Copilot coding agent powered by local Ollama & remote GPU models (Ask, Plan, and Agent modes).",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
@@ -15,13 +15,14 @@
   },
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.106.0"
   },
   "categories": [
     "Machine Learning",
     "Other"
   ],
   "activationEvents": [
+    "onCommand:localforge.selfTest",
     "onView:localforge.chatView",
     "onCommand:localforge.openAgent",
     "onCommand:localforge.newConversation",
@@ -48,24 +49,10 @@
           "title": "LocalForge",
           "icon": "media/localforge.svg"
         }
-      ],
-      "activitybar": [
-        {
-          "id": "localforge",
-          "title": "LocalForge",
-          "icon": "media/localforge.svg"
-        }
       ]
     },
     "views": {
       "localforge-secondary": [
-        {
-          "type": "webview",
-          "id": "localforge.chatView",
-          "name": "LocalForge Agent"
-        }
-      ],
-      "localforge": [
         {
           "type": "webview",
           "id": "localforge.chatView",
@@ -97,6 +84,10 @@
       {
         "command": "localforge.diagnose",
         "title": "LocalForge: Diagnose Installation"
+      },
+      {
+        "command": "localforge.selfTest",
+        "title": "LocalForge: Run End-to-End Self Test"
       },
       {
         "command": "localforge.refreshModels",
@@ -216,7 +207,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test:extension-host": "node tests/vscode-host/run.cjs"
   },
   "dependencies": {
     "ssh2": "^1.16.0"

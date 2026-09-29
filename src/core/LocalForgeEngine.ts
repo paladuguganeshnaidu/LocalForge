@@ -18,7 +18,7 @@ import { SessionManager } from './sessionManager';
 import { TaskManager } from './taskManager';
 import { DiagnosticsService } from './diagnosticsService';
 import { LocalForgeEventEmitter } from './events';
-import { allWorkspaceTools, executeWorkspaceTool } from '../agent/workspaceTools';
+import { allWorkspaceTools, executeWorkspaceTool, validateRelativeWorkspacePath } from '../agent/workspaceTools';
 import { ArtifactManager, Artifact } from './artifactManager';
 import { TurnManager, AgentTurn, TurnActivity, ExecutionStrategy } from './turnManager';
 import { TerminalManager } from '../terminal/terminalManager';
@@ -62,6 +62,8 @@ export class LocalForgeEngine {
   public contextEngine?: ContextEngine;
 
   private currentAbortController?: AbortController;
+  private activeConversationId?: string;
+  private activeTurnId?: string;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -98,6 +100,8 @@ export class LocalForgeEngine {
     this.artifactManager = new ArtifactManager();
     this.turnManager = new TurnManager();
     this.terminalManager = new TerminalManager();
+    this.toolRegistry.setEditProposalHandler((toolName, args) => this.createEditProposal(toolName, args));
+    this.toolRegistry.setCommandExecutionHandler((command, cwd) => this.terminalManager.runCommand(command, cwd, false, 60000));
     this.browserTool = new BrowserTool();
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
 
@@ -145,6 +149,106 @@ export class LocalForgeEngine {
 
   public isBusy(): boolean {
     return Boolean(this.currentAbortController);
+  }
+
+  public async runSelfTest(): Promise<{
+    ok: boolean;
+    workspace: string;
+    filePath: string;
+    command: string;
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  }> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) throw new Error('Open a workspace before running the LocalForge self-test.');
+
+    const smokeDir = vscode.Uri.joinPath(root, '.localforge-smoke');
+    const scriptUri = vscode.Uri.joinPath(smokeDir, 'hello.js');
+    const scriptContent = 'console.log("LocalForge working");\n';
+    const commandExecutable = process.execPath.includes(' ')
+      ? '"' + process.execPath.replace(/"/g, '\\\"') + '"'
+      : process.execPath;
+    const command = commandExecutable + ' hello.js';
+
+    try {
+      await vscode.workspace.fs.createDirectory(smokeDir);
+      await vscode.workspace.fs.writeFile(scriptUri, Buffer.from(scriptContent, 'utf8'));
+
+      const processResult = await this.terminalManager.runCommand(
+        command,
+        smokeDir.fsPath,
+        false,
+        15000
+      );
+
+      const ok = processResult.status === 'completed'
+        && processResult.exitCode === 0
+        && processResult.stdout.includes('LocalForge working');
+
+      if (!ok) {
+        throw new Error(
+          'LocalForge self-test failed. Exit code: ' + processResult.exitCode
+          + '\\nstdout: ' + processResult.stdout
+          + '\\nstderr: ' + processResult.stderr
+        );
+      }
+
+      return {
+        ok,
+        workspace: root.fsPath,
+        filePath: vscode.workspace.asRelativePath(scriptUri),
+        command: processResult.command,
+        stdout: processResult.stdout,
+        stderr: processResult.stderr,
+        exitCode: processResult.exitCode ?? -1
+      };
+    } finally {
+      try {
+        await vscode.workspace.fs.delete(smokeDir, { recursive: true, useTrash: false });
+      } catch {}
+    }
+  }
+
+  private async createEditProposal(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    if (!vscode.workspace.isTrusted) throw new Error('Workspace edits require a trusted workspace.');
+    const roots = vscode.workspace.workspaceFolders ?? [];
+    if (!roots.length) throw new Error('Open a workspace folder before editing.');
+    const root = roots[0].uri;
+    const rawPath = typeof args.path === 'string' ? args.path.trim() : '';
+    if (!rawPath) throw new Error('Edit tool requires a workspace-relative path.');
+    const segments = validateRelativeWorkspacePath(rawPath);
+    const path = segments.join('/');
+
+    let newContent = '';
+    if (toolName === 'write_workspace_file') {
+      newContent = typeof args.content === 'string' ? args.content : '';
+    } else {
+      const target = typeof args.target_content === 'string' ? args.target_content : '';
+      const replacement = typeof args.replacement_content === 'string' ? args.replacement_content : '';
+      if (!target) throw new Error('edit_workspace_file requires target_content.');
+      const uri = vscode.Uri.joinPath(root, ...segments);
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      const existing = new TextDecoder().decode(bytes);
+      const occurrences = existing.split(target).length - 1;
+      if (occurrences === 0) throw new Error('Target content was not found in ' + path + '.');
+      if (occurrences > 1) throw new Error('Target content occurs multiple times in ' + path + '.');
+      newContent = existing.replace(target, replacement);
+    }
+
+    if (newContent.length > 512 * 1024) throw new Error('Proposed file content exceeds the 512 KB safety limit.');
+    const proposal = await this.editEngine.proposeEdits(
+      root,
+      [{ path, newContent }],
+      toolName === 'write_workspace_file' ? 'Create or replace ' + path : 'Edit ' + path,
+      { conversationId: this.activeConversationId, turnId: this.activeTurnId }
+    );
+    return {
+      requiresApproval: true,
+      proposalId: proposal.id,
+      message: 'Prepared changes for review. Review and apply them before the agent continues.',
+      files: proposal.files.map((file) => ({ path: file.path, additions: file.additions, deletions: file.deletions }))
+    };
   }
 
   public async executeTask(
@@ -227,12 +331,16 @@ export class LocalForgeEngine {
           if (effectivePrompt) {
             const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (rootPath) {
-              const proc = await this.terminalManager.runCommand(effectivePrompt, rootPath);
+              const proc = await this.toolRegistry.executeTool(
+                'run_command',
+                { command: effectivePrompt, cwd: rootPath },
+                this.permissionManager
+              ) as any;
               return {
                 runId: `run-${Date.now()}`,
                 task: `Run terminal command: ${effectivePrompt}`,
                 mode: effectiveMode,
-                response: `Command: \`${proc.command}\`\nExit Code: ${proc.exitCode}\n\n\`\`\`\n${proc.stdout || proc.stderr || '(no output)'}\n\`\`\``,
+                response: 'Command: `' + proc.command + '`\\nExit Code: ' + proc.exitCode + '\\n\\n```\\n' + (proc.stdout || proc.stderr || '(no output)') + '\\n```',
                 filesModified: [],
                 validationAttempts: [],
                 status: proc.exitCode === 0 ? 'completed' : 'failed',
@@ -302,6 +410,8 @@ export class LocalForgeEngine {
       mode: effectiveMode,
       strategy
     });
+    this.activeConversationId = session.id;
+    this.activeTurnId = turn.turnId;
 
     const emitActivity = (category: any, title: string, details?: string, targetPath?: string) => {
       const act = this.turnManager.addActivity(turn.turnId, {
@@ -333,7 +443,7 @@ export class LocalForgeEngine {
       session.lastContextPreview = ctx.summary;
     }
 
-    emitActivity('Thinking', 'Preparing agent execution plan');
+    emitActivity('Working', 'Sending task to selected model');
 
     const messages: ChatMessage[] = [
       ...session.messages.slice(-10),
@@ -353,10 +463,16 @@ export class LocalForgeEngine {
         {
           mode: effectiveMode,
           signal,
+          timeoutMs: 120000,
           onProgress: (p) => {
             onProgress?.(p);
+            onActivity?.(this.turnManager.addActivity(turn.turnId, { category: 'Working', title: p, status: 'running' }));
           },
-          onThought: onToken,
+          onStateUpdate: (state) => {
+            if (state.status === 'planning') onActivity?.(this.turnManager.addActivity(turn.turnId, { category: 'Planning', title: 'Agent is planning the next step', status: 'running' }));
+            if (state.status === 'waiting_for_approval') onActivity?.(this.turnManager.addActivity(turn.turnId, { category: 'Waiting for approval', title: 'Changes are waiting for your review', status: 'running' }));
+          },
+          onThought: undefined,
           onToolStart: (name, args, _id) => {
             if (name === 'search_workspace') {
               emitActivity('Searching', `Searching workspace for "${(args as any).query || ''}"`);
@@ -371,6 +487,24 @@ export class LocalForgeEngine {
             } else {
               emitActivity('Working', `Running tool: ${name}`);
             }
+          },
+          onToolEnd: (name, result, error, _id) => {
+            let details: string | undefined;
+            if (name === 'run_command' && result && typeof result === 'object') {
+              const terminal = result as { exitCode?: number; stdout?: string; stderr?: string; durationMs?: number; status?: string };
+              details = [
+                terminal.exitCode !== undefined ? 'Exit code: ' + terminal.exitCode : '',
+                terminal.durationMs !== undefined ? 'Duration: ' + terminal.durationMs + ' ms' : '',
+                terminal.stdout ? terminal.stdout.slice(0, 4000) : '',
+                terminal.stderr ? terminal.stderr.slice(0, 3000) : ''
+              ].filter(Boolean).join('\\n');
+            }
+            onActivity?.(this.turnManager.addActivity(turn.turnId, {
+              category: error ? 'Failed' : name === 'run_command' ? 'Running' : 'Working',
+              title: error ? `Failed ${name}: ${error}` : `Completed ${name}`,
+              details,
+              status: error ? 'error' : 'success'
+            }));
           }
         },
         workspaceRoot
@@ -391,8 +525,13 @@ export class LocalForgeEngine {
         emitActivity('Planning', 'Implementation Plan prepared for review');
       }
 
+      if (result.status === 'waiting_for_approval') {
+        this.turnManager.completeTurn(turn.turnId, 'waiting_for_approval', []);
+        emitActivity('Waiting for approval', 'Review Changes before applying edits');
+      }
+
       // Handle Walkthrough artifact creation if files were modified
-      if (effectiveMode === 'agent' && result.filesModified.length > 0) {
+      if (result.status !== 'waiting_for_approval' && effectiveMode === 'agent' && result.filesModified.length > 0) {
         const walkthrough = this.artifactManager.createWalkthrough({
           summary: `Completed changes for: ${effectivePrompt.slice(0, 80)}`,
           filesChanged: result.filesModified,
@@ -407,8 +546,10 @@ export class LocalForgeEngine {
         onArtifact?.(walkthrough);
       }
 
-      this.turnManager.completeTurn(turn.turnId, 'completed', result.filesModified);
-      emitActivity('Completed', 'Task completed');
+      if (result.status !== 'waiting_for_approval') {
+        this.turnManager.completeTurn(turn.turnId, result.status === 'completed' ? 'completed' : 'failed', result.filesModified);
+        emitActivity(result.status === 'completed' ? 'Completed' : 'Failed', result.status === 'completed' ? 'Task completed' : 'Task failed');
+      }
 
       session.messages.push({ role: 'user', content: userPrompt });
       session.messages.push({ role: 'assistant', content: result.response });
@@ -429,6 +570,8 @@ export class LocalForgeEngine {
       throw err;
     } finally {
       this.currentAbortController = undefined;
+      this.activeConversationId = undefined;
+      this.activeTurnId = undefined;
     }
   }
 }

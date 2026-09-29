@@ -144,6 +144,18 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
+    vscode.commands.registerCommand('localforge.selfTest', async () => {
+      try {
+        const result = await engine.runSelfTest();
+        const message = 'Self-test passed: ' + result.filePath + ' -> ' + result.stdout.trim() + ' (exit ' + result.exitCode + ')';
+        void vscode.window.showInformationMessage(message);
+        return result;
+      } catch (error: any) {
+        void vscode.window.showErrorMessage('LocalForge self-test failed: ' + (error?.message || String(error)));
+        throw error;
+      }
+    }),
+
     vscode.commands.registerCommand('localforge.diagnose', async () => {
       const report = await engine.diagnosticsService.runDiagnostics();
       const markdown = engine.diagnosticsService.formatReportMarkdown(report);

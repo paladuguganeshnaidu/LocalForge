@@ -8,8 +8,21 @@ export interface RegisteredTool {
   source?: 'builtin' | 'mcp' | 'custom';
 }
 
+export type EditProposalHandler = (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+export type CommandExecutionHandler = (command: string, cwd: string) => Promise<unknown>;
+
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
+  private editProposalHandler?: EditProposalHandler;
+  private commandExecutionHandler?: CommandExecutionHandler;
+
+  public setEditProposalHandler(handler?: EditProposalHandler): void {
+    this.editProposalHandler = handler;
+  }
+
+  public setCommandExecutionHandler(handler?: CommandExecutionHandler): void {
+    this.commandExecutionHandler = handler;
+  }
 
   public registerTool(
     definition: ModelToolDefinition,
@@ -59,11 +72,20 @@ export class ToolRegistry {
       throw new Error(`Tool “${name}” is not allow-listed or registered.`);
     }
 
+    if (this.editProposalHandler && (name === 'write_workspace_file' || name === 'edit_workspace_file')) {
+      return this.editProposalHandler(name, args);
+    }
+
     if (permissionManager) {
       const allowed = await permissionManager.checkPermission(name, args);
       if (!allowed) {
         throw new Error(`Execution of tool “${name}” was rejected by user or permission policy.`);
       }
+    }
+
+    if (name === 'run_command' && this.commandExecutionHandler && typeof args.command === 'string') {
+      const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd();
+      return this.commandExecutionHandler(args.command, cwd);
     }
 
     return await tool.handler(args);
