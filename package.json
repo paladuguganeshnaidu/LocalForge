@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LocalForge: Local Copilot Agent",
   "description": "Autonomous Copilot coding agent powered by local Ollama & remote GPU models (Ask, Plan, and Agent modes).",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/localforge-marketplace-icon.png",
   "repository": {
@@ -15,7 +15,7 @@
   },
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.106.0"
   },
   "categories": [
     "Machine Learning",
@@ -48,24 +48,10 @@
           "title": "LocalForge",
           "icon": "media/localforge.svg"
         }
-      ],
-      "activitybar": [
-        {
-          "id": "localforge",
-          "title": "LocalForge",
-          "icon": "media/localforge.svg"
-        }
       ]
     },
     "views": {
       "localforge-secondary": [
-        {
-          "type": "webview",
-          "id": "localforge.chatView",
-          "name": "LocalForge Agent"
-        }
-      ],
-      "localforge": [
         {
           "type": "webview",
           "id": "localforge.chatView",
@@ -224,7 +210,7 @@
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/ssh2": "^1.15.5",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.106.0",
     "@vscode/vsce": "^3.2.0",
     "typescript": "^5.8.3"
   }
