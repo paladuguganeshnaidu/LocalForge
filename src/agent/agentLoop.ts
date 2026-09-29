@@ -104,11 +104,7 @@ export class AgentLoop {
         const parsed = parseModelTurn(response.content || '', response.tool_calls || []);
         if (parsed.parseWarnings.length) state.errors.push(...parsed.parseWarnings);
 
-        const calls = parsed.toolCalls.filter((call) => allowList.has(call.function?.name || ''));
-        for (const blocked of parsed.toolCalls.filter((call) => !allowList.has(call.function?.name || ''))) {
-          state.errors.push('Tool ' + (blocked.function?.name || 'unknown') + ' is unavailable in ' + state.mode + ' mode.');
-        }
-
+        const calls = parsed.toolCalls;
         if (!calls.length) {
           finalResponse = parsed.userVisibleText.slice(0, 30000) || 'Task completed.';
           state.status = 'completed';
@@ -144,6 +140,16 @@ export class AgentLoop {
             state.errors.push(name + ': ' + message);
             options.onToolEnd?.(name, undefined, message, callId);
             this.appendToolResult(history, call, name, { error: message });
+            continue;
+          }
+
+          if (!allowList.has(name)) {
+            record.status = 'blocked';
+            record.error = 'Tool is unavailable in ' + state.mode + ' mode.';
+            record.completedAt = Date.now();
+            state.errors.push(name + ': ' + record.error);
+            options.onToolEnd?.(name, undefined, record.error, callId);
+            this.appendToolResult(history, call, name, { error: record.error });
             continue;
           }
 
@@ -184,7 +190,7 @@ export class AgentLoop {
 
       if (!waitingForApproval && state.status !== 'completed' && state.status !== 'cancelled') {
         state.status = 'completed';
-        if (!finalResponse) finalResponse = 'I reached the agent step limit. Continue the task to proceed.';
+        if (!finalResponse) finalResponse = 'I reached the step limit for this interaction. Continue the task to proceed.';
       }
     } catch (error: any) {
       if (options.signal?.aborted || error?.name === 'AbortError') {
