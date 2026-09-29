@@ -427,9 +427,11 @@ export class LocalForgeEngine {
       contextHeader += 'Attached References:\n' + resolved.references.map((r) => `[${r.label}]\n${r.content}`).join('\n\n') + '\n\n';
     }
 
-    // 3. Context retrieval
+    // 3. Context retrieval - budget appropriately for local context windows
     if (this.contextEngine) {
-      const ctx = await this.contextEngine.assembleContext(effectivePrompt, { maxTokens: 16000, includeWorkspace: true });
+      const isLocal = !chosenModel.startsWith('remote:') && !chosenModel.startsWith('openai:');
+      const maxTokens = isLocal ? 2000 : 8000;
+      const ctx = await this.contextEngine.assembleContext(effectivePrompt, { maxTokens, includeWorkspace: true });
       contextHeader += ctx.promptText;
       session.lastContextPreview = ctx.summary;
     }

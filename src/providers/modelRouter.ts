@@ -64,9 +64,18 @@ export function routeModelWithReason(
           reason: `Auto selected ${remoteGpu.displayName || remoteGpu.name}: tool-calling enabled, remote GPU connected`
         };
       }
+      const coders = capable.filter((m) => m.capabilities?.codeCompletion || /coder|code/i.test(m.name || m.id || ''));
+      if (coders.length) {
+        const bestCoder = [...coders].sort((a, b) => (a.size || 0) - (b.size || 0))[0];
+        return {
+          model: bestCoder,
+          reason: `Auto selected ${bestCoder.displayName || bestCoder.name}: tool-calling capability verified (specialized coding model)`
+        };
+      }
+      const smallest = [...capable].sort((a, b) => (a.size || 0) - (b.size || 0))[0];
       return {
-        model: capable[0],
-        reason: `Auto selected ${capable[0].displayName || capable[0].name}: tool-calling capability verified`
+        model: smallest,
+        reason: `Auto selected ${smallest.displayName || smallest.name}: tool-calling capability verified`
       };
     }
   }

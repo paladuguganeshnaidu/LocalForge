@@ -311,7 +311,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (!this.selectedModel && this.models.length > 0) {
-        this.selectedModel = this.models[0].id || this.models[0].name;
+        const preferred = this.modelForTask('agent');
+        this.selectedModel = preferred || this.models[0].id || this.models[0].name;
       }
 
       this.post({
@@ -1188,8 +1189,8 @@ function getHtml(webview: vscode.Webview): string {
 
   <!-- Conversation & Activity Scroll Area -->
   <div class="main-scroll" id="mainScroll">
-    <div class="msg-assistant">
-      <strong>LocalForge v0.2.0</strong><br>
+    <div class="msg-assistant welcome">
+      <strong>LocalForge v0.2.1</strong><br>
       Local-first AI software engineer for VS Code. Select a mode or type a task below.
     </div>
     <div class="timeline" id="timelineContainer" style="display:none;"></div>
@@ -1559,6 +1560,35 @@ function getHtml(webview: vscode.Webview): string {
             activeModelBadge.textContent = found.source === 'remote' ? 'Remote' : 'Local';
             activeModelBadge.className = 'model-badge' + (found.source === 'remote' ? ' remote' : '');
           }
+        }
+      }
+
+      if (msg.type === 'mode') {
+        currentMode = msg.mode;
+        document.querySelectorAll('.mode-btn').forEach(b => {
+          b.classList.toggle('active', b.getAttribute('data-mode') === currentMode);
+        });
+      }
+
+      if (msg.type === 'strategy') {
+        currentStrategy = msg.strategy;
+        document.getElementById('stratFast')?.classList.toggle('active', currentStrategy === 'fast');
+        document.getElementById('stratPlanning')?.classList.toggle('active', currentStrategy === 'planning');
+      }
+
+      if (msg.type === 'history') {
+        timelineContainer.innerHTML = '';
+        timelineContainer.style.display = 'none';
+        const oldMessages = mainScroll.querySelectorAll('.msg-user, .msg-assistant:not(.welcome), .artifact-card, .permission-card');
+        oldMessages.forEach(el => el.remove());
+        if (Array.isArray(msg.messages) && msg.messages.length > 0) {
+          msg.messages.forEach(m => {
+            const card = document.createElement('div');
+            card.className = m.role === 'user' ? 'msg-user' : 'msg-assistant';
+            card.innerHTML = escapeHtml(m.content).replace(/\n/g, '<br>');
+            mainScroll.appendChild(card);
+          });
+          mainScroll.scrollTop = mainScroll.scrollHeight;
         }
       }
 
