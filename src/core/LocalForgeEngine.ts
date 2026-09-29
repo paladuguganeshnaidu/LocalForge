@@ -151,6 +151,65 @@ export class LocalForgeEngine {
     return Boolean(this.currentAbortController);
   }
 
+  public async runSelfTest(): Promise<{
+    ok: boolean;
+    workspace: string;
+    filePath: string;
+    command: string;
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  }> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) throw new Error('Open a workspace before running the LocalForge self-test.');
+
+    const smokeDir = vscode.Uri.joinPath(root, '.localforge-smoke');
+    const scriptUri = vscode.Uri.joinPath(smokeDir, 'hello.js');
+    const scriptContent = 'console.log("LocalForge working");\n';
+    const commandExecutable = process.execPath.includes(' ')
+      ? '"' + process.execPath.replace(/"/g, '\\\"') + '"'
+      : process.execPath;
+    const command = commandExecutable + ' hello.js';
+
+    try {
+      await vscode.workspace.fs.createDirectory(smokeDir);
+      await vscode.workspace.fs.writeFile(scriptUri, Buffer.from(scriptContent, 'utf8'));
+
+      const processResult = await this.terminalManager.runCommand(
+        command,
+        smokeDir.fsPath,
+        false,
+        15000
+      );
+
+      const ok = processResult.status === 'completed'
+        && processResult.exitCode === 0
+        && processResult.stdout.includes('LocalForge working');
+
+      if (!ok) {
+        throw new Error(
+          'LocalForge self-test failed. Exit code: ' + processResult.exitCode
+          + '\\nstdout: ' + processResult.stdout
+          + '\\nstderr: ' + processResult.stderr
+        );
+      }
+
+      return {
+        ok,
+        workspace: root.fsPath,
+        filePath: vscode.workspace.asRelativePath(scriptUri),
+        command: processResult.command,
+        stdout: processResult.stdout,
+        stderr: processResult.stderr,
+        exitCode: processResult.exitCode ?? -1
+      };
+    } finally {
+      try {
+        await vscode.workspace.fs.delete(smokeDir, { recursive: true, useTrash: false });
+      } catch {}
+    }
+  }
+
   private async createEditProposal(toolName: string, args: Record<string, unknown>): Promise<unknown> {
     if (!vscode.workspace.isTrusted) throw new Error('Workspace edits require a trusted workspace.');
     const roots = vscode.workspace.workspaceFolders ?? [];
