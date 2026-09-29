@@ -352,6 +352,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'status', state: 'starting', message: 'Starting task...' });
     this.post({ type: 'userMessage', content: message.prompt });
 
+    let waitingForApproval = false;
     try {
       if (this.engine) {
         const summary = await this.engine.executeTask(
