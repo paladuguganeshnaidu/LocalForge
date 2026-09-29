@@ -425,10 +425,21 @@ export class LocalForgeEngine {
               emitActivity('Working', `Running tool: ${name}`);
             }
           },
-          onToolEnd: (name, _result, error, _id) => {
+          onToolEnd: (name, result, error, _id) => {
+            let details: string | undefined;
+            if (name === 'run_command' && result && typeof result === 'object') {
+              const terminal = result as { exitCode?: number; stdout?: string; stderr?: string; durationMs?: number; status?: string };
+              details = [
+                terminal.exitCode !== undefined ? 'Exit code: ' + terminal.exitCode : '',
+                terminal.durationMs !== undefined ? 'Duration: ' + terminal.durationMs + ' ms' : '',
+                terminal.stdout ? terminal.stdout.slice(0, 4000) : '',
+                terminal.stderr ? terminal.stderr.slice(0, 3000) : ''
+              ].filter(Boolean).join('\\n');
+            }
             onActivity?.(this.turnManager.addActivity(turn.turnId, {
-              category: error ? 'Failed' : 'Working',
+              category: error ? 'Failed' : name === 'run_command' ? 'Running' : 'Working',
               title: error ? `Failed ${name}: ${error}` : `Completed ${name}`,
+              details,
               status: error ? 'error' : 'success'
             }));
           }
