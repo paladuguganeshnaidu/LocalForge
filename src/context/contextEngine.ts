@@ -158,6 +158,21 @@ export class ContextEngine {
     // Build Formatted Prompt Text & Preview
     const promptSections: string[] = [];
 
+    // Root Workspace grounding
+    if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+      const rootFolder = vscode.workspace.workspaceFolders[0];
+      let projectSummary = `Workspace: ${rootFolder.name}`;
+      try {
+        const pkgUri = vscode.Uri.joinPath(rootFolder.uri, 'package.json');
+        const pkgBytes = await vscode.workspace.fs.readFile(pkgUri);
+        const pkgData = JSON.parse(new TextDecoder().decode(pkgBytes));
+        if (pkgData.name) {
+          projectSummary += ` | Project: ${pkgData.name} (v${pkgData.version || '0.1.0'})${pkgData.description ? ' - ' + pkgData.description : ''}`;
+        }
+      } catch {}
+      promptSections.push(projectSummary);
+    }
+
     const activeFileItem = items.find((i) => i.source === 'active_file' || i.source === 'selection');
     if (activeFileItem) {
       promptSections.push(`Context - ${activeFileItem.label}:\n\`\`\`\n${activeFileItem.content}\n\`\`\``);

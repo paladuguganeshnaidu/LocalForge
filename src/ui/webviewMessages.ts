@@ -82,9 +82,10 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
 
     case 'chat':
       return (
-        typeof msg.model === 'string' &&
         typeof msg.prompt === 'string' &&
+        msg.prompt.trim().length > 0 &&
         msg.prompt.length <= 20000 &&
+        typeof msg.model === 'string' &&
         typeof msg.includeContext === 'boolean' &&
         typeof msg.includeWorkspace === 'boolean' &&
         typeof msg.agentMode === 'boolean'

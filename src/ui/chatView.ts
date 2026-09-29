@@ -120,8 +120,28 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [] };
     view.webview.html = getHtml(view.webview);
 
-    view.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
-      if (!isWebviewMessage(message)) return;
+    view.webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+      const message = (rawMessage && typeof rawMessage === 'object') ? { ...(rawMessage as Record<string, unknown>) } : rawMessage;
+      if (message && typeof message === 'object' && (message as Record<string, unknown>).type === 'chat') {
+        const chatMsg = message as Record<string, unknown>;
+        if (typeof chatMsg.model !== 'string' || !chatMsg.model) {
+          chatMsg.model = this.selectedModel || 'auto';
+        }
+        if (typeof chatMsg.includeContext !== 'boolean') {
+          chatMsg.includeContext = true;
+        }
+        if (typeof chatMsg.includeWorkspace !== 'boolean') {
+          chatMsg.includeWorkspace = true;
+        }
+        if (typeof chatMsg.agentMode !== 'boolean') {
+          chatMsg.agentMode = this.activeMode === 'agent';
+        }
+      }
+
+      if (!isWebviewMessage(message)) {
+        console.warn('[LocalForge] Received unrecognized webview message:', message);
+        return;
+      }
 
       if (message.type === 'ready' || message.type === 'refresh') {
         await this.refresh();
@@ -388,16 +408,21 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleChatMessage(message: {
-    model: string;
+    model?: string;
     prompt: string;
-    includeContext: boolean;
-    includeWorkspace: boolean;
-    agentMode: boolean;
+    includeContext?: boolean;
+    includeWorkspace?: boolean;
+    agentMode?: boolean;
   }): Promise<void> {
-    if (this.busy) return;
+    if (this.busy) {
+      console.warn('[LocalForge] Cancelling prior in-flight task for incoming prompt.');
+      this.cancelActiveChat();
+    }
     this.busy = true;
 
-    const modelName = message.model || this.selectedModel || '';
+    const modelName = (message.model && message.model !== 'auto')
+      ? message.model
+      : (this.selectedModel && this.selectedModel !== 'auto' ? this.selectedModel : '');
     const mode = this.activeMode;
     const history = this.conversations.get(modelName) ?? [];
 
@@ -1532,7 +1557,7 @@ function getHtml(webview: vscode.Webview): string {
     // Send Message
     function sendMessage() {
       const text = promptInput.value.trim();
-      if (!text || isBusy) return;
+      if (!text) return;
       promptInput.value = '';
       slashPopup.classList.remove('open');
 
@@ -1557,7 +1582,7 @@ function getHtml(webview: vscode.Webview): string {
 
       vscode.postMessage({
         type: 'chat',
-        model: selectedModelId,
+        model: selectedModelId || 'auto',
         prompt: text,
         includeContext: true,
         includeWorkspace: true,
@@ -1571,9 +1596,13 @@ function getHtml(webview: vscode.Webview): string {
     }
 
     sendBtn.addEventListener('click', () => {
-      if (isBusy) {
+      if (sendBtn.textContent === 'Cancel') {
         vscode.postMessage({ type: 'cancel' });
+        isBusy = false;
+        sendBtn.textContent = 'Send';
+        removeThinkingIndicator();
       } else {
+        isBusy = false;
         sendMessage();
       }
     });
@@ -1586,8 +1615,11 @@ function getHtml(webview: vscode.Webview): string {
       if (e.key === 'Escape') {
         if (slashPopup.classList.contains('open')) {
           slashPopup.classList.remove('open');
-        } else if (isBusy) {
+        } else if (sendBtn.textContent === 'Cancel') {
           vscode.postMessage({ type: 'cancel' });
+          isBusy = false;
+          sendBtn.textContent = 'Send';
+          removeThinkingIndicator();
         }
       }
     });
@@ -1835,6 +1867,8 @@ function getHtml(webview: vscode.Webview): string {
       }
 
       if (msg.type === 'done') {
+        isBusy = false;
+        sendBtn.textContent = 'Send';
         removeThinkingIndicator();
         if (streamingBubble) {
           streamingBubble.classList.remove('streaming');
@@ -1851,6 +1885,8 @@ function getHtml(webview: vscode.Webview): string {
       }
 
       if (msg.type === 'error') {
+        isBusy = false;
+        sendBtn.textContent = 'Send';
         removeThinkingIndicator();
         if (streamingBubble) {
           streamingBubble.classList.remove('streaming');
