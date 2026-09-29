@@ -29,4 +29,12 @@ suite('LocalForge Extension Host', () => {
   test('refresh command completes without a model runtime', async () => {
     await vscode.commands.executeCommand('localforge.refreshModels');
   });
+  test('runs a real end-to-end file and terminal self-test inside the Extension Host', async () => {
+    const result = await vscode.commands.executeCommand('localforge.selfTest');
+    assert.equal(result.ok, true);
+    assert.match(result.filePath, /\.localforge-smoke[\\/]hello\.js$/);
+    assert.match(result.stdout, /LocalForge working/);
+    assert.equal(result.exitCode, 0);
+  });
+
 });
