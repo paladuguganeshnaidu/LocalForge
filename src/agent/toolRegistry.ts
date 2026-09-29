@@ -9,13 +9,19 @@ export interface RegisteredTool {
 }
 
 export type EditProposalHandler = (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+export type CommandExecutionHandler = (command: string, cwd: string) => Promise<unknown>;
 
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private editProposalHandler?: EditProposalHandler;
+  private commandExecutionHandler?: CommandExecutionHandler;
 
   public setEditProposalHandler(handler?: EditProposalHandler): void {
     this.editProposalHandler = handler;
+  }
+
+  public setCommandExecutionHandler(handler?: CommandExecutionHandler): void {
+    this.commandExecutionHandler = handler;
   }
 
   public registerTool(
@@ -75,6 +81,11 @@ export class ToolRegistry {
       if (!allowed) {
         throw new Error(`Execution of tool “${name}” was rejected by user or permission policy.`);
       }
+    }
+
+    if (name === 'run_command' && this.commandExecutionHandler && typeof args.command === 'string') {
+      const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd();
+      return this.commandExecutionHandler(args.command, cwd);
     }
 
     return await tool.handler(args);
