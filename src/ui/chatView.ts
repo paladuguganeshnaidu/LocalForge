@@ -198,6 +198,41 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'history', messages: [] });
       }
 
+      if (message.type === 'newSession') {
+        if (this.engine) {
+          this.engine.sessionManager.createNewSession();
+        }
+        if (this.selectedModel) {
+          this.conversations.delete(this.selectedModel);
+          this.saveConversations();
+        }
+        await this.refresh();
+        this.post({ type: 'history', messages: [] });
+      }
+
+      if (message.type === 'loadSession') {
+        if (this.engine && message.sessionId) {
+          await this.engine.sessionManager.setActiveSession(message.sessionId);
+          await this.refresh();
+        }
+      }
+
+      if (message.type === 'deleteSession') {
+        if (this.engine && message.sessionId) {
+          this.engine.sessionManager.deleteSession(message.sessionId);
+          await this.refresh();
+        }
+      }
+
+      if (message.type === 'updateSettings') {
+        if (message.settings && typeof message.settings === 'object') {
+          const config = vscode.workspace.getConfiguration('localforge');
+          for (const [key, val] of Object.entries(message.settings)) {
+            void config.update(key, val, vscode.ConfigurationTarget.Global);
+          }
+        }
+      }
+
       if (message.type === 'cancel') {
         this.cancelActiveChat();
       }
@@ -1381,13 +1416,13 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
     const vscode = (function() {
       try {
-        if ((window as any).__cachedVsCodeApi) return (window as any).__cachedVsCodeApi;
+        if (window.__cachedVsCodeApi) return window.__cachedVsCodeApi;
         const api = acquireVsCodeApi();
-        (window as any).__cachedVsCodeApi = api;
+        window.__cachedVsCodeApi = api;
         return api;
       } catch (err) {
-        console.warn('[LocalForge] acquireVsCodeApi reuse or error:', err);
-        return (window as any).__cachedVsCodeApi || { postMessage: function() {} };
+        console.warn('[LOMVREN] acquireVsCodeApi reuse or error:', err);
+        return window.__cachedVsCodeApi || { postMessage: function() {} };
       }
     })();
 

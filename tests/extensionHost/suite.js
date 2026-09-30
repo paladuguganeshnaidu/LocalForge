@@ -1,21 +1,37 @@
 const assert = require('assert');
 const vscode = require('vscode');
 
-async function run() {
-  console.log('[ExtensionHost] Starting Extension Host verification...');
-
-  // 1. Extension activation
-  const ext = vscode.extensions.getExtension('paladuguganeshnaidu.localforge-vscode');
-  assert.ok(ext, 'Extension paladuguganeshnaidu.localforge-vscode must be discovered');
-
-  if (!ext.isActive) {
-    console.log('[ExtensionHost] Activating extension...');
-    await ext.activate();
+async function runStage(stageName, fn) {
+  const start = Date.now();
+  console.log(`[ExtensionHost] >>> Running stage: ${stageName}`);
+  try {
+    await fn();
+    console.log(`[ExtensionHost] PASS: ${stageName} (${Date.now() - start}ms)`);
+  } catch (err) {
+    console.error(`[ExtensionHost] FAIL in stage "${stageName}":`, err);
+    throw err;
   }
-  assert.strictEqual(ext.isActive, true, 'Extension must be active');
-  console.log('[ExtensionHost] PASS: Extension activated successfully.');
+}
 
-  // 2. Command registration verification
+async function run() {
+  console.log('=====================================================');
+  console.log('  LOMVREN Extension Host Verification Suite');
+  console.log('=====================================================');
+
+  let ext;
+
+  // Stage 1: Extension Discovery & Activation
+  await runStage('Stage 1: Extension Activation', async () => {
+    ext = vscode.extensions.getExtension('paladuguganeshnaidu.localforge-vscode');
+    assert.ok(ext, 'Extension paladuguganeshnaidu.localforge-vscode must be discovered');
+
+    if (!ext.isActive) {
+      await ext.activate();
+    }
+    assert.strictEqual(ext.isActive, true, 'Extension must be active');
+  });
+
+  // Stage 2: Command Registration
   const expectedCommands = [
     'localforge.openAgent',
     'localforge.newConversation',
@@ -35,91 +51,102 @@ async function run() {
     'localforge.setModel'
   ];
 
-  const registeredCommands = await vscode.commands.getCommands(true);
-  for (const cmd of expectedCommands) {
-    assert.ok(
-      registeredCommands.includes(cmd),
-      `Command "${cmd}" must be registered in the extension host.`
-    );
-  }
-  console.log(`[ExtensionHost] PASS: All ${expectedCommands.length} commands verified registered.`);
-
-  // 3. Command execution verification (diagnose, doctor, selfTest)
-  await vscode.commands.executeCommand('localforge.diagnose');
-  console.log('[ExtensionHost] PASS: localforge.diagnose executed without error.');
-
-  await vscode.commands.executeCommand('localforge.doctor');
-  console.log('[ExtensionHost] PASS: localforge.doctor executed without error.');
-
-  await vscode.commands.executeCommand('localforge.selfTest');
-  console.log('[ExtensionHost] PASS: localforge.selfTest executed without error.');
-
-  // 4. Mode and model switching commands
-  await vscode.commands.executeCommand('localforge.setAgentMode', 'ask');
-  await vscode.commands.executeCommand('localforge.setAgentMode', 'plan');
-  await vscode.commands.executeCommand('localforge.setAgentMode', 'agent');
-  console.log('[ExtensionHost] PASS: setAgentMode executed for all modes.');
-
-  // 5. Terminal execution in host
-  const { TerminalManager } = require('../../dist/terminal/terminalManager.js');
-  const terminal = new TerminalManager();
-  const proc = await terminal.runCommand('node -e "console.log(\'ExtensionHostTerminalOK\')"', process.cwd(), false, 10000);
-  assert.strictEqual(proc.status, 'completed');
-  assert.ok(proc.stdout.includes('ExtensionHostTerminalOK'));
-  console.log('[ExtensionHost] PASS: Managed terminal executed successfully in host.');
-
-  // 6. Workspace file creation and verification
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri || vscode.Uri.file(process.cwd());
-  const testFileUri = vscode.Uri.joinPath(workspaceRoot, '.localforge_host_test.txt');
-  await vscode.workspace.fs.writeFile(testFileUri, Buffer.from('ExtensionHostFsVerified\n', 'utf8'));
-  const content = await vscode.workspace.fs.readFile(testFileUri);
-  assert.ok(Buffer.from(content).toString('utf8').includes('ExtensionHostFsVerified'));
-  await vscode.workspace.fs.delete(testFileUri);
-  console.log('[ExtensionHost] PASS: Real workspace file operations verified in host.');
-
-  // 7. Cancellation handling
-  await vscode.commands.executeCommand('localforge.cancelAgent');
-  console.log('[ExtensionHost] PASS: Cancellation command verified.');
-
-  // 8. Webview message flow & prompt dispatch verification
-  const api = ext.exports;
-  assert.ok(api, 'Extension must export API');
-  assert.ok(api.engine, 'Extension API must expose engine');
-  assert.ok(api.viewProvider, 'Extension API must expose viewProvider');
-
-  let messageHandler;
-  const webviewEvents = [];
-  const mockWebview = {
-    options: {},
-    html: '',
-    cspSource: 'https://*.vscode-cdn.net',
-    asWebviewUri: (uri) => uri,
-    postMessage: async (msg) => {
-      webviewEvents.push(msg);
-    },
-    onDidReceiveMessage: (handler) => {
-      messageHandler = handler;
-      return { dispose: () => {} };
+  await runStage('Stage 2: Command Registration Verification', async () => {
+    const registeredCommands = await vscode.commands.getCommands(true);
+    for (const cmd of expectedCommands) {
+      assert.ok(
+        registeredCommands.includes(cmd),
+        `Command "${cmd}" must be registered in the extension host.`
+      );
     }
-  };
-
-  api.viewProvider.resolveWebviewView({ webview: mockWebview });
-  assert.ok(typeof messageHandler === 'function', 'Webview view must attach onDidReceiveMessage handler');
-
-  await messageHandler({ type: 'ready' });
-  assert.ok(webviewEvents.some((e) => e.type === 'models'), 'Webview should receive models on ready');
-
-  await messageHandler({
-    type: 'chat',
-    model: 'auto',
-    prompt: 'test prompt from extension host',
-    includeContext: true,
-    includeWorkspace: true,
-    agentMode: false
   });
-  console.log('[ExtensionHost] PASS: Webview message handler successfully processed chat message.');
 
-  console.log('[ExtensionHost] ALL EXTENSION HOST INTEGRATION TESTS PASSED CLEANLY.');
+  // Stage 3: Built-in Command Executions
+  await runStage('Stage 3A: localforge.diagnose execution', async () => {
+    await vscode.commands.executeCommand('localforge.diagnose');
+  });
+
+  await runStage('Stage 3B: localforge.doctor execution', async () => {
+    await vscode.commands.executeCommand('localforge.doctor');
+  });
+
+  await runStage('Stage 3C: localforge.selfTest execution', async () => {
+    await vscode.commands.executeCommand('localforge.selfTest');
+  });
+
+  // Stage 4: Agent Mode Switching
+  await runStage('Stage 4: Agent Mode Switching (Ask / Plan / Agent)', async () => {
+    await vscode.commands.executeCommand('localforge.setAgentMode', 'ask');
+    await vscode.commands.executeCommand('localforge.setAgentMode', 'plan');
+    await vscode.commands.executeCommand('localforge.setAgentMode', 'agent');
+  });
+
+  // Stage 5: Managed Terminal Execution
+  await runStage('Stage 5: Managed Terminal Execution', async () => {
+    const { TerminalManager } = require('../../dist/terminal/terminalManager.js');
+    const terminal = new TerminalManager();
+    const proc = await terminal.runCommand('node -e "console.log(\'ExtensionHostTerminalOK\')"', process.cwd(), false, 10000);
+    assert.strictEqual(proc.status, 'completed');
+    assert.ok(proc.stdout.includes('ExtensionHostTerminalOK'));
+  });
+
+  // Stage 6: Workspace Filesystem Operations
+  await runStage('Stage 6: Real Workspace File Operations', async () => {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri || vscode.Uri.file(process.cwd());
+    const testFileUri = vscode.Uri.joinPath(workspaceRoot, '.localforge_host_test.txt');
+    await vscode.workspace.fs.writeFile(testFileUri, Buffer.from('ExtensionHostFsVerified\n', 'utf8'));
+    const content = await vscode.workspace.fs.readFile(testFileUri);
+    assert.ok(Buffer.from(content).toString('utf8').includes('ExtensionHostFsVerified'));
+    await vscode.workspace.fs.delete(testFileUri);
+  });
+
+  // Stage 7: Cooperative Cancellation
+  await runStage('Stage 7: Cancellation Command Verification', async () => {
+    await vscode.commands.executeCommand('localforge.cancelAgent');
+  });
+
+  // Stage 8: Webview LifeCycle & IPC Message Flow
+  await runStage('Stage 8: Webview LifeCycle and IPC Flow', async () => {
+    const api = ext.exports;
+    assert.ok(api, 'Extension must export API');
+    assert.ok(api.engine, 'Extension API must expose engine');
+    assert.ok(api.viewProvider, 'Extension API must expose viewProvider');
+
+    let messageHandler;
+    const webviewEvents = [];
+    const mockWebview = {
+      options: {},
+      html: '',
+      cspSource: 'https://*.vscode-cdn.net',
+      asWebviewUri: (uri) => uri,
+      postMessage: async (msg) => {
+        webviewEvents.push(msg);
+      },
+      onDidReceiveMessage: (handler) => {
+        messageHandler = handler;
+        return { dispose: () => {} };
+      }
+    };
+
+    api.viewProvider.resolveWebviewView({ webview: mockWebview });
+    assert.ok(typeof messageHandler === 'function', 'Webview view must attach onDidReceiveMessage handler');
+
+    await messageHandler({ type: 'ready' });
+    assert.ok(webviewEvents.some((e) => e.type === 'models'), 'Webview should receive models on ready');
+
+    await messageHandler({
+      type: 'chat',
+      model: 'auto',
+      prompt: 'test prompt from extension host',
+      includeContext: true,
+      includeWorkspace: true,
+      agentMode: false
+    });
+  });
+
+  console.log('=====================================================');
+  console.log('  ALL 8 EXTENSION HOST INTEGRATION STAGES PASSED');
+  console.log('=====================================================');
 }
 
 module.exports = { run };
