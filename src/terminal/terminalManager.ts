@@ -81,7 +81,7 @@ export class TerminalManager {
       let timer: NodeJS.Timeout | undefined;
 
       const abortHandler = () => {
-        record.status = 'cancelled';
+        record.status = 'stopped';
         record.endTime = Date.now();
         record.duration = record.endTime - record.startTime;
         record.stderr += '\nCommand cancelled by user.';

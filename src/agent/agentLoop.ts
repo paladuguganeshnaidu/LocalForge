@@ -143,6 +143,17 @@ export class AgentLoop {
         const calls = parsed.toolCalls;
 
         if (!calls.length) {
+          if (parsed.hadToolCallSyntax && parsed.parseWarnings.length > 0) {
+            history.push({
+              role: 'assistant',
+              content: parsed.userVisibleText || ''
+            });
+            history.push({
+              role: 'user',
+              content: 'The previous tool invocation was rejected by the runtime policy: ' + parsed.parseWarnings.join(' ')
+            });
+            continue;
+          }
           finalResponse = parsed.userVisibleText || 'Task completed.';
           state.status = 'completed';
           break;

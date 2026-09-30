@@ -17,7 +17,10 @@ export function redactString(value: string): string {
   let output = String(value ?? '');
   for (const pattern of SECRET_PATTERNS) {
     output = output.replace(pattern, (match, prefix) => {
-      return typeof prefix === 'string' ? prefix + '[REDACTED]' : '[REDACTED]';
+      if (typeof prefix === 'string' && pattern.flags.includes('m')) {
+        return prefix + '[REDACTED]';
+      }
+      return '[REDACTED]';
     });
   }
   return output;

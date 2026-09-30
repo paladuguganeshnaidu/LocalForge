@@ -170,7 +170,7 @@ export class PermissionManager {
   public validateCommandSafety(command: string): void {
     const decision = classifyCommand(command);
     if (decision.risk === 'DESTRUCTIVE') {
-      throw new Error(decision.reason || 'Command contains potentially destructive system operations.');
+      throw new Error('Command contains potentially catastrophic system operations and was blocked by policy.');
     }
   }
 

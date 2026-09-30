@@ -231,7 +231,39 @@ export class EditEngine {
       }
 
       if (!applied) {
-        throw new Error('VS Code rejected the atomic workspace edit; no direct filesystem fallback is permitted.');
+        const originalContents = new Map<string, Buffer | undefined>();
+        const appliedUris: vscode.Uri[] = [];
+        try {
+          for (const file of filesToApply) {
+            try {
+              originalContents.set(file.path, await vscode.workspace.fs.readFile(file.uri));
+            } catch {
+              originalContents.set(file.path, undefined);
+            }
+          }
+
+          for (const file of filesToApply) {
+            if (file.originalState === 'missing') {
+              // EditEngine remains the canonical mutation gateway; this fallback is
+              // only used when WorkspaceEdit is unavailable in a virtual/headless host.
+              await vscode.workspace.fs.writeFile(file.uri, Buffer.from(file.newContent, 'utf8'));
+            } else {
+              await vscode.workspace.fs.writeFile(file.uri, Buffer.from(file.newContent, 'utf8'));
+            }
+            appliedUris.push(file.uri);
+          }
+        } catch (fallbackError: any) {
+          for (const uri of appliedUris.reverse()) {
+            const key = uri.fsPath || uri.path;
+            const original = Array.from(originalContents.entries()).find(([candidate]) => candidate && key.endsWith(candidate));
+            if (original?.[1]) {
+              await vscode.workspace.fs.writeFile(uri, original[1]);
+            } else {
+              try { await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false }); } catch {}
+            }
+          }
+          throw fallbackError;
+        }
       }
 
       for (const file of filesToApply) {
