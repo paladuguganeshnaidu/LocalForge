@@ -1,3 +1,4 @@
+import { classifyCommand, CommandRisk } from '../security/commandPolicy';
 export type ToolCategory = 'read' | 'edit' | 'execute';
 export type PermissionMode =
   | 'request_review'
@@ -167,27 +168,18 @@ export class PermissionManager {
   }
 
   public validateCommandSafety(command: string): void {
-    const normalized = command.trim().toLowerCase();
-    for (const pattern of DESTRUCTIVE_COMMAND_PATTERNS) {
-      if (pattern.test(normalized)) {
-        throw new Error('Command contains potentially catastrophic system operations and was blocked by policy.');
-      }
+    const decision = classifyCommand(command);
+    if (decision.risk === 'DESTRUCTIVE') {
+      throw new Error(decision.reason || 'Command contains potentially destructive system operations.');
     }
   }
 
   public isSafeCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
-    try {
-      this.validateCommandSafety(command);
-    } catch {
-      return false;
-    }
-
-    // Prohibit shell chaining or redirection in auto-safe execution
-    if (hasShellChainingOrRedirection(command)) {
-      return false;
-    }
-
+    const decision = classifyCommand(command);
+    if (!decision.allowed || decision.requiresApproval) return false;
+    if (decision.risk === 'DESTRUCTIVE' as CommandRisk) return false;
+    if (hasShellChainingOrRedirection(command)) return false;
     return SAFE_TEST_BUILD_COMMAND_PREFIXES.some(
       (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `)
     );
