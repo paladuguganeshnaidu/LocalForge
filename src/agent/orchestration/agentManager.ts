@@ -69,7 +69,17 @@ export class AgentManager {
         for (const def of toolDefs) {
           const registered = this.toolRegistry.getTool(def.function.name);
           if (registered) {
-            scopedRegistry.registerTool(def, registered.handler, cat, registered.source);
+            scopedRegistry.registerTool(def, registered.handler, {
+              category: registered.category,
+              riskLevel: registered.riskLevel,
+              requiresApproval: registered.requiresApproval,
+              capabilitiesRequired: registered.capabilitiesRequired,
+              validate: registered.validate,
+              redact: registered.redact,
+              timeout: registered.timeout,
+              retryPolicy: registered.retryPolicy,
+              source: registered.source
+            });
           }
         }
       }
