@@ -29,6 +29,7 @@ import { CheckpointManager } from '../agent/orchestration/checkpointManager';
 import { registerAllCoreTools } from '../agent/coreTools';
 import { ProductMode } from '../agent/orchestration/types';
 import { LocalForgeSelfTest } from './selfTest';
+import { ExecutionCoordinator } from './executionCoordinator';
 
 export interface EngineInitOptions {
   ollamaEndpoint?: string;
@@ -64,6 +65,7 @@ export class LocalForgeEngine {
   public readonly referenceResolver: ContextReferenceResolver;
   public readonly orchestrator: MultiAgentOrchestrator;
   public readonly checkpointManager: CheckpointManager;
+  public readonly executionCoordinator: ExecutionCoordinator;
   public readonly selfTest: LocalForgeSelfTest;
 
   public indexer?: WorkspaceIndexer;
@@ -108,13 +110,20 @@ export class LocalForgeEngine {
     this.browserTool = new BrowserTool();
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
 
+    this.checkpointManager = new CheckpointManager(context.workspaceState);
     this.orchestrator = new MultiAgentOrchestrator(
       this.compositeProvider,
       this.toolRegistry,
       this.permissionManager,
-      this.editEngine
+      this.editEngine,
+      4,
+      this.checkpointManager
     );
-    this.checkpointManager = new CheckpointManager(context.workspaceState);
+    this.executionCoordinator = new ExecutionCoordinator(
+      this.orchestrator,
+      this.modelRouter,
+      this.checkpointManager
+    );
     this.selfTest = new LocalForgeSelfTest(this);
 
     this.registerDefaultTools();
@@ -182,6 +191,79 @@ export class LocalForgeEngine {
   }
 
   public async executeTask(
+    userPrompt: string,
+    mode: AgentMode,
+    modelPreference?: string,
+    onProgressOrOptions?: ((msg: string) => void) | ExecuteTaskOptions,
+    legacyOnToken?: (token: string) => void
+  ): Promise<AgentRunSummary> {
+    const options: ExecuteTaskOptions =
+      typeof onProgressOrOptions === 'function'
+        ? { onProgress: onProgressOrOptions, onToken: legacyOnToken }
+        : onProgressOrOptions || {};
+
+    const parsedSlash = this.referenceResolver.parseSlashCommand(userPrompt);
+    if (parsedSlash.command) {
+      return this.executeLegacyTask(userPrompt, mode, modelPreference, options, legacyOnToken);
+    }
+
+    this.cancelCurrentTask();
+    this.currentAbortController = new AbortController();
+    const signal = this.currentAbortController.signal;
+    const start = Date.now();
+    const session = this.sessionManager.getActiveSession();
+    const taskRecord = await this.taskManager.recordTaskStart(userPrompt, mode, modelPreference || '');
+
+    try {
+      const result = await this.executionCoordinator.execute(userPrompt, mode, modelPreference, {
+        signal,
+        onProgress: options.onProgress,
+        onToken: options.onToken
+      });
+
+      session.messages.push({ role: 'user', content: userPrompt });
+      session.messages.push({ role: 'assistant', content: result.response });
+      session.filesModified = Array.from(new Set([...session.filesModified, ...result.filesModified]));
+      await this.sessionManager.saveSession(session);
+
+      await this.taskManager.recordTaskCompletion(
+        taskRecord.id,
+        result.status,
+        result.filesModified,
+        result.response.slice(0, 500)
+      );
+
+      if (result.filesModified.length > 0 && options.onArtifact) {
+        const artifact = this.artifactManager.createWalkthrough({
+          summary: 'Completed coordinated multi-agent execution.',
+          filesChanged: result.filesModified,
+          behaviorChanges: 'Changes were produced through the canonical execution coordinator.',
+          testsRun: result.validationAttempts.length ? String(result.validationAttempts.length) : 'Orchestrator-managed verification',
+          validationResult: result.status === 'completed' ? 'Completed' : 'Not verified',
+          verificationSteps: 'Review the task graph, diff, and runtime validation results.',
+          conversationId: session.id
+        });
+        options.onArtifact(artifact);
+      }
+
+      return result;
+    } catch (error: any) {
+      await this.taskManager.recordTaskCompletion(
+        taskRecord.id,
+        signal.aborted ? 'cancelled' : 'failed',
+        [],
+        error?.message || String(error)
+      );
+      throw error;
+    } finally {
+      if (this.currentAbortController?.signal === signal) {
+        this.currentAbortController = undefined;
+      }
+      options.onProgress?.('Execution ' + (signal.aborted ? 'cancelled' : 'finished') + ' in ' + (Date.now() - start) + 'ms.');
+    }
+  }
+
+  private async executeLegacyTask(
     userPrompt: string,
     mode: AgentMode,
     modelPreference?: string,
