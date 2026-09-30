@@ -13,6 +13,8 @@ import {
   AgentHandoff
 } from './types';
 import { AgentError } from './errors';
+import { redactString } from '../../security/secretRedactor';
+import { validateHandoff } from './handoffContracts';
 
 export interface AgentManagerOptions {
   onLifecycleEvent?: (event: AgentLifecycleEvent) => void;
@@ -78,10 +80,10 @@ export class AgentManager {
         contextBlocks += `\nRelevant workspace files:\n${context.relevantFiles.map((f) => `- ${f}`).join('\n')}\n`;
       }
       if (context.currentGitDiff) {
-        contextBlocks += `\nCurrent Git diff:\n\`\`\`diff\n${context.currentGitDiff.slice(0, 10000)}\n\`\`\`\n`;
+        contextBlocks += `\n<untrusted_workspace_data source="git-diff">\n${redactString(context.currentGitDiff.slice(0, 10000))}\n</untrusted_workspace_data>\n`;
       }
       if (context.priorAgentDecisions && context.priorAgentDecisions.length > 0) {
-        contextBlocks += `\nPrior agent findings:\n${context.priorAgentDecisions.map((d) => `- ${d}`).join('\n')}\n`;
+        contextBlocks += `\n<untrusted_agent_data>\n${context.priorAgentDecisions.map((d) => `- ${redactString(d)}`).join('\n')}\n</untrusted_agent_data>\n`;
       }
 
       const systemPrompt = `${roleDef.systemPrompt}
@@ -131,8 +133,8 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
         role: context.role,
         taskId: context.task,
         status: 'completed',
-        output: loopResult.response,
-        filesModified,
+        output: redactString(loopResult.response),
+        filesModified: filesModified.map((file) => redactString(file)),
         handoff,
         durationMs: Date.now() - startTime
       };
@@ -164,65 +166,65 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
     filesModified: string[]
   ): AgentHandoff | undefined {
     if (role === 'planner') {
-      return {
-        type: 'planner',
-        data: {
-          taskId,
-          summary: output.slice(0, 500),
-          assumptions: [],
-          affectedFiles: filesModified,
-          acceptanceCriteria: ['Task changes compile and pass tests'],
-          risks: [],
-          recommendedAgents: ['coder', 'test_engineer', 'reviewer'],
-          orderedSubtasks: []
-        }
+      const data = {
+        taskId,
+        summary: output.slice(0, 500),
+        assumptions: ['Planner output is advisory model text until validated by runtime observations.'],
+        affectedFiles: filesModified,
+        acceptanceCriteria: ['Runtime validation must verify compile/test outcomes.'],
+        risks: ['Model planning output is not evidence of successful execution.'],
+        recommendedAgents: ['coder', 'test_engineer', 'reviewer'],
+        orderedSubtasks: []
       };
+      return validateHandoff('planner', data);
     }
 
     if (role === 'coder') {
-      return {
-        type: 'coder',
-        data: {
-          taskId,
-          changedFiles: filesModified,
-          operations: filesModified.map((f) => ({ type: 'modify', path: f })),
-          testsAdded: [],
-          knownIssues: [],
-          remainingRisks: [],
-          summary: output.slice(0, 300)
-        }
+      const data = {
+        taskId,
+        changedFiles: filesModified,
+        operations: filesModified.map((f) => ({ type: 'modify' as const, path: f })),
+        testsAdded: [],
+        knownIssues: ['Runtime file state is authoritative; model output is explanatory only.'],
+        remainingRisks: [],
+        summary: output.slice(0, 300)
       };
+      return validateHandoff('coder', data);
     }
 
     if (role === 'test_engineer') {
-      const passed = !output.toLowerCase().includes('fail') && !output.toLowerCase().includes('error');
-      return {
-        type: 'tester',
-        data: {
-          taskId,
-          testsRun: 1,
-          passed,
-          failedCount: passed ? 0 : 1,
-          failures: [],
-          summary: output.slice(0, 300)
-        }
+      const data = {
+        taskId,
+        testsRun: 0,
+        passed: false,
+        failedCount: 0,
+        failures: [],
+        summary: 'Model report only. No runtime test result is asserted from natural-language output.'
       };
+      return validateHandoff('tester', data);
     }
 
-    if (role === 'reviewer' || role === 'security_reviewer') {
-      const clean = !output.toLowerCase().includes('critical') && !output.toLowerCase().includes('vulnerability');
-      return {
-        type: 'reviewer',
-        data: {
-          taskId,
-          findings: [],
-          severity: clean ? 'clean' : 'warnings',
-          affectedFiles: filesModified,
-          requiredChanges: [],
-          approved: clean,
-          summary: output.slice(0, 300)
-        }
+    if (role === 'reviewer') {
+      const data = {
+        taskId,
+        findings: [],
+        severity: 'warnings' as const,
+        affectedFiles: filesModified,
+        requiredChanges: [],
+        approved: false,
+        summary: 'Model review output is advisory until independently verified by runtime checks.'
       };
+      return validateHandoff('reviewer', data);
+    }
+
+    if (role === 'security_reviewer') {
+      const data = {
+        taskId,
+        findings: [],
+        passed: false,
+        riskSummary: 'Model security review is advisory until runtime security tests verify the boundary.'
+      };
+      return validateHandoff('security', data);
     }
 
     return undefined;
