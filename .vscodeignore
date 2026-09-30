@@ -9,3 +9,11 @@ tsconfig.json
 *.vsix
 .agents/**
 scratch/**
+
+# Development and audit-only content
+docs/**
+scripts/**
+README.md
+CHANGELOG.md
+ROADMAP.md
+RELEASE_NOTES_*.md
