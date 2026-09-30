@@ -58,7 +58,11 @@ export class ToolCallParser {
       for (let i = 0; i < nativeCalls.length; i++) {
         const rawCall = nativeCalls[i];
         const rawName = rawCall.function?.name || '';
-        const resolvedName = this.resolveToolName(rawName, allowList) || rawName;
+        const resolvedName = this.resolveToolName(rawName, allowList);
+        if (!resolvedName) {
+          parseWarnings.push(`Unknown tool "${rawName}" rejected by parser allow-list.`);
+          continue;
+        }
 
         let argsString = '';
         if (typeof rawCall.function?.arguments === 'string') {
@@ -304,7 +308,11 @@ export class ToolCallParser {
         continue;
       }
 
-      const resolvedName = this.resolveToolName(rawName, allowList) || rawName;
+      const resolvedName = this.resolveToolName(rawName, allowList);
+      if (!resolvedName) {
+        warnings?.push(`Unknown tool "${rawName}" rejected by parser allow-list.`);
+        continue;
+      }
 
       const normalizedArgs = this.normalizeArguments(resolvedName, argsObj);
       calls.push({
@@ -317,7 +325,12 @@ export class ToolCallParser {
       });
     }
 
-    return calls.length > 0 ? calls : null;
+    const unique = new Map<string, ModelToolCall>();
+    for (const call of calls) {
+      const key = call.function.name + ':' + call.function.arguments;
+      if (!unique.has(key)) unique.set(key, call);
+    }
+    return unique.size > 0 ? Array.from(unique.values()) : null;
   }
 
   private static extractTagBlocks(text: string): Array<{ rawMatch: string; payload: string }> {
