@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, sep } from 'node:path';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { ToolRegistry } from './toolRegistry';
 import { EditEngine } from '../editing/editEngine';
@@ -9,6 +9,8 @@ import { TerminalManager } from '../terminal/terminalManager';
 import { ArtifactManager } from '../core/artifactManager';
 import { BrowserTool } from '../browser/browserTool';
 import { findRelevantSnippets } from '../context/workspaceContext';
+import { assertWorkspacePath, normalizeWorkspaceRelativePath } from '../security/pathPolicy';
+import { assertAllowedCommand } from '../security/commandPolicy';
 
 const maximumReadBytes = 256 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -172,13 +174,19 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
 
       try {
         await vscode.workspace.fs.stat(uri);
-        throw new Error(`File ${relPath} already exists. Use write_file to overwrite.`);
+        throw new Error('File ' + relPath + ' already exists. Use write_file to overwrite.');
       } catch (err: any) {
         if (err.message?.includes('already exists')) throw err;
       }
 
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-      return { success: true, path: relPath, created: true, bytesWritten: content.length };
+      if (!context.editEngine) throw new Error('Autonomous file creation requires the canonical EditEngine.');
+      const root = getWorkspaceRootUri();
+      const proposal = await context.editEngine.proposeEdits(root, [{ path: relPath, newContent: content }], 'Create ' + relPath);
+      if (context.autoApply) {
+        const result = await context.editEngine.applyProposal(proposal.id);
+        return { success: result.success, path: relPath, created: result.success, proposalId: proposal.id };
+      }
+      return { success: true, path: relPath, created: false, proposed: true, proposalId: proposal.id };
     },
     { category: 'edit', riskLevel: 'low_risk' }
   );
@@ -247,8 +255,8 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args) => {
       const relPath = getString(args.path, 'path', 500);
-      const uri = await resolveWorkspaceUri(relPath);
-      await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: true });
+      if (!context.editEngine) throw new Error('Autonomous file deletion requires the canonical EditEngine.');
+      await context.editEngine.deleteFile(getWorkspaceRootUri(), relPath);
       return { success: true, path: relPath, deleted: true };
     },
     { category: 'edit', riskLevel: 'destructive', requiresApproval: true }
@@ -275,9 +283,8 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     async (args) => {
       const srcPath = getString(args.source_path, 'source_path', 500);
       const dstPath = getString(args.destination_path, 'destination_path', 500);
-      const srcUri = await resolveWorkspaceUri(srcPath);
-      const dstUri = await resolveWorkspaceUri(dstPath, true);
-      await vscode.workspace.fs.rename(srcUri, dstUri, { overwrite: false });
+      if (!context.editEngine) throw new Error('Autonomous file moves require the canonical EditEngine.');
+      await context.editEngine.moveFile(getWorkspaceRootUri(), srcPath, dstPath);
       return { success: true, from: srcPath, to: dstPath };
     },
     { category: 'edit', riskLevel: 'low_risk' }
@@ -467,11 +474,11 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       const root = getWorkspaceRootUri().fsPath;
       const message = getString(args.message, 'message', 300);
       return new Promise((resolve) => {
-        exec(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd: root, timeout: 15000 }, (err, stdout, stderr) => {
+        execFile('git', ['commit', '-m', message], { cwd: root, timeout: 15000 }, (err: any, stdout: string, stderr: string) => {
           resolve({
             success: !err,
             output: (stdout || stderr || '').trim(),
-            exitCode: err ? (err.code ?? 1) : 0
+            exitCode: err ? (typeof err.code === 'number' ? err.code : 1) : 0
           });
         });
       });
@@ -498,7 +505,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args) => {
       const command = getString(args.command, 'command', 1000);
-      validateCommandSafety(command);
+      assertAllowedCommand(command);
       const rootPath = getWorkspaceRootUri().fsPath;
 
       if (context.terminalManager) {
@@ -512,16 +519,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         };
       }
 
-      return new Promise((resolve) => {
-        exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024 }, (error, stdout, stderr) => {
-          resolve({
-            command,
-            exitCode: error && typeof error.code === 'number' ? error.code : error ? 1 : 0,
-            stdout: (stdout || '').trim().slice(0, 10000),
-            stderr: (stderr || '').trim().slice(0, 5000)
-          });
-        });
-      });
+      throw new Error('Direct shell fallback is disabled; TerminalManager is the canonical command execution gateway.');
     },
     { category: 'execute', riskLevel: 'low_risk', requiresApproval: true }
   );
@@ -544,18 +542,20 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args) => {
       const rootPath = getWorkspaceRootUri().fsPath;
-      const cmd = args.test_filter ? `npm test -- ${args.test_filter}` : 'npm test';
-      return new Promise((resolve) => {
-        exec(cmd, { cwd: rootPath, timeout: 60000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-          resolve({
-            command: cmd,
-            passed: !err,
-            exitCode: err ? (err.code ?? 1) : 0,
-            stdout: (stdout || '').trim().slice(-10000),
-            stderr: (stderr || '').trim().slice(-5000)
-          });
-        });
-      });
+      const filter = typeof args.test_filter === 'string' ? args.test_filter.trim() : '';
+      if (filter && /[;&|<>\r\n`]/.test(filter)) throw new Error('Unsafe test filter.');
+      const cmd = filter ? 'npm test -- ' + filter : 'npm test';
+      if (context.terminalManager) {
+        const proc = await context.terminalManager.runCommand(cmd, rootPath, false, 120000, context.signal);
+        return {
+          command: cmd,
+          passed: proc.status === 'completed' && proc.exitCode === 0,
+          exitCode: proc.exitCode ?? 1,
+          stdout: proc.stdout.slice(-10000),
+          stderr: proc.stderr.slice(-5000)
+        };
+      }
+      throw new Error('TerminalManager is required for canonical test execution.');
     },
     { category: 'execute', riskLevel: 'low_risk' }
   );
@@ -718,30 +718,12 @@ function getWorkspaceRootUri(): vscode.Uri {
 }
 
 async function resolveWorkspaceUri(inputPath: string, allowNew = false): Promise<vscode.Uri> {
-  let cleaned = inputPath.replace(/\\/g, '/').trim();
-  while (cleaned.startsWith('./')) {
-    cleaned = cleaned.slice(2).trim();
-  }
-  const segments = validateRelativeWorkspacePath(cleaned);
   const roots = vscode.workspace.workspaceFolders ?? [];
   if (!roots.length) throw new Error('Open a workspace folder first.');
   const root = roots[0];
-  const uri = vscode.Uri.joinPath(root.uri, ...segments);
-
-  if (vscode.workspace.getWorkspaceFolder && vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() !== root.uri.toString()) {
-    throw new Error('The requested path is outside the selected workspace folder.');
-  }
-
-  if (!allowNew && uri.scheme === 'file') {
-    const realRoot = await realpath(root.uri.fsPath);
-    const realFile = await realpath(uri.fsPath);
-    const relativeFile = relative(realRoot, realFile);
-    if (relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
-      throw new Error('The requested file resolves outside the workspace folder.');
-    }
-  }
-
-  return uri;
+  const normalized = normalizeWorkspaceRelativePath(inputPath);
+  const checked = await assertWorkspacePath(root.uri.fsPath, normalized, { allowMissing: allowNew });
+  return vscode.Uri.file(checked.absolutePath);
 }
 
 export function validateRelativeWorkspacePath(inputPath: string): string[] {
@@ -773,18 +755,5 @@ export function validateRelativeWorkspacePath(inputPath: string): string[] {
 }
 
 function validateCommandSafety(cmd: string): void {
-  const normalized = cmd.trim().toLowerCase();
-  const dangerousPatterns = [
-    /\brm\s+-rf\s+[\/\\]/i,
-    /\bdel\s+\/[sfq]\s+c:\\/i,
-    /\bformat\s+[a-z]:/i,
-    /\bmkfs\b/i,
-    /\bdd\s+if=/i,
-    /:(){ :|:& };:/
-  ];
-  for (const pattern of dangerousPatterns) {
-    if (pattern.test(normalized)) {
-      throw new Error('Command contains potentially catastrophic system operations and was blocked.');
-    }
-  }
+  assertAllowedCommand(cmd);
 }
