@@ -1,7 +1,9 @@
 import { spawn, ChildProcess } from 'node:child_process';
+import { assertAllowedCommand } from '../security/commandPolicy';
+import { redactString } from '../security/secretRedactor';
 import * as vscode from 'vscode';
 
-export type ProcessStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'timed_out';
+export type ProcessStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'timed_out' | 'cancelled';
 
 export interface ManagedProcess {
   id: string;
@@ -62,8 +64,10 @@ export class TerminalManager {
 
     this.processes.set(id, record);
 
+    assertAllowedCommand(command);
+
     if (signal?.aborted) {
-      record.status = 'stopped';
+      record.status = 'cancelled';
       record.endTime = Date.now();
       record.duration = 0;
       record.stderr = 'Command aborted before execution.';
@@ -76,7 +80,7 @@ export class TerminalManager {
       let timer: NodeJS.Timeout | undefined;
 
       const abortHandler = () => {
-        record.status = 'stopped';
+        record.status = 'cancelled';
         record.endTime = Date.now();
         record.duration = record.endTime - record.startTime;
         record.stderr += '\nCommand cancelled by user.';
@@ -108,18 +112,19 @@ export class TerminalManager {
 
       const child = spawn(command, {
         cwd,
-        shell: true
+        shell: true,
+        detached: process.platform !== 'win32'
       });
 
       record.processId = child.pid;
       this.activeChildren.set(id, child);
 
       child.stdout?.on('data', (data: Buffer | string) => {
-        record.stdout = (record.stdout + data.toString()).slice(-20000);
+        record.stdout = redactString((record.stdout + data.toString()).slice(-20000));
       });
 
       child.stderr?.on('data', (data: Buffer | string) => {
-        record.stderr = (record.stderr + data.toString()).slice(-10000);
+        record.stderr = redactString((record.stderr + data.toString()).slice(-10000));
       });
 
       child.on('close', (code) => {
@@ -143,7 +148,7 @@ export class TerminalManager {
           record.endTime = Date.now();
           record.duration = record.endTime - record.startTime;
           record.status = 'failed';
-          record.stderr += `\nProcess error: ${err.message}`;
+          record.stderr = redactString(record.stderr + '\nProcess error: ' + err.message);
           resolve(record);
         }
       });
