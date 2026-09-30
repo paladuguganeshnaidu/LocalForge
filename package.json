@@ -213,7 +213,9 @@
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
     "test:extension-host": "npm run compile && node tests/runExtensionHostTests.js",
-    "package": "vsce package"
+    "package": "vsce package && node scripts/verify-package-size.cjs",
+    "test:hardening": "npm run compile && node --test tests/forensicHardening.test.js",
+    "report": "node scripts/generate-current-reports.cjs"
   },
   "dependencies": {
     "ssh2": "^1.16.0"
