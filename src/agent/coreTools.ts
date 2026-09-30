@@ -755,5 +755,6 @@ export function validateRelativeWorkspacePath(inputPath: string): string[] {
 }
 
 function validateCommandSafety(cmd: string): void {
-  assertAllowedCommand(cmd);
+  const decision = classifyCommand(cmd);
+  if (decision.risk === 'DESTRUCTIVE') throw new Error(decision.reason || 'Destructive command blocked by CommandPolicy.');
 }
