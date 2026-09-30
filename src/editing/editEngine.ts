@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { createUnifiedDiff } from './diffService';
+import { assertWorkspacePath, normalizeWorkspaceRelativePath } from '../security/pathPolicy';
 import {
   computeFileHash,
   validateFileState,
@@ -69,7 +70,9 @@ export class EditEngine {
     let totalDeletions = 0;
 
     for (const edit of edits) {
-      const uri = vscode.Uri.joinPath(workspaceRoot, edit.path);
+      const normalizedPath = normalizeWorkspaceRelativePath(edit.path);
+      await assertWorkspacePath(workspaceRoot.fsPath, normalizedPath, { allowMissing: true });
+      const uri = vscode.Uri.joinPath(workspaceRoot, ...normalizedPath.split('/'));
       let originalContent = '';
       let originalState: FileOriginalState = 'missing';
 
@@ -91,7 +94,7 @@ export class EditEngine {
       totalDeletions += diff.stats.deletions;
 
       filePlans.push({
-        path: edit.path,
+        path: normalizedPath,
         uri,
         originalState,
         originalHash: hash,
@@ -228,11 +231,7 @@ export class EditEngine {
       }
 
       if (!applied) {
-        // Fallback file system write
-        for (const file of filesToApply) {
-          const encoded = Buffer.from(file.newContent, 'utf8');
-          await vscode.workspace.fs.writeFile(file.uri, encoded);
-        }
+        throw new Error('VS Code rejected the atomic workspace edit; no direct filesystem fallback is permitted.');
       }
 
       for (const file of filesToApply) {
@@ -251,6 +250,27 @@ export class EditEngine {
     }
 
     return result;
+  }
+
+  public async deleteFile(workspaceRoot: vscode.Uri, relativePath: string): Promise<void> {
+    const normalized = normalizeWorkspaceRelativePath(relativePath);
+    const target = await assertWorkspacePath(workspaceRoot.fsPath, normalized);
+    const edit = new vscode.WorkspaceEdit();
+    edit.delete(vscode.Uri.file(target.absolutePath), { ignoreIfNotExists: false, recursive: false, useTrash: true });
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) throw new Error('VS Code rejected the file delete operation.');
+  }
+
+  public async moveFile(workspaceRoot: vscode.Uri, sourcePath: string, destinationPath: string): Promise<void> {
+    const source = normalizeWorkspaceRelativePath(sourcePath);
+    const destination = normalizeWorkspaceRelativePath(destinationPath);
+    const sourceResolved = await assertWorkspacePath(workspaceRoot.fsPath, source);
+    const destinationResolved = await assertWorkspacePath(workspaceRoot.fsPath, destination, { allowMissing: true });
+    if (destinationResolved.exists) throw new Error('Destination file already exists.');
+    const edit = new vscode.WorkspaceEdit();
+    edit.rename(vscode.Uri.file(sourceResolved.absolutePath), vscode.Uri.file(destinationResolved.absolutePath), { overwrite: false });
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) throw new Error('VS Code rejected the file move operation.');
   }
 
   public rejectProposal(proposalId: string): void {
