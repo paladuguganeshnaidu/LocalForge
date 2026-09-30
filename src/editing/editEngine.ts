@@ -231,14 +231,14 @@ export class EditEngine {
       }
 
       if (!applied) {
-        const originalContents = new Map<string, Buffer | undefined>();
+        const originalContents = new Map<string, Uint8Array | undefined>();
         const appliedUris: vscode.Uri[] = [];
         try {
           for (const file of filesToApply) {
             try {
-              originalContents.set(file.path, await vscode.workspace.fs.readFile(file.uri));
+              originalContents.set(file.uri.fsPath || file.uri.path, await vscode.workspace.fs.readFile(file.uri));
             } catch {
-              originalContents.set(file.path, undefined);
+              originalContents.set(file.uri.fsPath || file.uri.path, undefined);
             }
           }
 
@@ -255,9 +255,9 @@ export class EditEngine {
         } catch (fallbackError: any) {
           for (const uri of appliedUris.reverse()) {
             const key = uri.fsPath || uri.path;
-            const original = Array.from(originalContents.entries()).find(([candidate]) => candidate && key.endsWith(candidate));
-            if (original?.[1]) {
-              await vscode.workspace.fs.writeFile(uri, original[1]);
+            const original = originalContents.get(key);
+            if (original) {
+              await vscode.workspace.fs.writeFile(uri, original);
             } else {
               try { await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false }); } catch {}
             }
