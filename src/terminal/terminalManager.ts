@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
-import { assertAllowedCommand } from '../security/commandPolicy';
+import { classifyCommand } from '../security/commandPolicy';
 import { redactString } from '../security/secretRedactor';
 import * as vscode from 'vscode';
 
@@ -64,7 +64,8 @@ export class TerminalManager {
 
     this.processes.set(id, record);
 
-    assertAllowedCommand(command);
+    const commandDecision = classifyCommand(command);
+    if (commandDecision.risk === 'DESTRUCTIVE') throw new Error(commandDecision.reason || 'Destructive command blocked by CommandPolicy.');
 
     if (signal?.aborted) {
       record.status = 'cancelled';
