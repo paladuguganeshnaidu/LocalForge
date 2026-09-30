@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, sep } from 'node:path';
-import { exec } from 'node:child_process';
 import { findRelevantSnippets } from '../context/workspaceContext';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { WorkspaceToolExecutor } from './toolAgent';
@@ -9,7 +8,6 @@ import { EditEngine } from '../editing/editEngine';
 import { TerminalManager } from '../terminal/terminalManager';
 import { assertWorkspacePath, normalizeWorkspaceRelativePath } from '../security/pathPolicy';
 import { assertAllowedCommand } from '../security/commandPolicy';
-import { redactString } from '../security/secretRedactor';
 
 const maximumReadBytes = 128 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -311,34 +309,26 @@ function getWorkspaceRootUri(): vscode.Uri {
 }
 
 async function resolveWorkspaceUri(inputPath: string, allowNew = false): Promise<vscode.Uri> {
-  let cleaned = inputPath.replace(/\\/g, '/').trim();
-  while (cleaned.startsWith('./')) {
-    cleaned = cleaned.slice(2).trim();
-  }
-  const segments = validateRelativeWorkspacePath(cleaned);
   const roots = vscode.workspace.workspaceFolders ?? [];
   if (!roots.length) throw new Error('Open a workspace folder first.');
+
+  let cleaned = inputPath.replace(/\\/g, '/').trim();
+  while (cleaned.startsWith('./')) cleaned = cleaned.slice(2);
+
   let root = roots[0];
-  if (roots.length > 1 && segments.length > 0) {
-    const matching = roots.find((folder) => folder.name === segments[0]);
+  const rawSegments = cleaned.split('/').filter(Boolean);
+  if (roots.length > 1 && rawSegments.length > 0) {
+    const matching = roots.find((folder) => folder.name === rawSegments[0]);
     if (matching) {
       root = matching;
-      segments.shift();
+      cleaned = rawSegments.slice(1).join('/');
     }
   }
-  const uri = vscode.Uri.joinPath(root.uri, ...segments);
-  if (vscode.workspace.getWorkspaceFolder && vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() !== root.uri.toString()) {
-    throw new Error('The requested path is outside the selected workspace folder.');
-  }
-  if (!allowNew && uri.scheme === 'file') {
-    const realRoot = await realpath(root.uri.fsPath);
-    const realFile = await realpath(uri.fsPath);
-    const relativeFile = relative(realRoot, realFile);
-    if (relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
-      throw new Error('The requested file resolves outside the workspace folder.');
-    }
-  }
-  return uri;
+
+  if (!cleaned) return root.uri;
+  const normalized = normalizeWorkspaceRelativePath(cleaned);
+  const checked = await assertWorkspacePath(root.uri.fsPath, normalized, { allowMissing: allowNew });
+  return vscode.Uri.file(checked.absolutePath);
 }
 
 function validateCommandSafety(cmd: string): void {
