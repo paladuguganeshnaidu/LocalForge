@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { AgentRunSummary, AgentMode } from '../agent/agentEngine';
+import { AgentRunSummary } from '../agent/agentEngine';
+import { AgentMode } from '../agent/agentLoop';
 import { OrchestrationResult, MultiAgentOrchestrator, OrchestratorOptions } from '../agent/orchestration/orchestrator';
 import { ProductMode } from '../agent/orchestration/types';
 import { CheckpointManager } from '../agent/orchestration/checkpointManager';
