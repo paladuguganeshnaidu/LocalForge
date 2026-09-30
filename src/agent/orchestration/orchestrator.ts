@@ -15,6 +15,7 @@ import {
 } from './types';
 import { AgentError } from './errors';
 import { inferModelCapabilities } from '../../providers/modelCapabilities';
+import { CheckpointManager } from './checkpointManager';
 
 export interface OrchestratorOptions {
   mode?: ProductMode;
@@ -47,7 +48,8 @@ export class MultiAgentOrchestrator {
     private readonly toolRegistry: ToolRegistry,
     private readonly permissionManager: PermissionManager,
     private readonly editEngine?: EditEngine,
-    maxConcurrency: number = 4
+    maxConcurrency: number = 4,
+    private readonly checkpointManager?: CheckpointManager
   ) {
     this.pool = new AgentPool(maxConcurrency);
     this.agentManager = new AgentManager(provider, toolRegistry, permissionManager, this.pool);
@@ -67,6 +69,17 @@ export class MultiAgentOrchestrator {
 
     // 1. Task Decomposition: Create DAG based on mode and goal
     const graph = this.decomposeGoal(userGoal, mode);
+    await this.enrichGraphTargets(graph, workspaceRoot, userGoal);
+
+    await this.checkpointManager?.saveCheckpoint({
+      runId,
+      task: userGoal,
+      mode,
+      graph: graph.serialize(),
+      filesModified: [],
+      timestamp: Date.now(),
+      status: 'running'
+    });
 
     const filesModified: string[] = [];
     const priorDecisions: string[] = [];
@@ -95,11 +108,20 @@ export class MultiAgentOrchestrator {
         }
 
         // Execute available tasks respecting concurrency limits
-        const tasksToRun = readyTasks.slice(0, Math.max(1, 4 - this.pool.getActiveCount()));
+        const tasksToRun = this.selectConflictFreeTasks(readyTasks, Math.max(1, 4 - this.pool.getActiveCount()));
 
         await Promise.all(
           tasksToRun.map(async (taskNode) => {
             graph.markRunning(taskNode.id);
+            await this.checkpointManager?.saveCheckpoint({
+              runId,
+              task: userGoal,
+              mode,
+              graph: graph.serialize(),
+              filesModified: [...filesModified],
+              timestamp: Date.now(),
+              status: 'running'
+            });
             options.onSubagentStart?.(taskNode.role, taskNode.id);
             options.onProgress?.(`Dispatching subagent [${taskNode.role}] for: ${taskNode.title}`);
 
@@ -132,6 +154,15 @@ export class MultiAgentOrchestrator {
 
             if (result.status === 'completed') {
               graph.markCompleted(taskNode.id, result);
+              await this.checkpointManager?.saveCheckpoint({
+                runId,
+                task: userGoal,
+                mode,
+                graph: graph.serialize(),
+                filesModified: [...filesModified],
+                timestamp: Date.now(),
+                status: 'running'
+              });
               priorDecisions.push(`[${taskNode.role}] ${result.output.slice(0, 150)}`);
               if (result.handoff) {
                 priorHandoffs[taskNode.id] = result.handoff;
@@ -146,6 +177,15 @@ export class MultiAgentOrchestrator {
               graph.markCancelled(taskNode.id);
             } else {
               const willRetry = graph.markFailed(taskNode.id, result.error || 'Execution failed');
+              await this.checkpointManager?.saveCheckpoint({
+                runId,
+                task: userGoal,
+                mode,
+                graph: graph.serialize(),
+                filesModified: [...filesModified],
+                timestamp: Date.now(),
+                status: 'running'
+              });
               if (willRetry) {
                 options.onProgress?.(`Retrying failed subtask: ${taskNode.title}...`);
               }
@@ -167,6 +207,16 @@ export class MultiAgentOrchestrator {
         summaryText = isCancelled ? 'Task was cancelled by user.' : 'Task execution failed.';
       }
 
+      const finalStatus = isCancelled ? 'cancelled' : isSuccess ? 'completed' : 'failed';
+      await this.checkpointManager?.saveCheckpoint({
+        runId,
+        task: userGoal,
+        mode,
+        graph: graph.serialize(),
+        filesModified: [...filesModified],
+        timestamp: Date.now(),
+        status: finalStatus === 'completed' ? 'completed' : finalStatus === 'cancelled' ? 'interrupted' : 'failed'
+      });
       return {
         runId,
         task: userGoal,
@@ -174,7 +224,7 @@ export class MultiAgentOrchestrator {
         graph,
         summary: summaryText,
         filesModified,
-        status: isCancelled ? 'cancelled' : isSuccess ? 'completed' : 'failed',
+        status: finalStatus,
         durationMs: Date.now() - startTime
       };
     } catch (err: any) {
@@ -189,6 +239,70 @@ export class MultiAgentOrchestrator {
         status: options.signal?.aborted ? 'cancelled' : 'failed',
         durationMs: Date.now() - startTime
       };
+    }
+  }
+
+  private selectConflictFreeTasks(readyTasks: TaskGraphNode[], maxTasks: number): TaskGraphNode[] {
+    const selected: TaskGraphNode[] = [];
+    const reserved = new Set<string>();
+    for (const task of readyTasks) {
+      const conflict = task.targetFiles.some((file) => reserved.has(file.toLowerCase()));
+      if (conflict) continue;
+      selected.push(task);
+      for (const file of task.targetFiles) reserved.add(file.toLowerCase());
+      if (selected.length >= maxTasks) break;
+    }
+    return selected;
+  }
+
+  private async enrichGraphTargets(graph: TaskGraph, workspaceRoot: vscode.Uri, goal: string): Promise<void> {
+    const files = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(workspaceRoot, '**/*'),
+      '**/{node_modules,.git,dist,out,coverage}/**',
+      400
+    );
+    const normalizedGoal = goal.toLowerCase();
+    const terms = normalizedGoal.split(/[^a-z0-9_]+/).filter((t) => t.length >= 3).slice(0, 12);
+    const scored = files.map((uri) => {
+      const rel = vscode.workspace.asRelativePath(uri, false);
+      const lower = rel.toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (lower.includes(term)) score += 3;
+      }
+      if (/package\.json$|tsconfig\.json$|readme\.md$/i.test(rel)) score += 2;
+      if (/test|spec|__tests__/.test(lower)) score += 1;
+      return { rel, score };
+    }).sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel));
+
+    const targets = scored.slice(0, 24).map((x) => x.rel);
+    for (const node of graph.getAllNodes()) {
+      if (node.targetFiles.length === 0) {
+        if (node.role === 'test_engineer') {
+          node.targetFiles.push(...targets.filter((p) => /test|spec|package\.json|tsconfig\.json/i.test(p)).slice(0, 12));
+        } else {
+          node.targetFiles.push(...targets.slice(0, 12));
+        }
+      }
+      if (node.role === 'security_reviewer' && node.targetFiles.length === 0) {
+        node.targetFiles.push(...targets.slice(0, 12));
+      }
+    }
+
+    // Make security-sensitive goals explicit in the graph.
+    if (/(security|auth|permission|secret|token|ssh|browser|network|shell|command)/i.test(goal) &&
+        !graph.getAllNodes().some((n) => n.role === 'security_reviewer')) {
+      const review = {
+        id: 'task-security-review-dynamic',
+        title: 'Security boundary validation',
+        description: 'Validate command, path, secret, and trust boundaries affected by this task.',
+        role: 'security_reviewer' as const,
+        dependencies: graph.getAllNodes().filter((n) => n.status === 'pending' || n.status === 'ready').map((n) => n.id),
+        targetFiles: targets.slice(0, 12),
+        priority: 'high' as const,
+        maxRetries: 1
+      };
+      graph.addNode(review);
     }
   }
 
