@@ -30,7 +30,7 @@ export class ExecutionCoordinator {
 
     const productMode: ProductMode = mode === 'agent' ? 'agent' : mode;
     const routing = this.modelRouter.route(
-      productMode === 'agent' || productMode === 'automate' ? 'agent' : 'chat',
+      productMode === 'agent' ? 'agent' : 'chat',
       modelPreference
     );
     const chosenModel = routing.modelId;
