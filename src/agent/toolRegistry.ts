@@ -1,6 +1,6 @@
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { PermissionManager, ToolCategory } from './permissionManager';
-import { assertAllowedCommand } from '../security/commandPolicy';
+import { classifyCommand } from '../security/commandPolicy';
 import { redactUnknown } from '../security/secretRedactor';
 
 export type ToolRiskLevel =
@@ -144,8 +144,9 @@ export class ToolRegistry {
 
     if (tool.validate) tool.validate(args);
 
-    if (typeof args.command === 'string') {
-      assertAllowedCommand(args.command);
+    const commandDecision = typeof args.command === 'string' ? classifyCommand(args.command) : undefined;
+    if (commandDecision?.risk === 'DESTRUCTIVE') {
+      throw new Error(commandDecision.reason || 'Destructive command blocked by CommandPolicy.');
     }
 
     this.audit({ tool: name, status: 'started', risk: tool.riskLevel });
