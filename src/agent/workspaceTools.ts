@@ -7,6 +7,9 @@ import { ModelToolDefinition } from '../providers/modelProvider';
 import { WorkspaceToolExecutor } from './toolAgent';
 import { EditEngine } from '../editing/editEngine';
 import { TerminalManager } from '../terminal/terminalManager';
+import { assertWorkspacePath, normalizeWorkspaceRelativePath } from '../security/pathPolicy';
+import { assertAllowedCommand } from '../security/commandPolicy';
+import { redactString } from '../security/secretRedactor';
 
 const maximumReadBytes = 128 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -207,9 +210,7 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
       };
     }
 
-    const uri = await resolveWorkspaceUri(relativePath, true);
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-    return { success: true, path: vscode.workspace.asRelativePath(uri), bytesWritten: content.length };
+    throw new Error('Autonomous workspace writes require the canonical EditEngine.');
   }
 
   if (name === 'edit_workspace_file') {
@@ -259,13 +260,12 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
       };
     }
 
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));
-    return { success: true, path: vscode.workspace.asRelativePath(uri), replacedChars: target.length, newChars: replacement.length };
+    throw new Error('Autonomous workspace edits require the canonical EditEngine.');
   }
 
   if (name === 'run_command') {
     const command = getString(args.command, 'command', 1000);
-    validateCommandSafety(command);
+    assertAllowedCommand(command);
     const rootPath = getWorkspaceRootUri().fsPath;
 
     if (toolContext?.terminalManager) {
@@ -279,16 +279,7 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
       };
     }
 
-    return new Promise((resolve) => {
-      exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024 }, (error, stdout, stderr) => {
-        resolve({
-          command,
-          exitCode: error && typeof error.code === 'number' ? error.code : (error ? 1 : 0),
-          stdout: (stdout || '').trim().slice(0, 8000),
-          stderr: (stderr || '').trim().slice(0, 4000)
-        });
-      });
-    });
+    throw new Error('TerminalManager is required for canonical workspace command execution.');
   }
 
   throw new Error(`Tool “${name}” is not allow-listed.`);
