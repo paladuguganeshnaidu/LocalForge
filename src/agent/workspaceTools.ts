@@ -7,7 +7,7 @@ import { WorkspaceToolExecutor } from './toolAgent';
 import { EditEngine } from '../editing/editEngine';
 import { TerminalManager } from '../terminal/terminalManager';
 import { assertWorkspacePath, normalizeWorkspaceRelativePath } from '../security/pathPolicy';
-import { assertAllowedCommand } from '../security/commandPolicy';
+import { classifyCommand } from '../security/commandPolicy';
 
 const maximumReadBytes = 128 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -263,7 +263,7 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
 
   if (name === 'run_command') {
     const command = getString(args.command, 'command', 1000);
-    assertAllowedCommand(command);
+    const decision = classifyCommand(command); if (decision.risk === 'DESTRUCTIVE') throw new Error(decision.reason || 'Destructive command blocked by CommandPolicy.');
     const rootPath = getWorkspaceRootUri().fsPath;
 
     if (toolContext?.terminalManager) {
