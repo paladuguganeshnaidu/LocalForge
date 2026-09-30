@@ -10,7 +10,7 @@ import { ArtifactManager } from '../core/artifactManager';
 import { BrowserTool } from '../browser/browserTool';
 import { findRelevantSnippets } from '../context/workspaceContext';
 import { assertWorkspacePath, normalizeWorkspaceRelativePath } from '../security/pathPolicy';
-import { assertAllowedCommand } from '../security/commandPolicy';
+import { classifyCommand } from '../security/commandPolicy';
 
 const maximumReadBytes = 256 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -505,7 +505,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args) => {
       const command = getString(args.command, 'command', 1000);
-      assertAllowedCommand(command);
+      const decision = classifyCommand(command); if (decision.risk === 'DESTRUCTIVE') throw new Error(decision.reason || 'Destructive command blocked by CommandPolicy.');
       const rootPath = getWorkspaceRootUri().fsPath;
 
       if (context.terminalManager) {
