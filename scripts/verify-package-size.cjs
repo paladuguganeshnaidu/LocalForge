@@ -26,7 +26,7 @@ const forbidden = [
 for (const line of listing.split(/\r?\n/)) {
   const candidate = line.trim();
   if (!candidate) continue;
-  if (forbidden.some((pattern) => pattern.test(candidate))) {
+  if (candidate !== path.basename(vsix) && forbidden.some((pattern) => pattern.test(candidate))) {
     throw new Error('Forbidden package payload entry: ' + candidate);
   }
 }
