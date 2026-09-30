@@ -1,5 +1,7 @@
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { PermissionManager, ToolCategory } from './permissionManager';
+import { assertAllowedCommand } from '../security/commandPolicy';
+import { redactUnknown } from '../security/secretRedactor';
 
 export type ToolRiskLevel =
   | 'read_only'
@@ -39,6 +41,16 @@ export interface RegisterToolOptions {
 
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
+  private auditTrail: Array<{ timestamp: number; tool: string; status: 'started' | 'completed' | 'failed'; risk: ToolRiskLevel; error?: string }> = [];
+
+  private audit(event: { tool: string; status: 'started' | 'completed' | 'failed'; risk: ToolRiskLevel; error?: string }): void {
+    this.auditTrail.push({ timestamp: Date.now(), ...event });
+    if (this.auditTrail.length > 500) this.auditTrail.splice(0, this.auditTrail.length - 500);
+  }
+
+  public getAuditTrail(): ReadonlyArray<{ timestamp: number; tool: string; status: 'started' | 'completed' | 'failed'; risk: ToolRiskLevel; error?: string }> {
+    return this.auditTrail;
+  }
 
   public registerTool(
     definition: ModelToolDefinition,
@@ -128,41 +140,45 @@ export class ToolRegistry {
     permissionManager?: PermissionManager
   ): Promise<unknown> {
     const tool = this.tools.get(name);
-    if (!tool) {
-      throw new Error(`Tool “${name}” is not allow-listed or registered.`);
+    if (!tool) throw new Error('Tool "' + name + '" is not allow-listed or registered.');
+
+    if (tool.validate) tool.validate(args);
+
+    if (typeof args.command === 'string') {
+      assertAllowedCommand(args.command);
     }
 
-    if (tool.validate) {
-      tool.validate(args);
-    }
+    this.audit({ tool: name, status: 'started', risk: tool.riskLevel });
 
-    if (permissionManager) {
-      const allowed = await permissionManager.checkPermission(name, args);
-      if (!allowed) {
-        throw new Error(`Execution of tool “${name}” was rejected by user or permission policy.`);
+    try {
+      if (permissionManager) {
+        const allowed = await permissionManager.checkPermission(name, args);
+        if (!allowed) throw new Error('Execution of tool "' + name + '" was rejected by user or permission policy.');
       }
-    }
 
-    let result: unknown;
-    if (tool.timeout && tool.timeout > 0) {
-      let timer: NodeJS.Timeout | undefined;
-      const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Tool "${name}" execution timed out after ${tool.timeout}ms.`)), tool.timeout);
-      });
-      try {
-        result = await Promise.race([tool.handler(args), timeoutPromise]);
-      } finally {
-        if (timer) clearTimeout(timer);
+      let result: unknown;
+      if (tool.timeout && tool.timeout > 0) {
+        let timer: NodeJS.Timeout | undefined;
+        const timeoutPromise = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Tool "' + name + '" execution timed out after ' + tool.timeout + 'ms.')), tool.timeout);
+        });
+        try {
+          result = await Promise.race([tool.handler(args), timeoutPromise]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      } else {
+        result = await tool.handler(args);
       }
-    } else {
-      result = await tool.handler(args);
-    }
 
-    if (tool.redact) {
-      return tool.redact(result);
+      if (tool.redact) result = tool.redact(result);
+      const safe = redactUnknown(result);
+      this.audit({ tool: name, status: 'completed', risk: tool.riskLevel });
+      return safe;
+    } catch (error: any) {
+      this.audit({ tool: name, status: 'failed', risk: tool.riskLevel, error: String(error?.message || error) });
+      throw error;
     }
-
-    return result;
   }
 
   private inferCategory(name: string): ToolCategory {
