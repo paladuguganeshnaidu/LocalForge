@@ -1,14 +1,15 @@
-# LocalForge
+# LOMVREN
 
-> **A local-first AI software engineer for VS Code.**
+> **A local-first autonomous engineering environment for AI-assisted software development.**  
+> *Note: LOMVREN was previously published as LocalForge.*
 
-LocalForge is an autonomous, privacy-respecting AI coding assistant that runs 100% locally or on your own remote GPU via encrypted SSH tunneling. Zero LocalForge-hosted cloud inference. Zero proprietary telemetry. Complete control over your code, writes, and execution.
+LOMVREN is an autonomous, privacy-respecting AI software engineering operating system that runs 100% locally or on your own remote GPU via encrypted SSH tunneling. Zero hosted cloud inference. Zero proprietary telemetry. Complete control over your code, writes, and execution.
 
 ---
 
 ## Key Differentiators
 
-- **Local-First & Private**: Models run directly on your machine (Ollama, LM Studio, vLLM, llama.cpp) or your private remote GPU server. Prompts and source code are never uploaded to any LocalForge backend.
+- **Local-First & Private**: Models run directly on your machine (Ollama, LM Studio, vLLM, llama.cpp) or your private remote GPU server. Prompts and source code are never uploaded to any remote vendor backend.
 - **Antigravity IDE Agent Side Panel**: Native VS Code Secondary Sidebar agent experience with minimal chrome, crisp Codicon icons, segmented mode selection (`Ask`, `Plan`, `Agent`), execution strategies (`Fast`, `Planning`), collapsible operational timelines, interactive artifact cards, and dedicated review changes view.
 - **Canonical Model Identity (ModelRef.id)**: Single source of truth across ModelRegistry, CompositeProvider, ModelRouter, and sessions. A selected model in the UI executes deterministically.
 - **Ask · Plan · Agent Modes**:
@@ -39,10 +40,10 @@ LocalForge is an autonomous, privacy-respecting AI coding assistant that runs 10
 
 ## Interaction & Information Architecture
 
-The LocalForge agent panel follows a native, focused hierarchy:
+The LOMVREN agent panel follows a native, focused hierarchy:
 
 1. **Header**:
-   - LocalForge branding and active conversation title.
+   - LOMVREN branding and active conversation title.
    - Quick action buttons (New Session, Refresh Models, Diagnostics, Settings).
    - Compact model indicator displaying active model, provider, and compute target (`Local GPU`, `Remote GPU (SSH)`, or `Auto`).
 2. **Mode Selector**:
@@ -69,7 +70,7 @@ The LocalForge agent panel follows a native, focused hierarchy:
 
 ### 1. Requirements
 
-- **VS Code**: `^1.90.0`
+- **VS Code**: `^1.106.0`
 - **Model Runtime**:
   - [Ollama](https://ollama.ai) running locally on `http://127.0.0.1:11434` (default), or
   - Any OpenAI-compatible server (LM Studio, vLLM, llama.cpp) on `http://127.0.0.1:1234/v1`, or
@@ -84,8 +85,8 @@ ollama pull qwen2.5-coder:1.5b
 
 ### 2. First Run
 
-1. Open VS Code. LocalForge is available in the **Secondary Sidebar** (or Primary Sidebar/Panel).
-2. LocalForge will detect running model runtimes and populate the unified model picker.
+1. Open VS Code. LOMVREN is available in the **Secondary Sidebar** (or Primary Sidebar/Panel).
+2. LOMVREN will detect running model runtimes and populate the unified model picker.
 3. Choose your preferred mode (`Agent`, `Plan`, or `Ask`).
 4. Type a task (e.g., *"Add authentication middleware"* or *"Explain the repository structure"*).
 
@@ -123,11 +124,11 @@ Click or type `@` references to attach context directly into the prompt:
 
 Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (RunPod, Lambda Labs, home rig) while working locally:
 
-1. Click **Settings** or run `LocalForge: Configure Remote GPU Host`.
+1. Click **Settings** or run `LOMVREN: Configure Remote GPU Host`.
 2. Enter host, username, port, and authentication method (SSH key or password).
 3. Secrets are stored securely in **VS Code SecretStorage**—never in plaintext files or logs.
-4. Run `LocalForge: Connect to Remote GPU Host`.
-5. LocalForge establishes a loopback-only SSH tunnel (`127.0.0.1:port -> remote Ollama`), pins the server's SSH fingerprint, and discovers all remote models.
+4. Run `LOMVREN: Connect to Remote GPU Host`.
+5. LOMVREN establishes a loopback-only SSH tunnel (`127.0.0.1:port -> remote Ollama`), pins the server's SSH fingerprint, and discovers all remote models.
 6. Remote models appear in the unified model picker with location tags and NVIDIA GPU telemetry (GPU name, VRAM used/total, utilization).
 7. Disconnecting cleans up the tunnel and removes remote models from the active registry immediately.
 
@@ -135,19 +136,21 @@ Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (
 
 ## Security & Privacy Architecture
 
-- **Zero Cloud Inference**: LocalForge does not send code or prompts to any LocalForge cloud server. All model requests target loopback addresses (`127.0.0.1`).
+- **Zero Cloud Inference**: LOMVREN does not send code or prompts to any remote server. All local model requests target loopback addresses (`127.0.0.1`).
 - **Workspace Trust Enforced**: Untrusted workspaces cannot execute workspace tools, read files, or run terminal commands.
 - **Two-Phase Atomic Commit**: Changes across multiple files are checked simultaneously. If any file has been modified externally, all changes are halted to prevent overwrites.
 - **Host Key Pinning**: Remote SSH connections verify and store SHA-256 host key fingerprints to prevent MITM attacks.
 - **Strict Command Policies**: Auto-safe execution rejects dangerous shell chaining (`&&`, `||`, `;`, `|`, `2>`, `&`, `$()`). Only verified safe read and test commands run automatically.
 
+---
+
 ## Testing & Verification
 
-LocalForge employs a rigorous multi-tier testing strategy:
+LOMVREN employs a rigorous multi-tier testing strategy:
 
-- **Unit & Integration Tests**: `npm test` runs 85 automated test suites spanning model providers, canonical model routing, multi-format tool call parsing, layered permission policies, unified diff generation, two-phase atomic editing, and full end-to-end task loops.
+- **Unit & Integration Tests**: `npm test` runs 96 automated test suites spanning model providers, canonical model routing, multi-format tool call parsing, layered permission policies, unified diff generation, two-phase atomic editing, and full end-to-end task loops.
 - **High-Volume Stress Tests**: `tests/highVolumeStress.test.js` exercises 1,000 tool-call parser inputs across all syntaxes, 1,000 malformed inputs, 1,000 path security traversals, 1,000 webview message validations, 100 edit proposals, 100 permission checks, 100 synthetic agent loops, 10 real terminal executions, and concurrent cancellation scenarios.
-- **VS Code Extension Host Tests**: `npm run test:extension-host` verifies extension activation, command registration, Secondary Sidebar view contributions, diagnostics execution, and workspace filesystem operations inside real VS Code runtime environments.
+- **VS Code Extension Host Tests**: `npm run test:extension-host` verifies extension activation, command registration, Secondary Sidebar view contributions, diagnostics execution, and live webview IPC inside real VS Code Electron runtime environments.
 - **Production Packaging**: `npm run package` compiles the TypeScript codebase and packages the production-ready `.vsix` bundle via `@vscode/vsce`.
 
 ---

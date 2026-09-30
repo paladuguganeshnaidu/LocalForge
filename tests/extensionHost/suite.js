@@ -5,8 +5,8 @@ async function run() {
   console.log('[ExtensionHost] Starting Extension Host verification...');
 
   // 1. Extension activation
-  const ext = vscode.extensions.getExtension('paladuguganeshnaidu.lomvern-vscode') || vscode.extensions.getExtension('paladuguganeshnaidu.localforge-vscode');
-  assert.ok(ext, 'Extension paladuguganeshnaidu.lomvern-vscode must be discovered');
+  const ext = vscode.extensions.getExtension('paladuguganeshnaidu.localforge-vscode');
+  assert.ok(ext, 'Extension paladuguganeshnaidu.localforge-vscode must be discovered');
 
   if (!ext.isActive) {
     console.log('[ExtensionHost] Activating extension...');

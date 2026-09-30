@@ -97,7 +97,7 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
       try {
         await engine.bootstrap();
         await viewProvider.refresh();
-        void vscode.window.showInformationMessage('Lomvern model registry refreshed.');
+        void vscode.window.showInformationMessage('LOMVREN model registry refreshed.');
       } catch (err: any) {
         void vscode.window.showErrorMessage(`Model refresh failed: ${err.message || String(err)}`);
       }
@@ -175,7 +175,7 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
 
     vscode.commands.registerCommand('localforge.selfTest', async () => {
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Running Lomvern Autonomous Agent Self-Test...' },
+        { location: vscode.ProgressLocation.Notification, title: 'Running LOMVREN Autonomous Agent Self-Test...' },
         async () => {
           const report = await engine.selfTest.runSelfTest();
           const markdown = engine.selfTest.formatReportMarkdown(report);
@@ -202,13 +202,13 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
     vscode.commands.registerCommand('localforge.newSession', async () => {
       engine.sessionManager.createNewSession();
       await viewProvider.refresh();
-      void vscode.window.showInformationMessage('Started new Lomvern session.');
+      void vscode.window.showInformationMessage('Started new LOMVREN session.');
     }),
 
     vscode.commands.registerCommand('localforge.newConversation', async () => {
       engine.sessionManager.createNewSession();
       await viewProvider.refresh();
-      void vscode.window.showInformationMessage('Started new Lomvern conversation.');
+      void vscode.window.showInformationMessage('Started new LOMVREN conversation.');
     }),
 
     vscode.commands.registerCommand('localforge.openAgent', async () => {
@@ -218,7 +218,7 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
     vscode.commands.registerCommand('localforge.cancelAgent', () => {
       engine.cancelCurrentTask();
       viewProvider.cancelActiveChat();
-      void vscode.window.showInformationMessage('Lomvern agent task cancelled.');
+      void vscode.window.showInformationMessage('LOMVREN agent task cancelled.');
     }),
 
     vscode.commands.registerCommand('localforge.reviewChanges', async () => {
@@ -256,13 +256,13 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
       let mode = targetMode;
       if (!mode) {
         const pick = await vscode.window.showQuickPick(['Ask', 'Plan', 'Agent'], {
-          placeHolder: 'Select Lomvern agent mode'
+          placeHolder: 'Select LOMVREN agent mode'
         });
         if (pick) mode = pick.toLowerCase();
       }
       if (mode) {
         viewProvider.activeMode = mode.toLowerCase() as any;
-        void vscode.window.showInformationMessage(`Lomvern agent mode set to: ${mode}`);
+        void vscode.window.showInformationMessage(`LOMVREN agent mode set to: ${mode}`);
       }
     }),
 
@@ -293,7 +293,7 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
           { location: vscode.ProgressLocation.Notification, title: 'Re-indexing workspace context...' },
           async () => {
             const count = await engine.indexer!.indexWorkspace();
-            void vscode.window.showInformationMessage(`Indexed ${count} workspace files for Lomvern.`);
+            void vscode.window.showInformationMessage(`Indexed ${count} workspace files for LOMVREN.`);
           }
         );
       }
@@ -316,7 +316,7 @@ export function deactivate(): void {
 async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('Open a file and select code for Lomvern to explain.');
+    void vscode.window.showInformationMessage('Open a file and select code for LOMVREN to explain.');
     return;
   }
   const targetRange = editor.selection.isEmpty
@@ -336,11 +336,11 @@ async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<v
 async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('Open a file before asking Lomvern to fix code.');
+    void vscode.window.showInformationMessage('Open a file before asking LOMVREN to fix code.');
     return;
   }
   if (!vscode.workspace.isTrusted) {
-    void vscode.window.showWarningMessage('Lomvern code fixes require a trusted workspace.');
+    void vscode.window.showWarningMessage('LOMVREN code fixes require a trusted workspace.');
     return;
   }
 
@@ -350,7 +350,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
     : editor.selection;
   const original = editor.document.getText(targetRange);
   if (!original.trim()) {
-    void vscode.window.showInformationMessage('Select code or place the cursor on code you want Lomvern to fix.');
+    void vscode.window.showInformationMessage('Select code or place the cursor on code you want LOMVREN to fix.');
     return;
   }
 
@@ -365,7 +365,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
     : 'Fix bug or issue in selected code';
 
   const instruction = await vscode.window.showInputBox({
-    title: 'Lomvern: Fix code',
+    title: 'LOMVREN: Fix code',
     prompt: diagnosticMessages.length
       ? `Found ${diagnosticMessages.length} issue(s) at selection. Describe the fix or press Enter to address diagnostics.`
       : 'Describe what to fix in the selected code.',
@@ -392,7 +392,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
   let replacement = '';
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Lomvern is generating a fix', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'LOMVREN is generating a fix', cancellable: true },
       async (progress, token) => {
         const cancellation = token.onCancellationRequested(() => controller.abort());
         try {
@@ -420,7 +420,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
 
   const originalDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: original });
   const proposedDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: replacement });
-  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'Lomvern: Review proposed fix');
+  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'LOMVREN: Review proposed fix');
   const choice = await vscode.window.showInformationMessage('Review the diff. Apply this fix to the original file?', 'Apply', 'Discard');
   if (choice !== 'Apply') return;
 
@@ -432,17 +432,17 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
   const edit = new vscode.WorkspaceEdit();
   edit.replace(editor.document.uri, targetRange, replacement);
   const applied = await vscode.workspace.applyEdit(edit);
-  if (applied) void vscode.window.showInformationMessage('Lomvern applied the reviewed fix.');
+  if (applied) void vscode.window.showInformationMessage('LOMVREN applied the reviewed fix.');
 }
 
 async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('Open a file before asking Lomvern to edit code.');
+    void vscode.window.showInformationMessage('Open a file before asking LOMVREN to edit code.');
     return;
   }
   if (!vscode.workspace.isTrusted) {
-    void vscode.window.showWarningMessage('Lomvern edits require a trusted workspace.');
+    void vscode.window.showWarningMessage('LOMVREN edits require a trusted workspace.');
     return;
   }
 
@@ -463,7 +463,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
   }
 
   const instruction = await vscode.window.showInputBox({
-    title: 'Lomvern: Edit code',
+    title: 'LOMVREN: Edit code',
     prompt: 'Describe the change. The selected code, or the whole file if nothing is selected, is sent to the selected model.',
     placeHolder: 'e.g. Add input validation and preserve the current API',
     ignoreFocusOut: true
@@ -479,7 +479,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
   let replacement = '';
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Lomvern is preparing an edit', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'LOMVREN is preparing an edit', cancellable: true },
       async (progress, token) => {
         const cancellation = token.onCancellationRequested(() => controller.abort());
         try {
@@ -507,7 +507,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
 
   const originalDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: original });
   const proposedDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: replacement });
-  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'Lomvern: Review proposed edit');
+  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'LOMVREN: Review proposed edit');
   const choice = await vscode.window.showInformationMessage('Review the diff. Apply this edit to the original file?', 'Apply', 'Discard');
   if (choice !== 'Apply') return;
 
@@ -519,7 +519,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
   const edit = new vscode.WorkspaceEdit();
   edit.replace(editor.document.uri, targetRange, replacement);
   const applied = await vscode.workspace.applyEdit(edit);
-  if (applied) void vscode.window.showInformationMessage('Lomvern applied the reviewed edit.');
+  if (applied) void vscode.window.showInformationMessage('LOMVREN applied the reviewed edit.');
 }
 
 async function searchWorkspace(): Promise<void> {
@@ -527,7 +527,7 @@ async function searchWorkspace(): Promise<void> {
     void vscode.window.showWarningMessage('Workspace search requires a trusted workspace.');
     return;
   }
-  const query = await vscode.window.showInputBox({ title: 'Lomvern: Search workspace', prompt: 'Find files and code related to a question or symbol' });
+  const query = await vscode.window.showInputBox({ title: 'LOMVREN: Search workspace', prompt: 'Find files and code related to a question or symbol' });
   if (!query?.trim()) return;
   try {
     const snippets = await findRelevantSnippets(query, { maxFiles: 12, maxChars: 20000 });

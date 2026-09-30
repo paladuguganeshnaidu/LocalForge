@@ -1,14 +1,16 @@
-# Lomvern v0.2.4 Release Notes
+# LOMVREN v0.2.4 Release Notes
 
 **Release Date:** September 30, 2026  
 **Version:** 0.2.4  
 **Target:** Visual Studio Code `^1.106.0`  
+**Technical Package:** `localforge-vscode-0.2.4.vsix`  
+**Marketplace Unique ID:** `paladuguganeshnaidu.localforge-vscode`  
 
 ---
 
-## Highlights of Lomvern v0.2.4
+## Highlights of LOMVREN v0.2.4
 
-Lomvern (formerly LocalForge) v0.2.4 officially introduces the new **Lomvern** brand identity and custom logo, delivers rock-solid webview lifecycle stability, resolves UI prompt latching, guarantees full Chromium Level 3 Content Security Policy compliance, and validates 100% of extension host operations inside real VS Code Electron environments.
+LOMVREN (formerly LocalForge) v0.2.4 officially introduces the new **LOMVREN** brand identity, new icon assets, and complete Marketplace package consistency while preserving the existing extension identity (`paladuguganeshnaidu.localforge-vscode`). It also delivers rock-solid webview lifecycle stability, resolves UI prompt latching, guarantees full Chromium Level 3 Content Security Policy compliance, and validates 100% of extension host operations inside real VS Code Electron environments.
 
 ---
 

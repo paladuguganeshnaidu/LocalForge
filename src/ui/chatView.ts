@@ -513,7 +513,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   const nonce = randomBytes(16).toString('hex');
   const cspSource = webview.cspSource;
   const logoUri = extensionUri && typeof webview.asWebviewUri === 'function'
-    ? webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'lomvern-icon.png')).toString()
+    ? webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'lomvren-icon.png')).toString()
     : '';
 
   return `<!DOCTYPE html>
@@ -1202,8 +1202,8 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <div class="header">
     <div class="header-top">
       <div class="header-title" style="display:flex; align-items:center; gap:7px;">
-        ${logoUri ? `<img src="${logoUri}" alt="Lomvern" style="width:18px; height:18px; border-radius:4px; object-fit:contain;" />` : ''}
-        <span>Lomvern</span>
+        ${logoUri ? `<img src="${logoUri}" alt="LOMVREN" style="width:18px; height:18px; border-radius:4px; object-fit:contain;" />` : ''}
+        <span>LOMVREN</span>
         <span id="sessionTitle" style="color:var(--subtle); font-weight:normal;"></span>
       </div>
       <div class="header-actions">
@@ -1246,10 +1246,10 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <!-- Conversation & Activity Scroll Area -->
   <div class="main-scroll" id="mainScroll">
     <div class="msg-assistant welcome" style="display:flex; gap:10px; align-items:center;">
-      ${logoUri ? `<img src="${logoUri}" alt="Lomvern Logo" style="width:34px; height:34px; border-radius:6px; object-fit:contain; flex-shrink:0;" />` : ''}
+      ${logoUri ? `<img src="${logoUri}" alt="LOMVREN Logo" style="width:34px; height:34px; border-radius:6px; object-fit:contain; flex-shrink:0;" />` : ''}
       <div>
-        <strong>Lomvern v0.2.4</strong><br>
-        <span style="font-size:11px; opacity:0.85;">Local-first AI software engineer for VS Code. Select a mode or type a task below.</span>
+        <strong>LOMVREN v0.2.4</strong><br>
+        <span style="font-size:11px; opacity:0.85;">Local-first autonomous AI software engineering environment for VS Code. Select a mode or type a task below.</span>
       </div>
     </div>
     <div class="timeline" id="timelineContainer" style="display:none;"></div>
@@ -1335,7 +1335,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <!-- Settings Drawer -->
   <div class="drawer" id="settingsDrawer">
     <div class="drawer-header">
-      <div class="drawer-title">Lomvern Settings</div>
+      <div class="drawer-title">LOMVREN Settings</div>
       <button class="icon-btn" id="closeSettingsBtn">
         <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
@@ -1596,7 +1596,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       const thinkingIndicator = document.createElement('div');
       thinkingIndicator.className = 'msg-assistant thinking-bubble';
       thinkingIndicator.id = 'active-thinking-indicator';
-      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>Lomvern is thinking...</span>';
+      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>LOMVREN is thinking...</span>';
       mainScroll.appendChild(thinkingIndicator);
       mainScroll.scrollTop = mainScroll.scrollHeight;
 
@@ -1927,7 +1927,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         const isConnError = msg.message && (msg.message.includes('Ollama') || msg.message.includes('connect') || msg.message.includes('fetch'));
         card.innerHTML = '<div style="color:var(--vscode-errorForeground, #f48771); font-weight:600; margin-bottom:4px;">Task Failed</div>' +
           '<div style="font-size:12px; line-height:1.4;">' + escapeHtml(msg.message || 'Unknown error') + '</div>' +
-          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\'ollama serve\'). Try running <code>Lomvern: Doctor</code> from the command palette.</div>' : '');
+          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\'ollama serve\'). Try running <code>LOMVREN: Doctor</code> from the command palette.</div>' : '');
         mainScroll.appendChild(card);
         mainScroll.scrollTop = mainScroll.scrollHeight;
       }
