@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
 const assert = require('assert');
+const yauzl = require('yauzl');
 
 const EXPECTED_IDENTITY = {
   name: 'localforge-vscode',
@@ -18,7 +19,53 @@ const EXPECTED_IDENTITY = {
   icon: 'media/lomvren-icon.png'
 };
 
-function main() {
+function readZipEntries(zipPath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (err, zip) => {
+      if (err) return reject(err);
+      const entries = [];
+      zip.readEntry();
+      zip.on('entry', (entry) => {
+        entries.push(entry.fileName);
+        zip.readEntry();
+      });
+      zip.on('end', () => zip.close(() => resolve(entries)));
+      zip.on('error', reject);
+    });
+  });
+}
+
+function readZipEntry(zipPath, targetName) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (err, zip) => {
+      if (err) return reject(err);
+      let found = false;
+      zip.readEntry();
+      zip.on('entry', (entry) => {
+        if (entry.fileName !== targetName) {
+          zip.readEntry();
+          return;
+        }
+        found = true;
+        zip.openReadStream(entry, (streamErr, stream) => {
+          if (streamErr) return reject(streamErr);
+          const chunks = [];
+          stream.on('data', (chunk) => chunks.push(chunk));
+          stream.on('end', () => {
+            zip.close(() => resolve(Buffer.concat(chunks).toString('utf8')));
+          });
+          stream.on('error', reject);
+        });
+      });
+      zip.on('end', () => {
+        if (!found) resolve(null);
+      });
+      zip.on('error', reject);
+    });
+  });
+}
+
+async function main() {
   console.log('=====================================================');
   console.log('  LOMVREN VS Code Marketplace Release Verification');
   console.log('=====================================================\n');
@@ -84,14 +131,9 @@ function main() {
   console.log(`  ✓ VSIX file: ${expectedVsixName} (${(vsixStat.size / (1024 * 1024)).toFixed(2)} MB)`);
 
   console.log('\n[Step 4/6] Extracting internal manifest from VSIX...');
-  let vsixPkgRaw = '';
-  try {
-    vsixPkgRaw = cp.execSync(`tar -O -xf "${vsixPath}" extension/package.json`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-  } catch (err) {
-    throw new Error(`Failed to extract extension/package.json from ${expectedVsixName}: ${err.message}`);
+  const vsixPkgRaw = await readZipEntry(vsixPath, 'extension/package.json');
+  if (!vsixPkgRaw) {
+    throw new Error(`Failed to find extension/package.json in ${expectedVsixName}`);
   }
 
   const vsixPkg = JSON.parse(vsixPkgRaw);
@@ -123,7 +165,7 @@ function main() {
   );
 
   console.log('\n[Step 6/6] Verifying VSIX payload completeness...');
-  const filesListing = cp.execSync(`tar -tf "${vsixPath}"`, { encoding: 'utf8' }).split(/\r?\n/);
+  const filesListing = await readZipEntries(vsixPath);
   assert.ok(
     filesListing.some((f) => f.includes('extension/dist/extension.js')),
     'FATAL: VSIX is missing extension/dist/extension.js'
@@ -141,8 +183,8 @@ function main() {
   console.log(`  ✓ extension/${iconRelPath} is present`);
 
   console.log('\n=====================================================');
-  console.log('  ALL RELEASE GATE ASSERTIONS PASSED (100% GREEN)');
-  console.log('  Package is ready for VS Code Marketplace upload.');
+  console.log('  RELEASE GATE ASSERTIONS PASSED');
+  console.log('  Package metadata and payload invariants are verified.');
   console.log('=====================================================\n');
 }
 
