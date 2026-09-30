@@ -71,7 +71,7 @@ export class EditEngine {
 
     for (const edit of edits) {
       const normalizedPath = normalizeWorkspaceRelativePath(edit.path);
-      await assertWorkspacePath(workspaceRoot.fsPath, normalizedPath, { allowMissing: true });
+      await assertWorkspacePath(workspaceRoot.fsPath, normalizedPath, { allowMissing: true, allowVirtualRoot: true });
       const uri = vscode.Uri.joinPath(workspaceRoot, ...normalizedPath.split('/'));
       let originalContent = '';
       let originalState: FileOriginalState = 'missing';

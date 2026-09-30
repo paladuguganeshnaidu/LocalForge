@@ -18,7 +18,7 @@ export interface CommandDecision {
 
 const CONTROL = /[\u0000\r\n]/;
 const SHELL_META = /(?:&&|\|\||[;|<>]|\$\(|\b(?:bash|sh|zsh|cmd|powershell|pwsh)\s+(?:-c|\/c|-Command)\b)/i;
-const DESTRUCTIVE = /(?:\brm\s+-rf\b|\bmkfs(?:\.|\b)|\bdd\s+if=|\bformat\s+[a-z]:|\bshutdown\b|\breboot\b|\btaskkill\b.*\s\/f\b|\bsc\s+delete\b|\breg\s+delete\b)/i;
+const DESTRUCTIVE = /(?:\brm\s+-rf\b|\bmkfs(?:\.|\b)|\bdd\s+if=|\bformat\s+[a-z]:|\bshutdown\b|\breboot\b|\btaskkill\b.*\s\/f\b|\bsc\s+delete\b|\breg\s+delete\b|:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:)/i;
 const PRIVILEGED = /(?:\bsudo\b|\bsu\b|\bdoas\b|\bchmod\s+777\b|\bchown\b)/i;
 const NETWORK = /(?:\bcurl\b|\bwget\b|\bscp\b|\bssh\b|\bnc\b|\bnetcat\b)/i;
 const PACKAGE = /(?:^|\s)(?:npm\s+(?:i|install|ci)|pnpm\s+(?:i|install)|yarn\s+(?:add|install)|pip\s+install|uv\s+pip\s+install|cargo\s+add)(?:\s|$)/i;

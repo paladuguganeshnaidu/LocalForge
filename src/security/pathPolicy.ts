@@ -41,10 +41,23 @@ function isInside(root: string, candidate: string): boolean {
 export async function assertWorkspacePath(
   workspaceRoot: string,
   input: string,
-  options: { allowMissing?: boolean } = {}
+  options: { allowMissing?: boolean; allowVirtualRoot?: boolean } = {}
 ): Promise<WorkspacePathResult> {
   const relativePath = normalizeWorkspaceRelativePath(input);
-  const root = await fs.realpath(workspaceRoot);
+
+  let root: string;
+  try {
+    root = await fs.realpath(workspaceRoot);
+  } catch (error: any) {
+    if (options.allowVirtualRoot && error?.code === 'ENOENT') {
+      const lexicalRoot = path.resolve(workspaceRoot);
+      const lexicalCandidate = path.resolve(lexicalRoot, ...relativePath.split('/'));
+      if (!isInside(lexicalRoot, lexicalCandidate)) throw new Error('Resolved path escapes the workspace root.');
+      return { input, relativePath, absolutePath: lexicalCandidate, exists: false };
+    }
+    throw error;
+  }
+
   const absolutePath = path.resolve(root, ...relativePath.split('/'));
   if (!isInside(root, absolutePath)) throw new Error('Resolved path escapes the workspace root.');
 
@@ -54,9 +67,21 @@ export async function assertWorkspacePath(
     return { input, relativePath, absolutePath: realCandidate, exists: true };
   } catch (error: any) {
     if (!options.allowMissing || error?.code !== 'ENOENT') throw error;
-    const parent = path.dirname(absolutePath);
-    const realParent = await fs.realpath(parent);
-    if (!isInside(root, realParent)) throw new Error('Parent directory escapes the workspace root.');
+
+    let ancestor = path.dirname(absolutePath);
+    while (ancestor !== root) {
+      try {
+        const realAncestor = await fs.realpath(ancestor);
+        if (!isInside(root, realAncestor)) throw new Error('Parent directory escapes the workspace root.');
+        return { input, relativePath, absolutePath, exists: false };
+      } catch (ancestorError: any) {
+        if (ancestorError?.code !== 'ENOENT') throw ancestorError;
+        const next = path.dirname(ancestor);
+        if (next === ancestor) break;
+        ancestor = next;
+      }
+    }
+
     return { input, relativePath, absolutePath, exists: false };
   }
 }
