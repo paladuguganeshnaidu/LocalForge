@@ -81,20 +81,21 @@ export class BrowserTool {
   }
 
   public async navigate(url: string): Promise<BrowserActionResult> {
-    this.activeUrl = url;
+    const safeUrl = validateLocalBrowserUrl(url);
+    this.activeUrl = safeUrl;
     this.consoleErrors = [];
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000);
-
-      const response = await fetch(url, {
+      const response = await fetch(safeUrl, {
         signal: controller.signal,
-        headers: { 'User-Agent': 'LocalForge-Browser/0.2.0' }
+        redirect: 'error',
+        headers: { 'User-Agent': 'LOMVREN-LocalBrowser/0.2.5' }
       });
-      clearTimeout(timeout);
-
-      const html = await response.text();
+      const contentLength = Number(response.headers.get('content-length') || 0);
+      if (contentLength > 1024 * 1024) throw new Error('Local page response exceeds the 1 MiB inspection limit.');
+      const html = await readBoundedResponse(response, 1024 * 1024);
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
       const pageTitle = titleMatch ? titleMatch[1].trim() : `Web page at ${url}`;
       const textSnippet = html
@@ -111,7 +112,7 @@ export class BrowserTool {
 
       return {
         action: 'navigate',
-        url,
+        url: safeUrl,
         success: response.ok,
         pageTitle,
         textSnippet,
@@ -119,15 +120,18 @@ export class BrowserTool {
         error: response.ok ? undefined : `HTTP error ${response.status}: ${response.statusText}`
       };
     } catch (err: any) {
+      this.activeUrl = undefined;
       const errorMsg = err.name === 'AbortError' ? 'Connection timed out' : (err.message || 'Connection failed');
       this.consoleErrors.push(errorMsg);
       return {
         action: 'navigate',
         url,
         success: false,
-        error: `Could not reach ${url}: ${errorMsg}`,
+        error: `Could not inspect local page ${safeUrl}: ${errorMsg}`,
         consoleErrors: [...this.consoleErrors]
       };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -158,4 +162,50 @@ export class BrowserTool {
       error: `Unknown browser action "${args.action}".`
     };
   }
+}
+
+export function validateLocalBrowserUrl(input: string): string {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error('Browser inspection accepts only an absolute localhost HTTP(S) URL.');
+  }
+  const host = url.hostname.toLowerCase();
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username || url.password ||
+    !['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)
+  ) {
+    throw new Error('Browser inspection is restricted to localhost HTTP(S) URLs; remote and private-network URLs are not allowed.');
+  }
+  return url.toString();
+}
+
+async function readBoundedResponse(response: Response, limit: number): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new Error('Local page response exceeds the 1 MiB inspection limit.');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
 }

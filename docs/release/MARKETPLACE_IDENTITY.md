@@ -2,7 +2,7 @@
 
 **Audit Date:** September 30, 2026  
 **Auditor:** Release Engineer & Marketplace Publishing Specialist  
-**Target Release:** v0.2.4  
+**Target Release:** v0.2.5
 
 ---
 
@@ -17,7 +17,7 @@ The official published VS Code Marketplace technical identity of this extension 
 | **Full Extension Unique Identifier** | `paladuguganeshnaidu.localforge-vscode` | **MUST NEVER CHANGE** |
 | **Marketplace URL** | `https://marketplace.visualstudio.com/items?itemName=paladuguganeshnaidu.localforge-vscode` | Canonical listing location |
 | **Latest Published Version** | `0.2.3` | Source of truth |
-| **Next Update Version** | `0.2.4` | Strictly monotonic increment |
+| **Next Update Version** | `0.2.5` | Strictly monotonic increment |
 | **Previous Display Name** | `LocalForge: Local Copilot Agent` | Public-facing only |
 | **New Public Display Name** | `LOMVREN` | Public-facing brand |
 | **Publisher Display Name** | `paladuguganeshnaidu` | Verified publisher account |
@@ -47,14 +47,14 @@ The extension name supplied in the path 'localforge-vscode' must match the name 
    - `"name"` MUST strictly remain `"localforge-vscode"`.
    - `"publisher"` MUST strictly remain `"paladuguganeshnaidu"`.
    - `"displayName"` MUST be `"LOMVREN"`.
-   - `"version"` MUST be `"0.2.4"`.
+   - `"version"` MUST be `"0.2.5"`.
    - `"icon"` MUST point to `"media/lomvren-icon.png"`.
 
 2. **Generated VSIX Package:**
    - The generated VSIX bundle filename produced by `@vscode/vsce package` is deterministically:
-     `localforge-vscode-0.2.4.vsix`
+     `localforge-vscode-0.2.5.vsix`
    - Manual renaming of VSIX files is strictly prohibited.
 
 3. **User-Facing Compatibility:**
-   - Installed users of `paladuguganeshnaidu.localforge-vscode` receive version `0.2.4` automatically as a standard, seamless extension update.
+   - Installed users of `paladuguganeshnaidu.localforge-vscode` receive version `0.2.5` automatically as a standard, seamless extension update.
    - All internal command identifiers (`localforge.*`) and configuration namespaces (`localforge.*`) remain 100% backward compatible without losing user preferences or state.

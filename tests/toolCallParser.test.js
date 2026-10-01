@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { ToolCallParser } = require('../dist/agent/toolCallParser');
+const { VisibleTextStream } = require('../dist/agent/visibleTextStream');
 
 test('ToolCallParser parses native tool calls and strips hidden reasoning', () => {
   const rawText = '<think>I need to read the file first</think>I will read the file.';
@@ -23,6 +24,76 @@ test('ToolCallParser parses native tool calls and strips hidden reasoning', () =
   assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { path: 'src/app.ts' });
   assert.equal(parsed.userVisibleText, 'I will read the file.');
   assert.ok(!parsed.userVisibleText.includes('<think>'));
+});
+
+test('ToolCallParser normalizes file_path in native workspace write calls', () => {
+  const parsed = ToolCallParser.parse('', [{
+    id: 'call-file-path',
+    type: 'function',
+    function: {
+      name: 'write_workspace_file',
+      arguments: JSON.stringify({ file_path: 'src/app.ts', content: 'updated' })
+    }
+  }], new Set(['write_workspace_file']));
+
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), {
+    file_path: 'src/app.ts',
+    path: 'src/app.ts',
+    content: 'updated'
+  });
+});
+
+test('ToolCallParser normalizes target_path and target_content in native workspace write calls', () => {
+  const parsed = ToolCallParser.parse('', [{
+    id: 'call-target-aliases',
+    type: 'function',
+    function: {
+      name: 'write_workspace_file',
+      arguments: JSON.stringify({ target_path: 'src/result.ts', target_content: 'generated content' })
+    }
+  }], new Set(['write_workspace_file']));
+
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), {
+    target_path: 'src/result.ts',
+    target_content: 'generated content',
+    path: 'src/result.ts',
+    content: 'generated content'
+  });
+});
+
+test('ToolCallParser normalizes relative_path in native workspace write calls', () => {
+  const parsed = ToolCallParser.parse('', [{
+    id: 'call-relative-path',
+    type: 'function',
+    function: {
+      name: 'write_workspace_file',
+      arguments: JSON.stringify({ workspace: '.', relative_path: 'src/result.ts', content: 'generated content' })
+    }
+  }], new Set(['write_workspace_file']));
+
+  assert.equal(JSON.parse(parsed.toolCalls[0].function.arguments).path, 'src/result.ts');
+});
+
+test('VisibleTextStream withholds hidden reasoning, tool protocols, and raw tool JSON', () => {
+  const updates = [];
+  const stream = new VisibleTextStream((text) => updates.push(text));
+  stream.push('Checking files. ');
+  stream.push('<think>private reasoning');
+  assert.deepEqual(updates, ['Checking files.']);
+  stream.push('</think> continuing ');
+  stream.push('LOCALFORGE_TOOL_CALL: {"tool":"run_command","arguments":{"command":"SECRET_COMMAND"}}');
+  stream.push(' finished');
+  stream.finish(ToolCallParser.parse(
+    'Checking files. <think>private reasoning</think> continuing LOCALFORGE_TOOL_CALL: {"tool":"run_command","arguments":{"command":"SECRET_COMMAND"}} finished',
+    undefined,
+    new Set(['run_command'])
+  ).userVisibleText);
+
+  const output = updates.join('');
+  assert.match(output, /Checking files\./);
+  assert.match(output, /continuing/);
+  assert.match(output, /finished/);
+  assert.doesNotMatch(output, /private reasoning|LOCALFORGE_TOOL_CALL|SECRET_COMMAND/);
 });
 
 test('ToolCallParser extracts <tool_call> XML blocks and strips them from userVisibleText', () => {
@@ -134,6 +205,13 @@ test('ToolCallParser handles normal text response without tool calls', () => {
   assert.equal(parsed.userVisibleText, content);
 });
 
+test('ToolCallParser removes standalone raw tool error JSON from visible text', () => {
+  const parsed = ToolCallParser.parse('The action ran.\n{"error":"target_content must be non-empty"}\nPlease review.', undefined, new Set());
+
+  assert.equal(parsed.userVisibleText, 'The action ran.\nPlease review.');
+  assert.doesNotMatch(parsed.userVisibleText, /\{"error"/i);
+});
+
 test('ToolCallParser strips <think> reasoning even when no tools are called', () => {
   const content = '<think>The user is asking about architecture. I should be concise.</think>LocalForge is a local AI coding agent.';
   const parsed = ToolCallParser.parse(content, undefined, new Set(['write_workspace_file']));
@@ -154,4 +232,3 @@ test('ToolCallParser unwraps nested query objects and schema echoes', () => {
   const args = JSON.parse(parsed.toolCalls[0].function.arguments);
   assert.equal(args.query, 'package.json');
 });
-

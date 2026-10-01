@@ -18,13 +18,26 @@ before(async () => {
       let body = '';
       request.on('data', (chunk) => { body += chunk; });
       request.on('end', () => {
-        if (!JSON.parse(body).stream) {
+        const input = JSON.parse(body);
+        if (input.model === 'json-stream-model') {
+          response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: {
+            role: 'assistant', content: 'Buffered API response'
+          } }] }));
+          return;
+        }
+        if (!input.stream) {
           response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: {
             role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'search_workspace', arguments: '{"query":"local"}' } }]
           } }] }));
           return;
         }
         response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        if (input.tools?.length) {
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Inspecting ' } }] })}\n\n`);
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-stream', type: 'function', function: { name: 'search_workspace', arguments: '{"query":' } }] } }] })}\n\n`);
+          response.end(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"local"}' } }] } }] })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
         response.write('data: {"choices":[{"delta":{"content":"Local "}}]}\n\n');
         response.write('data: {"choices":[{"delta":{"content":"answer"}}]}\n\n');
         response.end('data: [DONE]\n\n');
@@ -55,6 +68,35 @@ test('returns non-streaming function tool calls from an OpenAI-compatible server
   const message = await provider.chatWithTools('local-model', [{ role: 'user', content: 'search' }], []);
   assert.equal(message.tool_calls[0].function.name, 'search_workspace');
   assert.equal(message.tool_calls[0].function.arguments, '{"query":"local"}');
+});
+
+test('streams visible text and reconstructs native OpenAI-compatible tool calls', async () => {
+  const provider = new OpenAiCompatibleProvider('test-compatible', baseUrl);
+  let visible = '';
+  const message = await provider.chatWithTools(
+    'local-model',
+    [{ role: 'user', content: 'search' }],
+    [{ type: 'function', function: { name: 'search_workspace', description: 'Search', parameters: {} } }],
+    undefined,
+    (delta) => { visible += delta; }
+  );
+
+  assert.equal(visible, 'Inspecting ');
+  assert.equal(message.content, 'Inspecting ');
+  assert.equal(message.tool_calls[0].id, 'call-stream');
+  assert.equal(message.tool_calls[0].function.name, 'search_workspace');
+  assert.deepEqual(JSON.parse(message.tool_calls[0].function.arguments), { query: 'local' });
+});
+
+test('falls back to a JSON response when an OpenAI-compatible API ignores stream mode', async () => {
+  const provider = new OpenAiCompatibleProvider('test-compatible', baseUrl);
+  let visible = '';
+  const message = await provider.chatWithTools('json-stream-model', [{ role: 'user', content: 'hello' }], [], undefined, (delta) => {
+    visible += delta;
+  });
+
+  assert.equal(message.content, 'Buffered API response');
+  assert.equal(visible, 'Buffered API response');
 });
 
 test('routes namespaced composite model ids to the provider that discovered them', async () => {

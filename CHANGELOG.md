@@ -2,6 +2,123 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [0.2.23] - 2026-10-01
+
+- Persist requested, approved, denied, and cancelled tool permissions in the expandable run timeline.
+- Preserve redacted command and tool arguments with each approval record.
+- Bind pending approval decisions to the originating run, even if the active chat changes.
+
+## [0.2.22] - 2026-10-01
+
+- Provide a verified action summary when a local model completes tool work without final prose.
+- Clearly distinguish file changes awaiting review from changes already applied.
+- Avoid exposing command output in the synthesized fallback summary.
+
+## [0.2.21] - 2026-10-01
+
+- Normalize common local-model file-write aliases before permission review and execution.
+- Verify target-path/content aliases through parser regression and live Ollama edit approval.
+
+## [0.2.20] - 2026-10-01
+
+- Bundle the extension runtime and SSH2 into one Node-compatible entry point for packaging.
+- Exclude development dependencies and loose compiled modules from the VSIX.
+- Run extension-host integration tests against the same bundled entry point used by the package.
+
+## [0.2.19] - 2026-10-01
+
+- Preserve full bounded model-visible responses, tool arguments, and command output in the expandable run history after restart.
+- Label model-visible responses separately from command inputs and execution results for clearer run inspection.
+- Continue to exclude hidden reasoning and redact credential-like values from inspectable evidence.
+
+## [0.2.18] - 2026-10-01
+
+- Improve chat readability, selection, focus visibility, and reduced-motion accessibility.
+- Refresh message, composer, approval, and action-control styling while preserving VS Code theme colors.
+
+## [0.2.17] - 2026-10-01
+
+- Stream user-visible agent text while local or API models generate their response.
+- Buffer hidden reasoning and partial tool-call syntax so only parsed, user-facing text is streamed.
+- Support streamed tool calls from Ollama and OpenAI-compatible providers, including compact Ollama's text-tool protocol.
+- Preserve buffered behavior when an OpenAI-compatible endpoint ignores stream mode and returns JSON.
+- Verify streaming with live Ollama command approval and a full VS Code file-proposal acceptance run.
+
+## [0.2.16] - 2026-10-01
+
+- Normalize `file_path` aliases from local model tool calls into the workspace writer's canonical `path` argument.
+- Reject missing or empty file contents instead of creating blank proposals that appear successful.
+- Correctly persist reviewed content when a proposal creates a new workspace file.
+- Verify live Ollama tool approval, proposal review, and accepted file contents in a real VS Code extension host.
+
+## [0.2.15] - 2026-10-01
+
+- Preserve the user's scroll position while model tokens and agent activities arrive.
+- Add a “Latest” control to return to the newest chat content when reading earlier steps.
+- Keep new prompts, restored sessions, and approval requests visible when those actions need attention.
+
+## [0.2.14] - 2026-10-01
+
+- Show the exact command and command category in permission requests before execution.
+- Remove the per-request blanket approval action; broad auto-approval remains an explicit setting.
+- Revoke once-per-session approvals when starting or switching conversations.
+
+## [0.2.13] - 2026-09-30
+
+- Trust automatic read access only for explicitly registered built-in tools marked read-only; custom tools remain behind approval.
+- Reuse the result of an identical consecutive successful tool call instead of executing a command or edit twice.
+- Add a real local-Ollama agent smoke test that verifies command approval, execution, and returned output.
+
+## [0.2.12] - 2026-09-30
+
+- Retry unresolved agent tool failures in a bounded recovery loop instead of stopping on an unsupported completion claim.
+- Resolve a failed attempt only after a successful retry of the same tool and target; otherwise finish with a failed status.
+- Show the model's visible response in expandable run details without exposing hidden chain-of-thought.
+
+## [0.2.11] - 2026-09-30
+
+- Persist a bounded, workspace-scoped activity timeline and restore it when reopening the chat.
+- Mark unfinished runs as interrupted after VS Code restarts and retain inspectable tool inputs and outputs.
+
+## [0.2.10] - 2026-09-30
+- Include the actual terminal working directory, process ID, and lifecycle status in expandable run details.
+- Represent missing process exit codes as unavailable instead of implying a successful exit.
+
+## [0.2.9] - 2026-09-30
+- Set the first-run permission policy to ask before every edit or command, matching the requested user-controlled execution flow.
+- Keep read-only inspection automatic and preserve the existing safe auto-run option for users who explicitly select it.
+
+## [0.2.8] - 2026-09-30
+- Add expandable per-step agent evidence for model-visible progress, tool inputs, command output, errors, and completion details.
+- Redact common credential values and bound displayed tool output to keep activity details safer and readable.
+- Preserve an expanded activity disclosure as its live status updates.
+- Add a persistent approval-mode selector for safe auto-run, once-per-session approval, and approval before each edit or command.
+- Keep read-only inspection automatic and catastrophic system operations blocked in every approval mode.
+- Treat terminal-manager failed, timed-out, and stopped states as actual tool failures even when no exit code is available.
+- Default new installs to asking before each edit or command; read-only inspection remains automatic.
+
+## [0.2.7] - 2026-09-30
+- Prevent generic completion claims when any agent tool call fails; show a clear, user-visible warning instead.
+- Strip standalone raw tool-error JSON echoed by small local models from assistant messages.
+- Record malformed, blocked, and over-limit tool calls as failures in the run state.
+- Validate edit paths against the trusted workspace before checking edit content, so external paths fail with the correct safety message.
+- Strengthen agent instructions for exact edit targets, workspace-relative paths, and truthful reporting.
+
+## [0.2.6] - 2026-09-30
+- Replace generic success text when a local model returns an empty final answer with a truthful, actionable message.
+- Fix agent run summaries so failed tools and non-zero commands remain visible as warnings instead of being hidden behind a generic success.
+- Keep plan and proposed edits in a waiting-for-review state until the user decides.
+- Improve assistant Markdown, compact activity details, and explicit accept/review/reject change controls.
+- Make rendered webview syntax validation run in-process for sandboxed environments.
+
+## [0.2.5] - 2026-09-30
+
+### Security & Release Readiness
+- Restricted browser inspection to localhost HTTP(S), rejected redirects and credential-bearing URLs, and capped response bodies and request duration.
+- Limited automatic shell execution in `always_proceed` mode to the reviewed safe-command allow-list; all other commands require approval.
+- Integrated Marketplace manifest and payload verification into the package script and excluded development reports, logs, and test artifacts from VSIX packaging.
+- Clarified remote inference data flow and shell execution limitations in the README.
+
 ## [0.2.4] - 2026-09-30
 
 ### Rebrand

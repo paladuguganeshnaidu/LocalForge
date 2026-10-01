@@ -9,7 +9,7 @@ import { WorkspaceIndexer } from '../context/workspaceIndexer';
 import { ContextEngine } from '../context/contextEngine';
 import { GitContextService } from '../context/gitContext';
 import { ToolRegistry } from '../agent/toolRegistry';
-import { PermissionManager } from '../agent/permissionManager';
+import { isPermissionMode, PermissionManager } from '../agent/permissionManager';
 import { AgentEngine, AgentRunSummary } from '../agent/agentEngine';
 import { AgentMode } from '../agent/agentLoop';
 import { EditEngine } from '../editing/editEngine';
@@ -29,6 +29,7 @@ import { CheckpointManager } from '../agent/orchestration/checkpointManager';
 import { registerAllCoreTools } from '../agent/coreTools';
 import { ProductMode } from '../agent/orchestration/types';
 import { LocalForgeSelfTest } from './selfTest';
+import { formatToolInput, formatToolOutput } from './activityDetails';
 
 export interface EngineInitOptions {
   ollamaEndpoint?: string;
@@ -70,6 +71,7 @@ export class LocalForgeEngine {
   public contextEngine?: ContextEngine;
 
   private currentAbortController?: AbortController;
+  private traceSaveTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -92,7 +94,8 @@ export class LocalForgeEngine {
 
     this.modelRouter = new ModelRouter(() => this.modelRegistry.getModels());
 
-    this.permissionManager = new PermissionManager('allow_safe_auto');
+    const savedPermissionMode = context.globalState?.get<unknown>('localforge.permissionMode');
+    this.permissionManager = new PermissionManager(isPermissionMode(savedPermissionMode) ? savedPermissionMode : 'always_ask');
     this.toolRegistry = new ToolRegistry();
 
     this.editEngine = new EditEngine();
@@ -103,7 +106,8 @@ export class LocalForgeEngine {
     this.gitContextService = new GitContextService();
 
     this.artifactManager = new ArtifactManager();
-    this.turnManager = new TurnManager();
+    this.turnManager = new TurnManager(() => this.scheduleTraceSave());
+    this.turnManager.restorePersistedHistory(context.workspaceState.get<unknown>('localforge.activityTraceHistory'));
     this.terminalManager = new TerminalManager();
     this.browserTool = new BrowserTool();
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
@@ -168,6 +172,26 @@ export class LocalForgeEngine {
         this.toolRegistry.registerTool(BROWSER_TOOL_DEFINITION, (args) => this.browserTool.execute(args as any));
       }
     } catch {}
+  }
+
+  public getActivityHistory(conversationId: string): TurnActivity[] {
+    return this.turnManager.getTurnsForConversation(conversationId)
+      .slice(-12)
+      .flatMap((turn) => turn.activities.slice(-32));
+  }
+
+  public async flushActivityHistory(): Promise<void> {
+    if (this.traceSaveTimer) clearTimeout(this.traceSaveTimer);
+    this.traceSaveTimer = undefined;
+    await this.context.workspaceState.update('localforge.activityTraceHistory', this.turnManager.getPersistedHistory());
+  }
+
+  private scheduleTraceSave(): void {
+    if (this.traceSaveTimer) clearTimeout(this.traceSaveTimer);
+    this.traceSaveTimer = setTimeout(() => {
+      this.traceSaveTimer = undefined;
+      void this.context.workspaceState.update('localforge.activityTraceHistory', this.turnManager.getPersistedHistory());
+    }, 150);
   }
 
   public cancelCurrentTask(): void {
@@ -458,7 +482,12 @@ export class LocalForgeEngine {
           onProgress: (p) => {
             onProgress?.(p);
           },
-          onThought: onToken,
+          onModelText: (text) => onToken?.(text),
+          onModelOutput: (text, round, toolNames) => {
+            if (!text.trim()) return;
+            const actionLabel = toolNames.length ? ` · ${toolNames.join(', ')}` : '';
+            emitActivity('Working', `Visible model update · step ${round}${actionLabel}`, 'success', text.slice(0, 3000));
+          },
           onToolStart: (name, args, callId) => {
             let cat: any = 'Working';
             let title = `Running tool ${name}`;
@@ -483,7 +512,17 @@ export class LocalForgeEngine {
               title = `Browser action: ${(args as any).action || ''}`;
             }
 
-            const act = emitActivity(cat, title, 'running', undefined, targetPath, callId);
+            const act = this.turnManager.addActivity(turn.turnId, {
+              id: callId,
+              category: cat,
+              title,
+              status: 'running',
+              targetPath,
+              toolName: name,
+              inputSummary: formatToolInput(name, args)
+            });
+            onActivity?.(act);
+            onProgress?.(`${cat}: ${title}`);
             activeActivities.set(callId, act);
           },
           onToolEnd: (name, res, error, callId) => {
@@ -493,6 +532,7 @@ export class LocalForgeEngine {
                 status: error ? 'error' : 'success',
                 durationMs: Date.now() - existing.timestamp,
                 error: error || undefined,
+                outputSummary: formatToolOutput(res, error),
                 resultSummary: res ? (typeof res === 'object' ? JSON.stringify(res).slice(0, 150) : String(res).slice(0, 150)) : undefined
               });
               if (updated) onActivity?.(updated);
@@ -519,10 +559,6 @@ export class LocalForgeEngine {
 
       // Check if edits are pending review
       const pending = this.editEngine.getPendingProposals();
-      if (pending.length > 0) {
-        emitActivity('Waiting for approval', `${pending[0].files.length} file(s) changed - awaiting review`, 'waiting_for_approval');
-      }
-
       // Handle Walkthrough artifact creation if files were already modified (e.g. In auto-apply mode)
       if (effectiveMode === 'agent' && result.filesModified.length > 0) {
         const walkthrough = this.artifactManager.createWalkthrough({
@@ -539,8 +575,21 @@ export class LocalForgeEngine {
         onArtifact?.(walkthrough);
       }
 
-      this.turnManager.completeTurn(turn.turnId, 'completed', result.filesModified);
-      emitActivity('Completed', 'Task completed', 'success');
+      const awaitingReview = pending.length > 0 || effectiveMode === 'plan';
+      const resultErrors = result.errors ?? [];
+      const hasToolWarnings = resultErrors.length > 0;
+      this.turnManager.completeTurn(turn.turnId, awaitingReview ? 'waiting_for_approval' : result.status === 'failed' ? 'failed' : 'completed', result.filesModified);
+      if (awaitingReview) {
+        emitActivity('Waiting for approval', effectiveMode === 'plan' && pending.length === 0 ? 'Plan ready for review' : `Changes ready for review (${pending[0]?.files.length ?? 0} file(s))`, 'waiting_for_approval', resultErrors.length ? resultErrors.join('\n') : undefined);
+      } else if (result.status === 'failed') {
+        emitActivity('Failed', 'Task did not complete', 'error', resultErrors.join('\n') || result.response);
+      } else if (result.status === 'cancelled') {
+        emitActivity('Cancelled', 'Task cancelled', 'cancelled');
+      } else if (hasToolWarnings) {
+        emitActivity('Completed', 'Completed with tool warnings', 'warning', resultErrors.join('\n'));
+      } else {
+        emitActivity('Completed', 'Task completed', 'success');
+      }
 
       session.messages.push({ role: 'user', content: userPrompt });
       session.messages.push({ role: 'assistant', content: result.response });
@@ -549,7 +598,7 @@ export class LocalForgeEngine {
 
       await this.taskManager.recordTaskCompletion(
         taskRecord.id,
-        result.status,
+        awaitingReview ? 'waiting_for_approval' : result.status,
         result.filesModified,
         result.response.slice(0, 500)
       );
@@ -607,6 +656,7 @@ export class LocalForgeEngine {
 
     emitAct('Editing', `Applied changes to ${editResult.appliedCount} file(s) safely`, 'success');
 
+    let validationPassed: boolean | undefined;
     if (workspaceRoot && editResult.appliedFiles.length > 0) {
       emitAct('Validating', 'Running project validation tests...', 'running');
       const attempts = await this.agentEngine.validateAndRepair(
@@ -627,6 +677,7 @@ export class LocalForgeEngine {
       );
 
       const allPassed = attempts.length === 0 || attempts.every((a) => a.result.passed);
+      validationPassed = allPassed;
       emitAct('Validating', allPassed ? 'Validation passed' : 'Validation completed with warnings', allPassed ? 'success' : 'error');
 
       // Generate Walkthrough
@@ -645,12 +696,16 @@ export class LocalForgeEngine {
     }
 
     this.turnManager.completeTurn(turn.turnId, 'completed', editResult.appliedFiles);
-    emitAct('Completed', 'Implementation verified', 'success');
+    emitAct(
+      'Completed',
+      validationPassed === false ? 'Changes applied; validation needs attention' : validationPassed === true ? 'Changes applied and verified' : 'Changes applied',
+      validationPassed === false ? 'warning' : 'success'
+    );
 
     session.filesModified = Array.from(new Set([...session.filesModified, ...editResult.appliedFiles]));
     await this.sessionManager.saveSession(session);
 
-    return editResult;
+    return { ...editResult, validationPassed };
   }
 
   public async executeMultiAgentTask(

@@ -68,7 +68,7 @@ export const allWorkspaceTools: ModelToolDefinition[] = [
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Relative workspace file path to write' },
-          content: { type: 'string', description: 'The complete file text content' }
+          content: { type: 'string', minLength: 1, description: 'The complete non-empty file text content' }
         },
         required: ['path', 'content'],
         additionalProperties: false
@@ -175,7 +175,10 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
 
   if (name === 'write_workspace_file') {
     const relativePath = getString(args.path, 'path', 500);
-    const content = typeof args.content === 'string' ? args.content : '';
+    if (typeof args.content !== 'string' || args.content.length === 0) {
+      throw new Error('File content must be a non-empty string. Provide the complete file contents before requesting a write.');
+    }
+    const content = args.content;
     if (content.length > maximumWriteBytes) throw new Error('File content exceeds maximum write size.');
 
     if (toolContext?.editEngine) {
@@ -214,9 +217,9 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
 
   if (name === 'edit_workspace_file') {
     const relativePath = getString(args.path, 'path', 500);
+    const uri = await resolveWorkspaceUri(relativePath);
     const target = getString(args.target_content, 'target_content', 50000);
     const replacement = typeof args.replacement_content === 'string' ? args.replacement_content : '';
-    const uri = await resolveWorkspaceUri(relativePath);
     const bytes = await vscode.workspace.fs.readFile(uri);
     const existing = new TextDecoder().decode(bytes);
 
@@ -272,7 +275,10 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
       const proc = await toolContext.terminalManager.runCommand(command, rootPath, false, 60000, toolContext.signal);
       return {
         command: proc.command,
-        exitCode: proc.exitCode ?? 0,
+        cwd: proc.cwd,
+        processId: proc.processId,
+        status: proc.status,
+        exitCode: proc.exitCode ?? null,
         stdout: (proc.stdout || '').trim().slice(0, 8000),
         stderr: (proc.stderr || '').trim().slice(0, 4000),
         durationMs: proc.duration

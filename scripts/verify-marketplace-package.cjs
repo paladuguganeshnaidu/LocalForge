@@ -14,7 +14,6 @@ const EXPECTED_IDENTITY = {
   name: 'localforge-vscode',
   publisher: 'paladuguganeshnaidu',
   displayName: 'LOMVREN',
-  version: '0.2.4',
   icon: 'media/lomvren-icon.png'
 };
 
@@ -48,11 +47,9 @@ function main() {
     EXPECTED_IDENTITY.displayName,
     `FATAL: package.json displayName must be '${EXPECTED_IDENTITY.displayName}', got '${pkgJson.displayName}'`
   );
-  assert.strictEqual(
-    pkgJson.version,
-    EXPECTED_IDENTITY.version,
-    `FATAL: package.json version must be '${EXPECTED_IDENTITY.version}', got '${pkgJson.version}'`
-  );
+  const lockJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'));
+  assert.strictEqual(lockJson.version, pkgJson.version, 'FATAL: package-lock.json version must match package.json');
+  assert.strictEqual(lockJson.packages?.['']?.version, pkgJson.version, 'FATAL: package-lock root version must match package.json');
   console.log(`  ✓ Technical Name: ${pkgJson.name}`);
   console.log(`  ✓ Publisher:      ${pkgJson.publisher}`);
   console.log(`  ✓ Display Name:   ${pkgJson.displayName}`);
@@ -74,7 +71,7 @@ function main() {
   console.log(`  ✓ Icon dimensions: ${width}x${height} (PNG format verified)`);
 
   console.log('\n[Step 3/6] Inspecting generated VSIX artifact in workspace...');
-  const expectedVsixName = `${EXPECTED_IDENTITY.name}-${EXPECTED_IDENTITY.version}.vsix`;
+  const expectedVsixName = `${EXPECTED_IDENTITY.name}-${pkgJson.version}.vsix`;
   const vsixPath = path.join(rootDir, expectedVsixName);
   assert.ok(
     fs.existsSync(vsixPath),
@@ -124,9 +121,10 @@ function main() {
 
   console.log('\n[Step 6/6] Verifying VSIX payload completeness...');
   const filesListing = cp.execSync(`tar -tf "${vsixPath}"`, { encoding: 'utf8' }).split(/\r?\n/);
+  const bundledEntry = `extension/${pkgJson.main.replace(/^\.\//, '')}`;
   assert.ok(
-    filesListing.some((f) => f.includes('extension/dist/extension.js')),
-    'FATAL: VSIX is missing extension/dist/extension.js'
+    filesListing.includes(bundledEntry),
+    `FATAL: VSIX is missing its bundled runtime entry: ${bundledEntry}`
   );
   assert.ok(
     filesListing.some((f) => f.includes('extension/package.json')),
@@ -136,13 +134,34 @@ function main() {
     filesListing.some((f) => f.includes(`extension/${iconRelPath}`)),
     `FATAL: VSIX is missing bundled icon: extension/${iconRelPath}`
   );
-  console.log('  ✓ extension/dist/extension.js is present');
+  assert.ok(
+    !filesListing.some((file) => file.startsWith('extension/node_modules/')),
+    'FATAL: VSIX contains node_modules despite using the self-contained runtime bundle'
+  );
+  const packagedJavaScript = filesListing.filter((file) => /^extension\/dist\/.*\.js$/i.test(file));
+  assert.deepStrictEqual(
+    packagedJavaScript,
+    [bundledEntry],
+    `FATAL: VSIX must contain only its declared bundled runtime JavaScript file, got: ${packagedJavaScript.join(', ')}`
+  );
+  const forbiddenPayload = filesListing.filter((file) =>
+    /(?:^|\/)(?:artifacts|coverage|docs|scripts|tests)\//i.test(file) ||
+    /(?:test\.log|package-lock\.json|\.patch|\.zip)$/i.test(file)
+  );
+  assert.deepStrictEqual(
+    forbiddenPayload,
+    [],
+    `FATAL: Development-only files leaked into VSIX: ${forbiddenPayload.join(', ')}`
+  );
+  console.log(`  ✓ Bundled runtime entry ${bundledEntry} is present`);
+  console.log('  ✓ Runtime node_modules are excluded');
   console.log('  ✓ extension/package.json is present');
   console.log(`  ✓ extension/${iconRelPath} is present`);
+  console.log('  ✓ Development reports, test artifacts, logs, and lockfile are excluded');
 
   console.log('\n=====================================================');
-  console.log('  ALL RELEASE GATE ASSERTIONS PASSED (100% GREEN)');
-  console.log('  Package is ready for VS Code Marketplace upload.');
+  console.log('  PACKAGE IDENTITY AND CONTENT CHECKS PASSED');
+  console.log('  This check does not certify Marketplace or production approval.');
   console.log('=====================================================\n');
 }
 

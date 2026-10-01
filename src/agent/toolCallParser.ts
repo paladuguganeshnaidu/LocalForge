@@ -241,8 +241,21 @@ export class ToolCallParser {
     if (!copy.path && typeof copy.file === 'string') {
       copy.path = copy.file;
     }
+    if (!copy.path && typeof copy.file_path === 'string') {
+      copy.path = copy.file_path;
+    }
+    if (!copy.path && typeof copy.target_path === 'string') {
+      copy.path = copy.target_path;
+    }
+    if (!copy.path && typeof copy.relative_path === 'string') {
+      copy.path = copy.relative_path;
+    }
     if (!copy.path && typeof copy.filename === 'string') {
       copy.path = copy.filename;
+    }
+
+    if (toolName === 'write_workspace_file' && typeof copy.content !== 'string' && typeof copy.target_content === 'string') {
+      copy.content = copy.target_content;
     }
 
     // Handle query aliases
@@ -436,12 +449,23 @@ export class ToolCallParser {
   }
 
   private static cleanVisibleText(text: string): string {
-    const cleaned = text.trim();
+    const cleaned = text.split(/\r?\n/).filter((line) => !this.isToolErrorJson(line.trim())).join('\n').trim();
     // If leftover text is just braces or JSON punctuation
     if (/^[\[\]{}\s"':,]+$/.test(cleaned)) {
       return '';
     }
 
     return cleaned;
+  }
+
+  private static isToolErrorJson(line: string): boolean {
+    if (!line.startsWith('{') || !line.endsWith('}')) return false;
+    try {
+      const value = JSON.parse(line) as Record<string, unknown>;
+      return !!value && typeof value === 'object' && typeof value.error === 'string' &&
+        Object.keys(value).every((key) => key === 'error' || key === 'message');
+    } catch {
+      return false;
+    }
   }
 }

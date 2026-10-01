@@ -78,3 +78,54 @@ test('TurnManager records turns, operational activities, and tracks status', () 
   assert.equal(turn.status, 'completed');
   assert.equal(turn.filesChanged.length, 1);
 });
+
+test('TurnManager persists bounded activity history and marks interrupted runs cancelled', () => {
+  const original = new TurnManager();
+  const turn = original.startTurn({
+    conversationId: 'session-restore',
+    modelId: 'ollama:qwen',
+    mode: 'agent',
+    strategy: 'fast'
+  });
+  original.addActivity(turn.turnId, {
+    category: 'Running',
+    title: 'Run tests',
+    status: 'running',
+    inputSummary: 'npm test',
+    outputSummary: 'partial output'
+  });
+
+  const restored = new TurnManager();
+  restored.restorePersistedHistory(original.getPersistedHistory());
+  const restoredTurn = restored.getTurnsForConversation('session-restore')[0];
+  assert.equal(restoredTurn.status, 'cancelled');
+  assert.equal(restoredTurn.activities[0].inputSummary, 'npm test');
+  assert.equal(restoredTurn.activities[0].outputSummary, 'partial output');
+  assert.equal(restoredTurn.activities.at(-1).title, 'Run interrupted when VS Code closed');
+});
+
+test('TurnManager preserves bounded model, tool, and command evidence across reloads', () => {
+  const original = new TurnManager();
+  const turn = original.startTurn({ conversationId: 'bounded', modelId: 'test', mode: 'ask', strategy: 'fast' });
+  original.addActivity(turn.turnId, {
+    category: 'Reading',
+    title: 'x'.repeat(500),
+    status: 'success',
+    details: 'd'.repeat(4000),
+    inputSummary: 'i'.repeat(5000),
+    outputSummary: 'y'.repeat(10000)
+  });
+  const persisted = original.getPersistedHistory();
+  assert.equal(persisted[0].activities[0].title.length, 200);
+  assert.equal(persisted[0].activities[0].details.length, 3000);
+  assert.equal(persisted[0].activities[0].inputSummary.length, 4000);
+  assert.equal(persisted[0].activities[0].outputSummary.length, 8000);
+
+  const restored = new TurnManager();
+  restored.restorePersistedHistory([{ notATurn: true }, ...persisted]);
+  const restoredTurn = restored.getTurnsForConversation('bounded')[0];
+  assert.ok(restoredTurn);
+  assert.equal(restoredTurn.activities[0].details.length, 3000);
+  assert.equal(restoredTurn.activities[0].inputSummary.length, 4000);
+  assert.equal(restoredTurn.activities[0].outputSummary.length, 8000);
+});

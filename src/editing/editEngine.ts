@@ -210,12 +210,13 @@ export class EditEngine {
       for (const file of filesToApply) {
         if (file.originalState === 'missing') {
           workspaceEdit.createFile(file.uri, { ignoreIfExists: false, overwrite: false });
+        } else {
+          workspaceEdit.replace(
+            file.uri,
+            new vscode.Range(new vscode.Position(0, 0), new vscode.Position(1000000, 0)),
+            file.newContent
+          );
         }
-        workspaceEdit.replace(
-          file.uri,
-          new vscode.Range(new vscode.Position(0, 0), new vscode.Position(1000000, 0)),
-          file.newContent
-        );
       }
 
       // If workspaceEdit execution is supported (inside VS Code host)
@@ -232,6 +233,12 @@ export class EditEngine {
         for (const file of filesToApply) {
           const encoded = Buffer.from(file.newContent, 'utf8');
           await vscode.workspace.fs.writeFile(file.uri, encoded);
+        }
+      } else {
+        for (const file of filesToApply) {
+          if (file.originalState === 'missing') {
+            await vscode.workspace.fs.writeFile(file.uri, Buffer.from(file.newContent, 'utf8'));
+          }
         }
       }
 
@@ -288,4 +295,3 @@ export class ProposedContentProvider implements vscode.TextDocumentContentProvid
     this._onDidChange.fire(uri);
   }
 }
-

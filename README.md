@@ -3,13 +3,13 @@
 > **A local-first autonomous engineering environment for AI-assisted software development.**  
 > *Note: LOMVREN was previously published as LocalForge.*
 
-LOMVREN is an autonomous, privacy-respecting AI software engineering operating system that runs 100% locally or on your own remote GPU via encrypted SSH tunneling. Zero hosted cloud inference. Zero proprietary telemetry. Complete control over your code, writes, and execution.
+LOMVREN is a VS Code coding assistant that connects to local Ollama or an Ollama instance on a user-managed remote GPU through an SSH tunnel. It does not provide hosted inference or proprietary telemetry. When remote inference is selected, prompts and the context you include are sent through the encrypted tunnel to that remote host; review that host's access and retention policies before connecting.
 
 ---
 
 ## Key Differentiators
 
-- **Local-First & Private**: Models run directly on your machine (Ollama, LM Studio, vLLM, llama.cpp) or your private remote GPU server. Prompts and source code are never uploaded to any remote vendor backend.
+- **Local-First**: Models run through local Ollama, configured OpenAI-compatible endpoints, or user-managed remote Ollama over SSH. No inference service is operated by this extension. A user-configured OpenAI-compatible endpoint may itself be hosted remotely; prompts/context go to that endpoint. SSH mode sends them to the selected host.
 - **Antigravity IDE Agent Side Panel**: Native VS Code Secondary Sidebar agent experience with minimal chrome, crisp Codicon icons, segmented mode selection (`Ask`, `Plan`, `Agent`), execution strategies (`Fast`, `Planning`), collapsible operational timelines, interactive artifact cards, and dedicated review changes view.
 - **Canonical Model Identity (ModelRef.id)**: Single source of truth across ModelRegistry, CompositeProvider, ModelRouter, and sessions. A selected model in the UI executes deterministically.
 - **Ask · Plan · Agent Modes**:
@@ -19,7 +19,7 @@ LOMVREN is an autonomous, privacy-respecting AI software engineering operating s
 - **Atomic Two-Phase Multi-File Patching**: File changes are never written blindly. Edits generate an `EditProposal` with SHA-256 snapshots, original state (`present` vs `missing`) verification, and unified diffs. If any single file in a multi-file proposal is stale or modified, none are applied.
 - **Validation & Auto-Repair Loop**: Automatically detects project type (Node, Python, Rust, Go, Java, C/C++) and test commands, runs validation after approved edits, and attempts up to 3 automatic repairs if tests fail.
 - **Secure SSH Remote GPU Offloading**: Synchronized remote model lifecycle. Connecting via SSH tunnel discovers remote models and surfaces live GPU telemetry (NVIDIA GPU model, VRAM usage, utilization) in the unified model picker. Disconnecting removes remote models immediately.
-- **Strict Command Safety**: Layered command policy classifies commands into categories and rejects dangerous shell chaining (`&&`, `||`, `;`, `|`, `2>`, `&`, `$()`, backticks) in auto-safe execution mode.
+- **Command Approvals**: A conservative allow-list auto-runs selected common test/build/read commands. Other commands require approval; host shell commands are not sandboxed and run with the user's permissions.
 
 ---
 
@@ -136,11 +136,11 @@ Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (
 
 ## Security & Privacy Architecture
 
-- **Zero Cloud Inference**: LOMVREN does not send code or prompts to any remote server. All local model requests target loopback addresses (`127.0.0.1`).
+- **Inference destinations**: Local providers use configured endpoints. SSH remote mode forwards requests to the host explicitly selected by the user. OpenAI-compatible endpoints can be remote; verify the configured server and its data policy. The extension does not operate a vendor-hosted inference or telemetry service.
 - **Workspace Trust Enforced**: Untrusted workspaces cannot execute workspace tools, read files, or run terminal commands.
 - **Two-Phase Atomic Commit**: Changes across multiple files are checked simultaneously. If any file has been modified externally, all changes are halted to prevent overwrites.
 - **Host Key Pinning**: Remote SSH connections verify and store SHA-256 host key fingerprints to prevent MITM attacks.
-- **Strict Command Policies**: Auto-safe execution rejects dangerous shell chaining (`&&`, `||`, `;`, `|`, `2>`, `&`, `$()`). Only verified safe read and test commands run automatically.
+- **Command execution**: Only commands in the reviewed safe-command allow-list run without a prompt in automatic modes. Other commands require approval where an approval UI is available; shell execution is not a security sandbox.
 
 ---
 
@@ -148,7 +148,7 @@ Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (
 
 LOMVREN employs a rigorous multi-tier testing strategy:
 
-- **Unit & Integration Tests**: `npm test` runs 96 automated test suites spanning model providers, canonical model routing, multi-format tool call parsing, layered permission policies, unified diff generation, two-phase atomic editing, and full end-to-end task loops.
+- **Unit & Integration Tests**: `npm test` compiles TypeScript and runs the checked-in automated regression tests.
 - **High-Volume Stress Tests**: `tests/highVolumeStress.test.js` exercises 1,000 tool-call parser inputs across all syntaxes, 1,000 malformed inputs, 1,000 path security traversals, 1,000 webview message validations, 100 edit proposals, 100 permission checks, 100 synthetic agent loops, 10 real terminal executions, and concurrent cancellation scenarios.
 - **VS Code Extension Host Tests**: `npm run test:extension-host` verifies extension activation, command registration, Secondary Sidebar view contributions, diagnostics execution, and live webview IPC inside real VS Code Electron runtime environments.
 - **Production Packaging**: `npm run package` compiles the TypeScript codebase and packages the production-ready `.vsix` bundle via `@vscode/vsce`.

@@ -14,6 +14,7 @@ export interface AgentRunSummary {
   filesModified: string[];
   validationAttempts: ValidationAttempt[];
   status: AgentState['status'];
+  errors?: string[];
   durationMs: number;
 }
 
@@ -76,6 +77,7 @@ export class AgentEngine {
       filesModified,
       validationAttempts,
       status: state.status,
+      errors: [...state.unresolvedErrors],
       durationMs: Date.now() - startTime
     };
   }

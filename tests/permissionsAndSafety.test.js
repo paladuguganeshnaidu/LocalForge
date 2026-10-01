@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 const { PermissionManager } = require('../dist/agent/permissionManager.js');
+const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 
 test('PermissionManager classifies tools correctly into read, edit, execute', () => {
   const pm = new PermissionManager();
@@ -47,4 +48,57 @@ test('PermissionManager requests approval for execute tools when handler is set'
   assert.equal(requests.length, 1);
   assert.equal(requests[0].toolName, 'run_command');
   assert.equal(requests[0].command, 'npm run custom-script');
+});
+
+test('always_ask lets read-only inspection run but asks before edits and commands', async () => {
+  const requests = [];
+  const pm = new PermissionManager('always_ask', async (request) => {
+    requests.push(request.toolName);
+    return true;
+  });
+
+  assert.equal(await pm.checkPermission('read_workspace_file', { path: 'src/index.ts' }), true);
+  assert.equal(await pm.checkPermission('edit_workspace_file', { path: 'src/index.ts' }), true);
+  assert.equal(await pm.checkPermission('run_command', { command: 'npm test' }), true);
+  assert.deepEqual(requests, ['edit_workspace_file', 'run_command']);
+});
+
+test('session approvals are revoked when the active session changes', async () => {
+  let approvalCount = 0;
+  const pm = new PermissionManager('ask_once_per_session', async () => {
+    approvalCount += 1;
+    return true;
+  });
+
+  assert.equal(await pm.checkPermission('run_command', { command: 'npm run custom-check' }), true);
+  assert.equal(await pm.checkPermission('run_command', { command: 'npm run custom-check' }), true);
+  assert.equal(approvalCount, 1);
+
+  pm.clearSession();
+  assert.equal(await pm.checkPermission('run_command', { command: 'npm run custom-check' }), true);
+  assert.equal(approvalCount, 2);
+});
+
+test('always_ask trusts explicit built-in read-only metadata but not custom read labels', async () => {
+  const requests = [];
+  const permissions = new PermissionManager('always_ask', async (request) => {
+    requests.push(request.toolName);
+    return false;
+  });
+  const registry = new ToolRegistry();
+  const definition = (name) => ({
+    type: 'function',
+    function: { name, description: 'Fixture tool', parameters: { type: 'object', properties: {} } }
+  });
+
+  registry.registerTool(definition('inspect_fixture'), async () => ({ ok: true }), {
+    category: 'read', riskLevel: 'read_only', requiresApproval: false, source: 'builtin'
+  });
+  registry.registerTool(definition('inspect_custom_fixture'), async () => ({ ok: true }), {
+    category: 'read', riskLevel: 'read_only', requiresApproval: false, source: 'custom'
+  });
+
+  assert.deepEqual(await registry.executeTool('inspect_fixture', {}, permissions), { ok: true });
+  await assert.rejects(() => registry.executeTool('inspect_custom_fixture', {}, permissions), /rejected by user or permission policy/);
+  assert.deepEqual(requests, ['inspect_custom_fixture']);
 });

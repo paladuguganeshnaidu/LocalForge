@@ -1,6 +1,41 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { runToolAgent } = require('../dist/agent/toolAgent.js');
+const { AgentLoop } = require('../dist/agent/agentLoop.js');
+const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
+
+test('AgentLoop streams safe model text before a response finishes', async () => {
+  let providerFinished = false;
+  const streamed = [];
+  const provider = {
+    id: 'streaming-fixture',
+    chatWithTools: async (_model, _messages, _tools, _signal, onContentDelta) => {
+      onContentDelta('Visible update ');
+      onContentDelta('<think>private reasoning</think> after reasoning');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      providerFinished = true;
+      return {
+        role: 'assistant',
+        content: 'Visible update <think>private reasoning</think> after reasoning'
+      };
+    }
+  };
+
+  const result = await new AgentLoop(provider, new ToolRegistry()).run('fixture:model', [
+    { role: 'user', content: 'Explain the next step.' }
+  ], {
+    mode: 'ask',
+    maxRounds: 1,
+    onModelText: (text) => streamed.push({ text, providerFinished })
+  });
+
+  assert.equal(streamed.some((entry) => !entry.providerFinished), true);
+  const visible = streamed.map((entry) => entry.text).join('');
+  assert.match(visible, /Visible update/);
+  assert.match(visible, /after reasoning/);
+  assert.doesNotMatch(visible, /private reasoning|<think>/);
+  assert.equal(result.response, 'Visible update  after reasoning');
+});
 
 test('agent executes only allow-listed tools and returns the model conclusion', async () => {
   const requests = [];
@@ -46,7 +81,8 @@ test('agent blocks tool calls that are not allow-listed', async () => {
     executed = true;
     return {};
   });
-  assert.equal(answer, 'I did not run commands.');
+  assert.match(answer, /I did not run commands\./);
+  assert.match(answer, /tool actions failed/i);
   assert.equal(executed, false);
 });
 
@@ -91,4 +127,3 @@ test('agent injects plan mode system instructions when mode is plan', async () =
   assert.match(capturedSystemPrompt, /Plan Mode/);
   assert.match(answer, /## Plan/);
 });
-

@@ -1,4 +1,5 @@
 import { AgentMode } from '../agent/agentLoop';
+import { PermissionMode, isPermissionMode } from '../agent/permissionManager';
 
 export type WebviewMessage =
   | { type: 'ready' }
@@ -35,11 +36,11 @@ export type WebviewMessage =
   | {
       type: 'permissionResolved';
       requestId: string;
-      decision: 'allow' | 'deny' | 'allow_session' | 'always_allow';
+      decision: 'allow' | 'deny' | 'allow_session';
     }
   | {
       type: 'setPermissionMode';
-      mode: 'request_review' | 'allow_safe_auto' | 'always_proceed';
+      mode: PermissionMode;
     };
 
 export function isWebviewMessage(value: unknown): value is WebviewMessage {
@@ -72,7 +73,7 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
       return msg.strategy === 'fast' || msg.strategy === 'planning';
 
     case 'openFile':
-      return typeof msg.filePath === 'string';
+      return typeof msg.filePath === 'string' && isSafeRelativePath(msg.filePath);
 
     case 'proceedArtifact':
       return typeof msg.artifactId === 'string';
@@ -103,25 +104,51 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
       return typeof msg.proposalId === 'string' && typeof msg.filePath === 'string';
 
     case 'updateSettings':
-      return typeof msg.settings === 'object' && msg.settings !== null;
+      return isAllowedSettingsPayload(msg.settings);
 
     case 'permissionResolved':
       return (
         typeof msg.requestId === 'string' &&
         (msg.decision === 'allow' ||
           msg.decision === 'deny' ||
-          msg.decision === 'allow_session' ||
-          msg.decision === 'always_allow')
+          msg.decision === 'allow_session')
       );
 
     case 'setPermissionMode':
-      return (
-        msg.mode === 'request_review' ||
-        msg.mode === 'allow_safe_auto' ||
-        msg.mode === 'always_proceed'
-      );
+      return isPermissionMode(msg.mode);
 
     default:
       return false;
   }
+}
+
+/** Setting keys (relative to the `localforge` section) that the webview may change. */
+export const WEBVIEW_WRITABLE_SETTINGS: ReadonlySet<string> = new Set([
+  'autocomplete.enabled',
+  'routing.chatModel',
+  'routing.editModel',
+  'routing.agentModel',
+  'routing.completionModel'
+]);
+
+function isAllowedSettingsPayload(settings: unknown): boolean {
+  if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
+    return false;
+  }
+  const entries = Object.entries(settings as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > WEBVIEW_WRITABLE_SETTINGS.size) {
+    return false;
+  }
+  return entries.every(([key, value]) =>
+    WEBVIEW_WRITABLE_SETTINGS.has(key) &&
+    (typeof value === 'boolean' || (typeof value === 'string' && value.length <= 200))
+  );
+}
+
+/** Workspace-relative path with no traversal, absolute, UNC, drive or NUL components. */
+export function isSafeRelativePath(input: string): boolean {
+  const p = input.replace(/\\/g, '/').trim();
+  if (!p || p.length > 1024 || p.includes('\0')) return false;
+  if (p.startsWith('/') || p.startsWith('//') || /^[A-Za-z]:/.test(p)) return false;
+  return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }

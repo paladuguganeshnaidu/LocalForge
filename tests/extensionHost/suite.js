@@ -1,11 +1,14 @@
 const assert = require('assert');
 const vscode = require('vscode');
 
+let completedStages = 0;
+
 async function runStage(stageName, fn) {
   const start = Date.now();
   console.log(`[ExtensionHost] >>> Running stage: ${stageName}`);
   try {
     await fn();
+    completedStages += 1;
     console.log(`[ExtensionHost] PASS: ${stageName} (${Date.now() - start}ms)`);
   } catch (err) {
     console.error(`[ExtensionHost] FAIL in stage "${stageName}":`, err);
@@ -19,6 +22,11 @@ async function run() {
   console.log('=====================================================');
 
   let ext;
+  let messageHandler;
+  let autoApprovePath;
+  let autoApproveCommand;
+  let autoApproveSessionCommand;
+  const permissionRequests = [];
 
   // Stage 1: Extension Discovery & Activation
   await runStage('Stage 1: Extension Activation', async () => {
@@ -112,7 +120,6 @@ async function run() {
     assert.ok(api.engine, 'Extension API must expose engine');
     assert.ok(api.viewProvider, 'Extension API must expose viewProvider');
 
-    let messageHandler;
     const webviewEvents = [];
     const mockWebview = {
       options: {},
@@ -121,6 +128,18 @@ async function run() {
       asWebviewUri: (uri) => uri,
       postMessage: async (msg) => {
         webviewEvents.push(msg);
+        if (msg.type === 'permissionRequest' && (autoApprovePath || autoApproveCommand || autoApproveSessionCommand)) {
+          const request = msg.request;
+          permissionRequests.push(request);
+          const approved = (request.toolName === 'write_workspace_file' && request.path === autoApprovePath) ||
+            (request.toolName === 'run_command' && request.command === autoApproveCommand);
+          const approvedForSession = request.toolName === 'run_command' && request.command === autoApproveSessionCommand;
+          queueMicrotask(() => void messageHandler({
+            type: 'permissionResolved',
+            requestId: request.id,
+            decision: approvedForSession ? 'allow_session' : approved ? 'allow' : 'deny'
+          }));
+        }
       },
       onDidReceiveMessage: (handler) => {
         messageHandler = handler;
@@ -133,19 +152,229 @@ async function run() {
 
     await messageHandler({ type: 'ready' });
     assert.ok(webviewEvents.some((e) => e.type === 'models'), 'Webview should receive models on ready');
+    assert.ok(webviewEvents.some((e) => e.type === 'permissionMode'), 'Webview should receive the active permission mode');
+    assert.ok(mockWebview.html.includes('permissionModeSelect'), 'Settings should expose the approval-mode selector');
+    assert.ok(mockWebview.html.includes('Model tool input'), 'Activity details should expose exact model tool inputs');
+    assert.ok(mockWebview.html.includes('Tool output'), 'Activity details should expose bounded tool outputs');
 
-    await messageHandler({
-      type: 'chat',
-      model: 'auto',
-      prompt: 'test prompt from extension host',
-      includeContext: true,
-      includeWorkspace: true,
-      agentMode: false
+    const sessionId = api.engine.sessionManager.getActiveSession().id;
+    const traceTurn = api.engine.turnManager.startTurn({
+      conversationId: sessionId,
+      modelId: 'test-model',
+      mode: 'agent',
+      strategy: 'fast'
     });
+    api.engine.turnManager.addActivity(traceTurn.turnId, {
+      category: 'Running',
+      title: 'Persisted trace probe',
+      status: 'success',
+      inputSummary: 'safe test input',
+      outputSummary: 'safe test output'
+    });
+    api.engine.turnManager.completeTurn(traceTurn.turnId, 'completed');
+    await messageHandler({ type: 'ready' });
+    const traceMessage = webviewEvents.filter((event) => event.type === 'activityHistory').at(-1);
+    assert.ok(traceMessage?.activities.some((activity) => activity.title === 'Persisted trace probe'), 'Reopening chat should receive the active conversation trace');
+
+    await messageHandler({ type: 'setPermissionMode', mode: 'always_ask' });
+    assert.strictEqual(api.engine.permissionManager.getMode(), 'always_ask', 'Approval-mode selection should update the engine');
+    const originalPermissionMode = api.engine.permissionManager.getMode();
+    const approvalTurn = api.engine.turnManager.startTurn({
+      conversationId: sessionId,
+      modelId: 'approval-test-model',
+      mode: 'agent',
+      strategy: 'fast'
+    });
+    try {
+      api.engine.permissionManager.setMode('always_ask');
+      autoApproveCommand = 'echo LOCALFORGE_TIMELINE_APPROVED';
+      permissionRequests.length = 0;
+      const approved = await api.engine.permissionManager.checkPermission('run_command', {
+        command: autoApproveCommand
+      });
+      assert.equal(approved, true, 'The approval bridge should return the user decision to the tool');
+
+      const deniedCommand = 'echo LOCALFORGE_TIMELINE_DENIED';
+      const denied = await api.engine.permissionManager.checkPermission('run_command', {
+        command: deniedCommand
+      });
+      assert.equal(denied, false, `The approval bridge should deny a rejected command; approvals: ${JSON.stringify(permissionRequests)}`);
+
+      autoApproveSessionCommand = 'echo LOCALFORGE_TIMELINE_SESSION';
+      const approvedForSession = await api.engine.permissionManager.checkPermission('run_command', {
+        command: autoApproveSessionCommand
+      });
+      assert.equal(approvedForSession, true, 'The approval bridge should honor the session approval choice');
+      assert.equal(api.engine.permissionManager.getMode(), 'ask_once_per_session');
+
+      const approvals = api.engine.getActivityHistory(sessionId)
+        .filter((activity) => activity.inputSummary?.includes('LOCALFORGE_TIMELINE_'));
+      assert.ok(approvals.some((activity) => activity.title.startsWith('Approved for this action:') && activity.status === 'success'),
+        'An approved action should remain in the persisted activity history');
+      assert.ok(approvals.some((activity) => activity.title.startsWith('Denied by user:') && activity.status === 'warning'),
+        'A denied action should remain in the persisted activity history');
+      assert.ok(approvals.some((activity) => activity.title.startsWith('Approved for this session:') && activity.status === 'success'),
+        'A session approval should remain in the persisted activity history');
+      assert.ok(approvals.every((activity) => activity.inputSummary.includes('LOCALFORGE_TIMELINE_')),
+        'The redacted command input should be inspectable on the timeline');
+      assert.ok(webviewEvents.filter((event) => event.type === 'activity')
+        .some((event) => event.activity.title.startsWith('Denied by user:')),
+      'The updated approval decision should be sent to the visible timeline');
+    } finally {
+      autoApproveCommand = undefined;
+      autoApproveSessionCommand = undefined;
+      api.engine.permissionManager.setMode(originalPermissionMode);
+      api.engine.turnManager.completeTurn(approvalTurn.turnId, 'completed');
+    }
+
+    if (process.env.LOCALFORGE_REAL_OLLAMA_EDIT !== '1') {
+      await messageHandler({
+        type: 'chat',
+        model: 'auto',
+        prompt: 'test prompt from extension host',
+        includeContext: true,
+        includeWorkspace: true,
+        agentMode: false
+      });
+    }
   });
 
+  if (process.env.LOCALFORGE_REAL_OLLAMA_EDIT === '1') {
+    await runStage('Stage 9: Live Ollama file proposal and approval', async () => {
+      const api = ext.exports;
+      const requestedModel = process.env.LOCALFORGE_OLLAMA_MODEL || 'qwen2.5-coder:1.5b';
+      await api.engine.bootstrap();
+      const model = api.engine.modelRegistry.getModels().find((candidate) => candidate.name === requestedModel);
+      assert.ok(model, `Ollama model ${requestedModel} must be installed for the live edit test`);
+
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+      assert.ok(workspaceRoot, 'An open workspace is required for the live edit test');
+      const relativeDirectory = `.localforge-live-edit-${Date.now()}`;
+      const relativePath = `${relativeDirectory}/result.txt`;
+      const directoryUri = vscode.Uri.joinPath(workspaceRoot, relativeDirectory);
+      const fileUri = vscode.Uri.joinPath(workspaceRoot, relativePath);
+      const expectedMarker = 'LOCALFORGE_REVIEWED_EDIT_OK';
+      const originalMode = api.engine.permissionManager.getMode();
+      const toolCalls = [];
+
+      await vscode.workspace.fs.createDirectory(directoryUri);
+      autoApprovePath = relativePath;
+      permissionRequests.length = 0;
+      api.engine.permissionManager.setMode('always_ask');
+      try {
+        const { AgentLoop } = require('../../dist/agent/agentLoop.js');
+        const { ToolRegistry } = require('../../dist/agent/toolRegistry.js');
+        const { allWorkspaceTools, executeWorkspaceTool } = require('../../dist/agent/workspaceTools.js');
+        const writeDefinition = allWorkspaceTools.find((tool) => tool.function.name === 'write_workspace_file');
+        assert.ok(writeDefinition, 'The built-in write tool definition must exist');
+        const isolatedRegistry = new ToolRegistry();
+        isolatedRegistry.registerTool(writeDefinition, (args) => executeWorkspaceTool('write_workspace_file', args, {
+          editEngine: api.engine.editEngine,
+          terminalManager: api.engine.terminalManager,
+          conversationId: 'live-ollama-edit-test',
+          autoApply: false
+        }), 'edit');
+
+        const result = await new AgentLoop(api.engine.compositeProvider, isolatedRegistry, api.engine.permissionManager).run(
+          model.id,
+          [{
+            role: 'user',
+            content: `For this isolated extension-host test, call write_workspace_file exactly once to create the workspace-relative file "${relativePath}" with the exact content "${expectedMarker}". Do not run commands or edit any other file.`
+          }],
+          {
+            mode: 'agent',
+            maxRounds: 4,
+            onToolStart: (name, args) => {
+              toolCalls.push({ name, args });
+              console.log(`[LiveEdit] Model requested ${name} for ${args.path || args.target_path || args.relative_path || 'unknown path'}`);
+            }
+          }
+        );
+
+        assert.equal(result.state.status, 'completed', `Agent run failed: ${result.response}; errors: ${JSON.stringify(result.state.unresolvedErrors)}; tool calls: ${JSON.stringify(toolCalls)}; approvals: ${JSON.stringify(permissionRequests)}`);
+        assert.ok(toolCalls.length >= 1, `The model must request the file-write tool; response: ${result.response}`);
+        assert.ok(toolCalls.every((call) => call.name === 'write_workspace_file' && call.args.path === relativePath),
+          `Every file-write request must stay scoped to the exact test path: ${JSON.stringify(toolCalls)}`);
+        assert.equal(permissionRequests.length, 1, 'The new-file edit must ask for permission exactly once');
+        assert.equal(permissionRequests[0].toolName, 'write_workspace_file');
+        assert.equal(permissionRequests[0].path, relativePath);
+
+        const proposal = api.engine.editEngine.getPendingProposals()
+          .find((candidate) => candidate.files.some((file) => file.path === relativePath));
+        assert.ok(proposal, 'The model edit must become a pending review proposal');
+        assert.equal(proposal.status, 'pending');
+        await assert.rejects(vscode.workspace.fs.readFile(fileUri));
+
+        const accepted = await api.engine.editEngine.applyProposal(proposal.id);
+        assert.equal(accepted.success, true, 'Accepting the reviewed proposal should apply it');
+        const written = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString('utf8');
+        assert.ok(written.includes(expectedMarker), `The accepted file should contain the requested model-generated content; actual content: ${JSON.stringify(written)}; proposal: ${JSON.stringify(proposal.files[0].newContent)}; agent response: ${result.response}`);
+      } finally {
+        autoApprovePath = undefined;
+        api.engine.permissionManager.setMode(originalMode);
+        await vscode.workspace.fs.delete(directoryUri, { recursive: true, useTrash: false }).catch(() => {});
+      }
+    });
+
+    await runStage('Stage 10: Live Ollama command approval and terminal output', async () => {
+      const api = ext.exports;
+      const requestedModel = process.env.LOCALFORGE_OLLAMA_MODEL || 'qwen2.5-coder:1.5b';
+      await api.engine.bootstrap();
+      const model = api.engine.modelRegistry.getModels().find((candidate) => candidate.name === requestedModel);
+      assert.ok(model, `Ollama model ${requestedModel} must be installed for the live command test`);
+
+      const command = 'echo LOCALFORGE_COMMAND_APPROVAL_OK';
+      const originalMode = api.engine.permissionManager.getMode();
+      const toolCalls = [];
+      autoApproveCommand = command;
+      permissionRequests.length = 0;
+      api.engine.permissionManager.setMode('always_ask');
+      try {
+        const { AgentLoop } = require('../../dist/agent/agentLoop.js');
+        const { ToolRegistry } = require('../../dist/agent/toolRegistry.js');
+        const { allWorkspaceTools, executeWorkspaceTool } = require('../../dist/agent/workspaceTools.js');
+        const commandDefinition = allWorkspaceTools.find((tool) => tool.function.name === 'run_command');
+        assert.ok(commandDefinition, 'The built-in command tool definition must exist');
+        const isolatedRegistry = new ToolRegistry();
+        isolatedRegistry.registerTool(commandDefinition, (args) => executeWorkspaceTool('run_command', args, {
+          terminalManager: api.engine.terminalManager
+        }), { category: 'execute', riskLevel: 'low_risk', requiresApproval: true });
+
+        const result = await new AgentLoop(api.engine.compositeProvider, isolatedRegistry, api.engine.permissionManager).run(
+          model.id,
+          [{
+            role: 'user',
+            content: `For this isolated extension-host test, call run_command exactly once with the exact harmless command "${command}". Do not run any other command. After it succeeds, report its output.`
+          }],
+          {
+            mode: 'agent',
+            maxRounds: 4,
+            onToolStart: (name, args) => {
+              toolCalls.push({ name, args });
+              console.log(`[LiveCommand] Model requested ${name}`);
+            }
+          }
+        );
+
+        assert.equal(result.state.status, 'completed', `Agent run failed: ${result.response}; errors: ${JSON.stringify(result.state.unresolvedErrors)}; calls: ${JSON.stringify(toolCalls)}; approvals: ${JSON.stringify(permissionRequests)}`);
+        assert.ok(toolCalls.length >= 1, `The model must request the command; calls: ${JSON.stringify(toolCalls)}; response: ${result.response}`);
+        assert.ok(toolCalls.every((call) => call.name === 'run_command' && call.args.command === command),
+          `Every command request must match the exact approved command: ${JSON.stringify(toolCalls)}`);
+        assert.equal(permissionRequests.length, 1, 'The command must ask for explicit approval exactly once');
+        assert.equal(permissionRequests[0].toolName, 'run_command');
+        assert.equal(permissionRequests[0].command, command);
+        const toolResult = result.state.steps.flatMap((step) => step.toolCalls).find((call) => call.name === 'run_command')?.result;
+        assert.equal(toolResult?.exitCode, 0, 'The approved command should complete successfully');
+        assert.match(toolResult?.stdout || '', /LOCALFORGE_COMMAND_APPROVAL_OK/);
+      } finally {
+        autoApproveCommand = undefined;
+        api.engine.permissionManager.setMode(originalMode);
+      }
+    });
+  }
+
   console.log('=====================================================');
-  console.log('  ALL 8 EXTENSION HOST INTEGRATION STAGES PASSED');
+  console.log(`  ALL ${completedStages} EXTENSION HOST INTEGRATION STAGES PASSED`);
   console.log('=====================================================');
 }
 

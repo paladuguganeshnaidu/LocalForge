@@ -187,4 +187,6 @@ test('Atomic multi-file apply succeeds when all files are clean', async () => {
 
   const bytesAfter = await vscode.workspace.fs.readFile(fileAUri);
   assert.equal(bytesAfter.toString('utf8'), 'clean-A-updated');
+  const newFileBytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(workspaceRoot, 'cleanB.txt'));
+  assert.equal(newFileBytes.toString('utf8'), 'clean-B-new');
 });

@@ -1,8 +1,8 @@
 {
   "name": "localforge-vscode",
   "displayName": "LOMVREN",
-  "description": "Production-grade local-first autonomous software engineering operating system powered by local Ollama & remote GPU models (Multi-Agent, Ask, Plan, Agent, Review, Automate).",
-  "version": "0.2.4",
+  "description": "Use local Ollama and SSH-tunneled Ollama models for AI-assisted coding in VS Code.",
+  "version": "0.2.23",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/lomvren-icon.png",
   "repository": {
@@ -41,7 +41,7 @@
     "onCommand:localforge.setModel",
     "onStartupFinished"
   ],
-  "main": "./dist/extension.js",
+  "main": "./dist/extension.bundle.js",
   "contributes": {
     "viewsContainers": {
       "secondarySidebar": [
@@ -208,15 +208,16 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build",
+    "build": "npm run compile && npm run bundle",
+    "bundle": "esbuild dist/extension.js --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.bundle.js",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
-    "test:extension-host": "npm run compile && node tests/runExtensionHostTests.js",
-    "package": "vsce package"
-  },
-  "dependencies": {
-    "ssh2": "^1.16.0"
+    "test:extension-host": "npm run build && node tests/runExtensionHostTests.js",
+    "test:ollama-smoke": "node scripts/smoke-ollama.cjs",
+    "test:ollama-agent": "npm run compile && node scripts/smoke-ollama-agent.cjs",
+    "package": "npm run build && vsce package && node scripts/verify-marketplace-package.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
@@ -224,6 +225,8 @@
     "@types/vscode": "^1.106.0",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.28.2",
+    "ssh2": "^1.17.0",
     "typescript": "^5.8.3"
   }
 }

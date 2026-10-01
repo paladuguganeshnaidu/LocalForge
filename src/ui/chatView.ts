@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
+import { isAbsolute, relative, sep } from 'node:path';
 import { ChatMessage, LocalModel, ModelProvider } from '../providers/modelProvider';
 import { AgentMode } from '../agent/agentLoop';
 import { SshOllamaTunnel } from '../remote/sshOllamaTunnel';
@@ -9,6 +11,9 @@ import { ModelTask, routeModel } from '../providers/modelRouter';
 import { EditProposal } from '../editing/editEngine';
 import { Artifact } from '../core/artifactManager';
 import { TurnActivity, ExecutionStrategy } from '../core/turnManager';
+import { validateRelativeWorkspacePath } from '../agent/workspaceTools';
+import { PermissionMode, PermissionRequest } from '../agent/permissionManager';
+import { formatToolInput } from '../core/activityDetails';
 
 export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -22,7 +27,12 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   public activeStrategy: ExecutionStrategy = 'planning';
   private engine?: LocalForgeEngine;
   private currentProposal?: EditProposal;
-  private pendingPermissionRequests = new Map<string, (allowed: boolean) => void>();
+  private pendingPermissionRequests = new Map<string, {
+    resolve: (allowed: boolean) => void;
+    request: PermissionRequest;
+    activityId?: string;
+    turnId?: string;
+  }>();
 
   constructor(
     private readonly provider: ModelProvider,
@@ -52,13 +62,20 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     if (!this.engine) return;
     this.engine.permissionManager.setApprovalHandler(async (request) => {
       return new Promise<boolean>((resolve) => {
-        this.pendingPermissionRequests.set(request.id, resolve);
+        const activity = this.recordPermissionRequest(request);
+        this.pendingPermissionRequests.set(request.id, {
+          resolve,
+          request,
+          activityId: activity?.activityId,
+          turnId: activity?.turnId
+        });
         this.post({
           type: 'permissionRequest',
           request: {
             id: request.id,
             toolName: request.toolName,
             category: request.category,
+            commandCategory: request.commandCategory,
             description: request.description,
             command: request.command,
             path: request.path
@@ -66,6 +83,62 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         });
       });
     });
+  }
+
+  private recordPermissionRequest(request: PermissionRequest): { turnId: string; activityId: string } | undefined {
+    if (!this.engine) return undefined;
+    const conversationId = this.engine.sessionManager.getActiveSession().id;
+    const turn = this.engine.turnManager.getTurnsForConversation(conversationId).at(-1);
+    if (!turn || !['running', 'waiting_for_approval'].includes(turn.status)) return undefined;
+
+    const activity = this.engine.turnManager.addActivity(turn.turnId, {
+      category: 'Waiting for approval',
+      title: `Permission requested: ${request.toolName}`,
+      details: 'Waiting for your decision.',
+      toolName: request.toolName,
+      targetPath: request.path,
+      inputSummary: formatToolInput(request.toolName, request.args ?? {}),
+      status: 'waiting_for_approval'
+    });
+    this.post({ type: 'activity', activity });
+    return { turnId: turn.turnId, activityId: activity.id };
+  }
+
+  private resolvePermissionRequest(
+    requestId: string,
+    decision: 'allow' | 'deny' | 'allow_session' | 'cancelled'
+  ): void {
+    const pending = this.pendingPermissionRequests.get(requestId);
+    if (!pending) return;
+    this.pendingPermissionRequests.delete(requestId);
+
+    if (decision === 'allow_session') this.setPermissionMode('ask_once_per_session');
+
+    if (pending.activityId && pending.turnId && this.engine) {
+      const turn = this.engine.turnManager.getTurn(pending.turnId);
+      if (turn) {
+        const allowed = decision === 'allow' || decision === 'allow_session';
+        const status: TurnActivity['status'] = decision === 'cancelled' ? 'cancelled' : allowed ? 'success' : 'warning';
+        const resolution = decision === 'allow_session' ? 'Approved for this session' :
+          decision === 'allow' ? 'Approved for this action' :
+            decision === 'deny' ? 'Denied by user' : 'Cancelled before approval';
+        const activity = this.engine.turnManager.updateActivity(turn.turnId, pending.activityId, {
+          title: `${resolution}: ${pending.request.toolName}`,
+          details: resolution,
+          durationMs: Math.max(0, Date.now() - (turn.activities.find((item) => item.id === pending.activityId)?.timestamp ?? Date.now())),
+          status
+        });
+        if (activity) this.post({ type: 'activity', activity });
+      }
+    }
+
+    pending.resolve(decision === 'allow' || decision === 'allow_session');
+  }
+
+  private setPermissionMode(mode: PermissionMode): void {
+    this.engine?.permissionManager.setMode(mode);
+    void this.context.globalState?.update('localforge.permissionMode', mode);
+    this.post({ type: 'permissionMode', mode });
   }
 
   public modelForTask(task: ModelTask): string | undefined {
@@ -100,6 +173,14 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       connected: true,
       profileName: this.remoteSession.profileName,
       gpuInfo
+    });
+  }
+
+  private postActivityHistory(): void {
+    const conversationId = this.engine?.sessionManager.getActiveSession().id;
+    this.post({
+      type: 'activityHistory',
+      activities: conversationId ? this.engine?.getActivityHistory(conversationId) ?? [] : []
     });
   }
 
@@ -164,6 +245,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         this.selectedModel = message.model;
         const history = this.conversations.get(this.selectedModel ?? '') ?? [];
         this.post({ type: 'history', messages: history });
+        this.postActivityHistory();
       }
 
       if (message.type === 'getRemoteStatus') {
@@ -201,6 +283,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'newSession') {
         if (this.engine) {
           this.engine.sessionManager.createNewSession();
+          this.engine.permissionManager.clearSession();
         }
         if (this.selectedModel) {
           this.conversations.delete(this.selectedModel);
@@ -213,6 +296,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'loadSession') {
         if (this.engine && message.sessionId) {
           await this.engine.sessionManager.setActiveSession(message.sessionId);
+          this.engine.permissionManager.clearSession();
           await this.refresh();
         }
       }
@@ -220,6 +304,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'deleteSession') {
         if (this.engine && message.sessionId) {
           this.engine.sessionManager.deleteSession(message.sessionId);
+          this.engine.permissionManager.clearSession();
           await this.refresh();
         }
       }
@@ -241,7 +326,18 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         if (root && message.filePath) {
           try {
-            const uri = vscode.Uri.joinPath(root, message.filePath);
+            const uri = vscode.Uri.joinPath(root, ...validateRelativeWorkspacePath(message.filePath));
+            if (vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() !== root.toString()) {
+              throw new Error('The requested file is outside the workspace folder.');
+            }
+            if (root.scheme === 'file') {
+              const realRoot = await realpath(root.fsPath);
+              const realFile = await realpath(uri.fsPath);
+              const relativeFile = relative(realRoot, realFile);
+              if (relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
+                throw new Error('The requested file resolves outside the workspace folder.');
+              }
+            }
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc);
           } catch {}
@@ -265,9 +361,13 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           );
           this.post({
             type: 'editResult',
-            success: res.success,
+            success: res.success && res.validationPassed !== false,
+            applied: res.success,
+            validationPassed: res.validationPassed,
             summary: res.success
-              ? `Applied changes to ${res.appliedCount} file(s).`
+              ? res.validationPassed === false
+                ? `Applied changes to ${res.appliedCount} file(s), but project validation did not pass.`
+                : `Applied changes to ${res.appliedCount} file(s).`
               : `Apply failed: ${res.errors?.map((e: any) => e.error).join(', ') || 'Validation failed'}`
           });
           this.post({ type: 'status', state: 'ready', message: 'Ready' });
@@ -282,7 +382,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
             id: `act-${Date.now()}`,
             category: 'Cancelled',
             title: 'Proposal rejected by user',
-            status: 'error',
+            status: 'cancelled',
             timestamp: Date.now()
           }});
         }
@@ -320,31 +420,11 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (message.type === 'permissionResolved') {
-        const resolver = this.pendingPermissionRequests.get(message.requestId);
-        if (resolver) {
-          this.pendingPermissionRequests.delete(message.requestId);
-          if (message.decision === 'allow') {
-            resolver(true);
-          } else if (message.decision === 'deny') {
-            resolver(false);
-          } else if (message.decision === 'allow_session') {
-            if (this.engine) {
-              this.engine.permissionManager.setMode('ask_once_per_session');
-            }
-            resolver(true);
-          } else if (message.decision === 'always_allow') {
-            if (this.engine) {
-              this.engine.permissionManager.setMode('always_proceed');
-            }
-            resolver(true);
-          }
-        }
+        this.resolvePermissionRequest(message.requestId, message.decision);
       }
 
       if (message.type === 'setPermissionMode') {
-        if (this.engine) {
-          this.engine.permissionManager.setMode(message.mode);
-        }
+        this.setPermissionMode(message.mode);
       }
 
       if (message.type === 'chat') {
@@ -381,6 +461,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
       const history = this.conversations.get(this.selectedModel ?? '') ?? [];
       this.post({ type: 'history', messages: history });
+      this.postActivityHistory();
       await this.postRemoteStatus();
 
       if (vscode.window.activeTextEditor) {
@@ -392,6 +473,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         state: 'ready',
         message: `${this.models.length} model(s) available`
       });
+      this.post({ type: 'permissionMode', mode: this.engine?.permissionManager.getMode() ?? 'always_ask' });
     } catch (error) {
       this.post({
         type: 'status',
@@ -409,17 +491,16 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     if (this.engine) {
       this.engine.cancelCurrentTask();
     }
-    for (const resolver of this.pendingPermissionRequests.values()) {
-      resolver(false);
+    for (const requestId of this.pendingPermissionRequests.keys()) {
+      this.resolvePermissionRequest(requestId, 'cancelled');
     }
-    this.pendingPermissionRequests.clear();
     this.busy = false;
     this.post({ type: 'status', state: 'ready', message: 'Ready' });
     this.post({ type: 'activity', activity: {
       id: `act-${Date.now()}`,
       category: 'Cancelled',
       title: 'Task cancelled by user',
-      status: 'error',
+      status: 'cancelled',
       timestamp: Date.now()
     }});
   }
@@ -463,6 +544,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       : (this.selectedModel && this.selectedModel !== 'auto' ? this.selectedModel : '');
     const mode = this.activeMode;
     const history = this.conversations.get(modelName) ?? [];
+    let finalStatusMessage = 'Ready';
 
     this.post({ type: 'status', state: 'thinking', message: 'Analyzing task...' });
     this.post({ type: 'userMessage', content: message.prompt });
@@ -495,6 +577,11 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         if (pending.length > 0) {
           const latest = pending[0];
           this.post({ type: 'proposal', proposal: latest });
+        }
+        if (pending.length > 0 || mode === 'plan') {
+          finalStatusMessage = 'Waiting for your review';
+        } else if (summary.errors?.length) {
+          finalStatusMessage = 'Completed with tool warnings';
         }
 
         history.push({ role: 'user', content: message.prompt });
@@ -535,7 +622,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     } finally {
       this.busy = false;
       this.activeChat = undefined;
-      this.post({ type: 'status', state: 'ready', message: 'Ready' });
+      this.post({ type: 'status', state: 'ready', message: finalStatusMessage });
     }
   }
 
@@ -563,7 +650,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       --editor-bg: var(--vscode-editor-background, #1e1e1e));
       --fg: var(--vscode-foreground, #cccccc);
       --border: var(--vscode-panel-border, var(--vscode-widget-border, rgba(128,128,128,0.2)));
-      --accent: var(--vscode-button-background, #0e639c);
+      --accent: var(--vscode-button-background, #1a73e8);
       --accent-fg: var(--vscode-button-foreground, #ffffff);
       --input-bg: var(--vscode-input-background, #252526);
       --input-fg: var(--vscode-input-foreground, #cccccc);
@@ -571,9 +658,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       --card-bg: var(--vscode-editor-inactiveSelectionBackground, rgba(128,128,128,0.08));
       --badge-bg: var(--vscode-badge-background, #4d4d4d);
       --badge-fg: var(--vscode-badge-foreground, #ffffff);
-      --success: #10b981;
-      --warning: #f59e0b;
-      --error: #ef4444;
+      --success: #34a853;
+      --warning: #fbbc04;
+      --error: #ea4335;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -585,6 +672,19 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       height: 100vh;
       overflow: hidden;
       user-select: none;
+    }
+    button:focus-visible, select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible {
+      outline: 2px solid var(--vscode-focusBorder, #1a73e8);
+      outline-offset: 2px;
+    }
+    .msg-user, .msg-assistant, .artifact-body, .permission-command, textarea { user-select: text; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
     }
 
     /* SVG Icons */
@@ -606,8 +706,8 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       border-bottom: 1px solid var(--border);
       background: var(--bg);
       flex-shrink: 0;
-      padding: 8px 12px;
-      gap: 6px;
+      padding: 10px 12px;
+      gap: 8px;
     }
     .header-top {
       display: flex;
@@ -633,7 +733,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       color: var(--subtle);
       cursor: pointer;
       padding: 4px;
-      border-radius: 4px;
+      border-radius: 8px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -649,10 +749,10 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 4px 8px;
+      padding: 6px 10px;
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 4px;
+      border-radius: 8px;
       font-size: 11.5px;
       cursor: pointer;
       color: var(--fg);
@@ -682,21 +782,21 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     /* Segmented Mode Selector */
     .mode-bar {
       display: flex;
-      padding: 6px 12px;
+      padding: 8px 12px;
       background: var(--bg);
-      gap: 4px;
+      gap: 6px;
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
     .mode-btn {
       flex: 1;
       border: 1px solid transparent;
-      padding: 4px 6px;
+      padding: 6px 8px;
       font-size: 11px;
       font-weight: 500;
       background: transparent;
       color: var(--subtle);
-      border-radius: 4px;
+      border-radius: 8px;
       cursor: pointer;
       text-align: center;
       transition: all 0.12s;
@@ -732,8 +832,15 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     }
 
     /* Conversation & Activity Area */
+    .conversation-area {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      display: flex;
+    }
     .main-scroll {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 12px;
       display: flex;
@@ -741,6 +848,21 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       gap: 12px;
       user-select: text;
     }
+    .jump-latest {
+      position: absolute;
+      right: 18px;
+      bottom: 12px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 6px 11px;
+      color: var(--fg);
+      background: var(--card-bg);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+      cursor: pointer;
+      z-index: 2;
+    }
+    .jump-latest[hidden] { display: none; }
+    .jump-latest:hover { border-color: var(--accent); }
 
     /* Timeline & Activity */
     .timeline {
@@ -764,6 +886,10 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       color: var(--fg);
       min-width: 60px;
     }
+    .timeline-details { margin-top: 3px; font-size: 10.5px; }
+    .timeline-details summary { cursor: pointer; color: var(--subtle); }
+    .timeline-details div { padding: 5px 7px; margin-top: 3px; border-left: 2px solid var(--border); }
+    .timeline-details pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; font: inherit; max-height: 260px; overflow: auto; }
     .timeline-text {
       flex: 1;
       word-break: break-word;
@@ -784,10 +910,15 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       background: rgba(46, 160, 67, 0.15);
       color: var(--success);
     }
+    .timeline-status.warning {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+    }
     .timeline-status.error, .timeline-status.failed {
       background: rgba(248, 81, 73, 0.15);
       color: var(--error);
     }
+    .timeline-status.cancelled { background: var(--card-bg); color: var(--subtle); }
     .timeline-status.waiting_for_approval {
       background: rgba(210, 153, 34, 0.15);
       color: #d29922;
@@ -805,7 +936,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       background: var(--accent);
       color: var(--accent-fg);
       padding: 8px 12px;
-      border-radius: 8px 8px 2px 8px;
+      border-radius: 16px 16px 4px 16px;
       max-width: 90%;
       word-break: break-word;
       font-size: 12.5px;
@@ -815,13 +946,20 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       background: var(--card-bg);
       color: var(--fg);
       padding: 10px 12px;
-      border-radius: 8px;
+      border-radius: 14px;
       border: 1px solid var(--border);
       max-width: 100%;
       word-break: break-word;
       font-size: 12px;
       line-height: 1.55;
     }
+    .msg-assistant p { margin: 0 0 8px; }
+    .msg-assistant p:last-child { margin-bottom: 0; }
+    .msg-assistant h1, .msg-assistant h2, .msg-assistant h3 { margin: 8px 0 4px; font-size: 1.05em; }
+    .msg-assistant ul { margin: 4px 0 8px 18px; }
+    .msg-assistant pre { overflow-x: auto; padding: 8px; margin: 6px 0; background: var(--input-bg); border-radius: 8px; }
+    .msg-assistant code { font-family: var(--vscode-editor-font-family, Consolas, monospace); }
+    .msg-assistant p code { padding: 1px 3px; background: var(--input-bg); border-radius: 3px; }
     .msg-assistant.thinking-bubble {
       display: inline-flex;
       align-items: center;
@@ -850,7 +988,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     /* Interactive Artifact Card */
     .artifact-card {
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 12px;
       background: var(--bg);
       padding: 10px;
       display: flex;
@@ -879,10 +1017,11 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       font-family: inherit;
       background: var(--card-bg);
       padding: 8px;
-      border-radius: 4px;
+      border-radius: 8px;
     }
     .artifact-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       align-items: center;
     }
@@ -890,12 +1029,15 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       background: var(--accent);
       color: var(--accent-fg);
       border: 0;
-      border-radius: 4px;
+      border-radius: 8px;
       padding: 4px 10px;
       font-size: 11px;
       font-weight: 500;
       cursor: pointer;
+      min-height: 28px;
+      transition: filter 0.15s, background 0.15s;
     }
+    .action-btn:hover:not(:disabled), .send-btn:hover:not(:disabled) { filter: brightness(1.08); }
     .action-btn.secondary {
       background: transparent;
       border: 1px solid var(--border);
@@ -907,7 +1049,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     .permission-card {
       border: 1px solid var(--border);
       border-left: 3px solid var(--accent);
-      border-radius: 4px;
+      border-radius: 12px;
       background: var(--card-bg);
       padding: 10px;
       display: flex;
@@ -929,7 +1071,20 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       word-break: break-all;
       background: var(--bg);
       padding: 4px 6px;
-      border-radius: 3px;
+      border-radius: 6px;
+    }
+    .permission-command {
+      margin: 0;
+      padding: 7px;
+      max-height: 160px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--fg);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font: 11px var(--vscode-editor-font-family, monospace);
     }
     .permission-actions {
       display: flex;
@@ -964,7 +1119,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       font-size: 11px;
       cursor: pointer;
       padding: 2px 4px;
-      border-radius: 3px;
+      border-radius: 8px;
     }
     .toolbar-btn:hover {
       color: var(--fg);
@@ -1000,7 +1155,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       color: var(--subtle);
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: 8px;
       padding: 2px 6px;
       cursor: pointer;
       white-space: nowrap;
@@ -1011,7 +1166,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     }
     .composer-input-box {
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 12px;
       background: var(--input-bg);
       padding: 8px;
       display: flex;
@@ -1053,11 +1208,12 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       background: var(--accent);
       color: var(--accent-fg);
       border: 0;
-      border-radius: 4px;
+      border-radius: 8px;
       padding: 4px 12px;
       font-size: 11.5px;
       font-weight: 500;
       cursor: pointer;
+      transition: filter 0.15s;
     }
     .send-btn:disabled { opacity: 0.5; cursor: default; }
 
@@ -1279,15 +1435,18 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   </div>
 
   <!-- Conversation & Activity Scroll Area -->
-  <div class="main-scroll" id="mainScroll">
+  <div class="conversation-area">
+    <div class="main-scroll" id="mainScroll">
     <div class="msg-assistant welcome" style="display:flex; gap:10px; align-items:center;">
       ${logoUri ? `<img src="${logoUri}" alt="LOMVREN Logo" style="width:34px; height:34px; border-radius:6px; object-fit:contain; flex-shrink:0;" />` : ''}
       <div>
-        <strong>LOMVREN v0.2.4</strong><br>
-        <span style="font-size:11px; opacity:0.85;">Local-first autonomous AI software engineering environment for VS Code. Select a mode or type a task below.</span>
+        <strong>LOMVREN</strong><br>
+        <span style="font-size:11px; opacity:0.85;">Local AI coding agent · chat, plans, and reviewable changes.</span>
       </div>
     </div>
     <div class="timeline" id="timelineContainer" style="display:none;"></div>
+    </div>
+    <button class="jump-latest" id="jumpToLatest" type="button" hidden aria-label="Jump to latest activity">↓ Latest</button>
   </div>
 
   <!-- Bottom Utility Toolbar -->
@@ -1393,6 +1552,14 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         <span>Continue Previous Task</span>
         <button class="action-btn secondary" id="continueTaskBtn" style="padding:2px 8px;">Continue</button>
       </div>
+      <label for="permissionModeSelect" style="font-size:11px; text-transform:uppercase; color:var(--subtle); font-weight:600; margin-top:8px;">Command and edit approvals</label>
+      <select id="permissionModeSelect" style="width:100%; padding:7px; color:var(--input-fg); background:var(--input-bg); border:1px solid var(--border); border-radius:4px;">
+        <option value="allow_safe_auto">Auto-run reviewed safe commands</option>
+        <option value="ask_once_per_session">Ask once per session</option>
+        <option value="always_ask" selected>Ask before every edit or command (recommended)</option>
+        <option value="always_proceed">Always proceed (higher risk)</option>
+      </select>
+      <div style="font-size:11px; color:var(--subtle);">Read-only inspection remains automatic. Critical system operations stay blocked.</div>
     </div>
   </div>
 
@@ -1427,6 +1594,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     })();
 
     const mainScroll = document.getElementById('mainScroll');
+    const jumpToLatest = document.getElementById('jumpToLatest');
     const timelineContainer = document.getElementById('timelineContainer');
     const promptInput = document.getElementById('promptInput');
     const sendBtn = document.getElementById('sendBtn');
@@ -1444,6 +1612,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     const changesDrawer = document.getElementById('changesDrawer');
     const terminalDrawer = document.getElementById('terminalDrawer');
     const settingsDrawer = document.getElementById('settingsDrawer');
+    const permissionModeSelect = document.getElementById('permissionModeSelect');
     const diffFileList = document.getElementById('diffFileList');
     const proposalSummary = document.getElementById('proposalSummary');
     const terminalOutput = document.getElementById('terminalOutput');
@@ -1483,7 +1652,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
     // Header Action Buttons
     document.getElementById('newChatBtn').addEventListener('click', () => {
-      vscode.postMessage({ type: 'clear' });
+      vscode.postMessage({ type: 'newSession' });
     });
     document.getElementById('refreshBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
@@ -1493,6 +1662,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     });
     document.getElementById('settingsBtn').addEventListener('click', () => {
       settingsDrawer.classList.add('open');
+    });
+    permissionModeSelect.addEventListener('change', () => {
+      vscode.postMessage({ type: 'setPermissionMode', mode: permissionModeSelect.value });
     });
     document.getElementById('closeSettingsBtn').addEventListener('click', () => {
       settingsDrawer.classList.remove('open');
@@ -1631,9 +1803,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       const thinkingIndicator = document.createElement('div');
       thinkingIndicator.className = 'msg-assistant thinking-bubble';
       thinkingIndicator.id = 'active-thinking-indicator';
-      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>LOMVREN is thinking...</span>';
+      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>Planning your request...</span>';
       mainScroll.appendChild(thinkingIndicator);
-      mainScroll.scrollTop = mainScroll.scrollHeight;
+      scrollToLatest(true);
 
       isBusy = true;
       sendBtn.textContent = 'Cancel';
@@ -1688,6 +1860,52 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
     let streamingBubble = null;
     let streamingText = '';
+    let followingLatest = true;
+
+    function scrollToLatest(force) {
+      if (!force && !followingLatest) {
+        jumpToLatest.hidden = false;
+        return;
+      }
+      mainScroll.scrollTop = mainScroll.scrollHeight;
+      followingLatest = true;
+      jumpToLatest.hidden = true;
+    }
+
+    mainScroll.addEventListener('scroll', () => {
+      followingLatest = mainScroll.scrollHeight - mainScroll.scrollTop - mainScroll.clientHeight <= 72;
+      jumpToLatest.hidden = followingLatest;
+    });
+    jumpToLatest.addEventListener('click', () => scrollToLatest(true));
+
+    function renderActivity(act) {
+      if (!act || typeof act !== 'object') return;
+      timelineContainer.style.display = 'flex';
+      let row = act.id ? document.getElementById('act-row-' + act.id) : null;
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'timeline-row';
+        if (act.id) row.id = 'act-row-' + act.id;
+        timelineContainer.appendChild(row);
+      }
+      const detailsOpen = !!row.querySelector('details')?.open;
+      const statusClass = act.status ? ' timeline-status ' + act.status : '';
+      const statusBadge = act.status ? '<span class="' + statusClass + '">' + escapeHtml(act.status) + '</span>' : '';
+      const durationText = act.durationMs ? ' (' + (act.durationMs / 1000).toFixed(1) + 's)' : '';
+      const detailSections = [];
+      if (act.details) {
+        const isModelResponse = typeof act.title === 'string' && act.title.startsWith('Visible model update');
+        detailSections.push('<div><strong>' + (isModelResponse ? 'Model response · user-visible' : 'Details') + '</strong><pre>' + escapeHtml(act.details) + '</pre></div>');
+      }
+      if (act.inputSummary) detailSections.push('<div><strong>' + (act.toolName === 'run_command' ? 'Command and arguments' : 'Model tool input') + '</strong><pre>' + escapeHtml(act.inputSummary) + '</pre></div>');
+      if (act.outputSummary) detailSections.push('<div><strong>' + (act.toolName === 'run_command' ? 'Command result' : 'Tool output') + '</strong><pre>' + escapeHtml(act.outputSummary) + '</pre></div>');
+      const detailsMarkup = detailSections.length
+        ? '<details class="timeline-details"' + (detailsOpen ? ' open' : '') + '><summary>Inspect run details</summary>' + detailSections.join('') + '</details>'
+        : '';
+      row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
+        '<span class="timeline-text">' + escapeHtml(act.title) + durationText + detailsMarkup + '</span>' + statusBadge;
+      scrollToLatest(false);
+    }
 
     // Inbound Messages
     window.addEventListener('message', (event) => {
@@ -1728,10 +1946,10 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           msg.messages.forEach(m => {
             const card = document.createElement('div');
             card.className = m.role === 'user' ? 'msg-user' : 'msg-assistant';
-            card.innerHTML = escapeHtml(m.content).replace(/\n/g, '<br>');
+            card.innerHTML = m.role === 'assistant' ? renderMarkdown(m.content) : escapeHtml(m.content).replace(/\\n/g, '<br>');
             mainScroll.appendChild(card);
           });
-          mainScroll.scrollTop = mainScroll.scrollHeight;
+          scrollToLatest(true);
         }
       }
 
@@ -1769,24 +1987,17 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         }
       }
 
+      if (msg.type === 'permissionMode' && permissionModeSelect) {
+        permissionModeSelect.value = msg.mode;
+      }
+
+      if (msg.type === 'activityHistory') {
+        timelineContainer.innerHTML = '';
+        (Array.isArray(msg.activities) ? msg.activities : []).forEach(renderActivity);
+      }
+
       if (msg.type === 'activity') {
-        const act = msg.activity;
-        timelineContainer.style.display = 'flex';
-        let row = act.id ? document.getElementById('act-row-' + act.id) : null;
-        if (!row) {
-          row = document.createElement('div');
-          row.className = 'timeline-row';
-          if (act.id) row.id = 'act-row-' + act.id;
-          timelineContainer.appendChild(row);
-        }
-        const statusClass = act.status ? ' timeline-status ' + act.status : '';
-        const statusBadge = act.status ? '<span class="' + statusClass + '">' + escapeHtml(act.status) + '</span>' : '';
-        const durationText = act.durationMs ? ' (' + (act.durationMs / 1000).toFixed(1) + 's)' : '';
-        const detailsText = act.details ? ' - ' + escapeHtml(act.details) : '';
-        row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
-          '<span class="timeline-text">' + escapeHtml(act.title) + durationText + detailsText + '</span>' +
-          statusBadge;
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        renderActivity(msg.activity);
       }
 
       if (msg.type === 'chunk') {
@@ -1798,8 +2009,8 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           streamingText = '';
         }
         streamingText += msg.content;
-        streamingBubble.innerHTML = escapeHtml(streamingText).replace(/\n/g, '<br>');
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        streamingBubble.innerHTML = renderMarkdown(streamingText);
+        scrollToLatest(false);
       }
 
       if (msg.type === 'proposal') {
@@ -1828,12 +2039,12 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           activeProposal.files.map(f => '<div>' + escapeHtml(f.path) + ' <span class="stat-add">+' + f.additions + '</span> <span class="stat-del">-' + f.deletions + '</span></div>').join('') +
           '</div>' +
           '<div class="artifact-actions">' +
-          '<button class="action-btn" id="apply-all-' + activeProposal.id + '">Apply All</button>' +
-          '<button class="action-btn secondary" id="review-diff-' + activeProposal.id + '">Review Diff</button>' +
+          '<button class="action-btn" id="apply-all-' + activeProposal.id + '">Accept changes</button>' +
+          '<button class="action-btn secondary" id="review-diff-' + activeProposal.id + '">Review diff</button>' +
           '<button class="action-btn secondary" id="reject-' + activeProposal.id + '">Reject</button>' +
           '</div>';
         mainScroll.appendChild(card);
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        scrollToLatest(false);
 
         const applyBtn = document.getElementById('apply-all-' + activeProposal.id);
         if (applyBtn) {
@@ -1866,15 +2077,16 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         card.className = 'permission-card';
         card.id = 'perm-' + req.id;
         card.innerHTML = '<div class="permission-title"><span>Permission Request: ' + escapeHtml(req.toolName) + '</span></div>' +
-          '<div class="permission-desc">' + escapeHtml(req.description || req.command || req.path || '') + '</div>' +
+          (req.command ? '<div class="permission-desc">' + escapeHtml(req.commandCategory || 'Command') + ' · runs in the current workspace</div><pre class="permission-command">' + escapeHtml(req.command) + '</pre>' :
+            req.path ? '<div class="permission-desc">File: ' + escapeHtml(req.path) + '</div>' :
+              '<div class="permission-desc">' + escapeHtml(req.description || req.category || 'Review this action before allowing it.') + '</div>') +
           '<div class="permission-actions">' +
           '<button class="action-btn" id="allow-' + req.id + '">Allow</button>' +
           '<button class="action-btn secondary" id="deny-' + req.id + '">Deny</button>' +
           '<button class="action-btn secondary" id="allow-session-' + req.id + '">Allow for Session</button>' +
-          '<button class="action-btn secondary" id="always-allow-' + req.id + '">Always Allow</button>' +
           '</div>';
         mainScroll.appendChild(card);
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        scrollToLatest(true);
 
         document.getElementById('allow-' + req.id)?.addEventListener('click', () => {
           vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'allow' });
@@ -1888,16 +2100,13 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'allow_session' });
           card.remove();
         });
-        document.getElementById('always-allow-' + req.id)?.addEventListener('click', () => {
-          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'always_allow' });
-          card.remove();
-        });
       }
 
       if (msg.type === 'artifact') {
         const art = msg.artifact;
         const card = document.createElement('div');
         card.className = 'artifact-card';
+        card.setAttribute('data-artifact-id', art.id);
         card.innerHTML = '<div class="artifact-header">' +
           '<div class="artifact-title"><span>' + escapeHtml(art.type) + '</span></div>' +
           '<span class="model-badge">' + escapeHtml(art.status) + '</span></div>' +
@@ -1906,7 +2115,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           (art.type === 'Implementation Plan' ? '<button class="action-btn" id="proceed-' + art.id + '">Proceed</button>' : '') +
           '</div>';
         mainScroll.appendChild(card);
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        scrollToLatest(false);
 
         const proceedBtn = document.getElementById('proceed-' + art.id);
         if (proceedBtn) {
@@ -1914,6 +2123,38 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
             vscode.postMessage({ type: 'proceedArtifact', artifactId: art.id });
           });
         }
+      }
+
+      if (msg.type === 'artifactUpdated' && msg.artifact) {
+        const cards = mainScroll.querySelectorAll('.artifact-card');
+        cards.forEach(function (c) {
+          if (c.getAttribute('data-artifact-id') === msg.artifact.id) {
+            const badge = c.querySelector('.model-badge');
+            if (badge) { badge.textContent = msg.artifact.status; }
+            if (msg.artifact.status === 'approved') {
+              const btn = c.querySelector('button.action-btn');
+              if (btn) { btn.disabled = true; btn.textContent = 'Approved'; }
+            }
+          }
+        });
+      }
+
+      if (msg.type === 'editResult') {
+        const card = document.createElement('div');
+        card.className = 'msg-assistant';
+        const ok = !!msg.success;
+        const applied = msg.applied === undefined ? ok : !!msg.applied;
+        const label = applied ? msg.validationPassed === false ? 'Changes applied · checks failed' : 'Changes applied' : 'Changes not applied';
+        const color = applied ? msg.validationPassed === false ? 'var(--vscode-editorWarning-foreground, #cca700)' : 'var(--vscode-testing-iconPassed, #73c991)' : 'var(--vscode-errorForeground, #f48771)';
+        card.style.borderLeft = '3px solid ' + color;
+        card.innerHTML = '<div style=\"font-weight:600; margin-bottom:4px;\">' + label + '</div>' +
+          '<div style=\"font-size:12px; line-height:1.4;\">' + escapeHtml(msg.summary || '') + '</div>';
+        mainScroll.appendChild(card);
+        scrollToLatest(false);
+        activeProposal = null;
+        changesBadge.textContent = '0';
+        proposalSummary.textContent = 'No pending changes';
+        diffFileList.innerHTML = '';
       }
 
       if (msg.type === 'userMessage') {
@@ -1924,7 +2165,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           card.className = 'msg-user';
           card.textContent = msg.content;
           mainScroll.appendChild(card);
-          mainScroll.scrollTop = mainScroll.scrollHeight;
+          scrollToLatest(false);
         }
       }
 
@@ -1934,16 +2175,16 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         removeThinkingIndicator();
         if (streamingBubble) {
           streamingBubble.classList.remove('streaming');
-          streamingBubble.innerHTML = escapeHtml(msg.fullResponse || streamingText).replace(/\n/g, '<br>');
+          streamingBubble.innerHTML = renderMarkdown(msg.fullResponse || streamingText);
           streamingBubble = null;
           streamingText = '';
         } else if (msg.fullResponse) {
           const card = document.createElement('div');
           card.className = 'msg-assistant';
-          card.innerHTML = escapeHtml(msg.fullResponse).replace(/\n/g, '<br>');
+          card.innerHTML = renderMarkdown(msg.fullResponse);
           mainScroll.appendChild(card);
         }
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        scrollToLatest(false);
       }
 
       if (msg.type === 'error') {
@@ -1962,14 +2203,64 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         const isConnError = msg.message && (msg.message.includes('Ollama') || msg.message.includes('connect') || msg.message.includes('fetch'));
         card.innerHTML = '<div style="color:var(--vscode-errorForeground, #f48771); font-weight:600; margin-bottom:4px;">Task Failed</div>' +
           '<div style="font-size:12px; line-height:1.4;">' + escapeHtml(msg.message || 'Unknown error') + '</div>' +
-          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\'ollama serve\'). Try running <code>LOMVREN: Doctor</code> from the command palette.</div>' : '');
+          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\\'ollama serve\\'). Try running <code>LOMVREN: Doctor</code> from the command palette.</div>' : '');
         mainScroll.appendChild(card);
-        mainScroll.scrollTop = mainScroll.scrollHeight;
+        scrollToLatest(false);
       }
     });
 
     function escapeHtml(str) {
       return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function renderMarkdown(value) {
+      const lines = String(value || '').replace(/\\r/g, '').split('\\n');
+      const blocks = [];
+      let paragraph = [];
+      let code = [];
+      let inCode = false;
+      const codeFence = String.fromCharCode(96, 96, 96);
+      const inline = (text) => escapeHtml(text)
+        .replace(new RegExp(String.fromCharCode(96) + '([^' + String.fromCharCode(96) + ']+)' + String.fromCharCode(96), 'g'), '<code>$1</code>')
+        .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
+        .replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+      const flushParagraph = () => {
+        if (paragraph.length) {
+          blocks.push('<p>' + paragraph.map(inline).join('<br>') + '</p>');
+          paragraph = [];
+        }
+      };
+      for (const line of lines) {
+        if (line.startsWith(codeFence)) {
+          if (inCode) {
+            blocks.push('<pre><code>' + escapeHtml(code.join('\\n')) + '</code></pre>');
+            code = [];
+            inCode = false;
+          } else {
+            flushParagraph();
+            inCode = true;
+          }
+          continue;
+        }
+        if (inCode) { code.push(line); continue; }
+        if (!line.trim()) { flushParagraph(); continue; }
+        const heading = /^(#{1,3})\\s+(.+)$/.exec(line);
+        if (heading) {
+          flushParagraph();
+          const level = heading[1].length;
+          blocks.push('<h' + level + '>' + inline(heading[2]) + '</h' + level + '>');
+          continue;
+        }
+        if (/^[-*]\\s+/.test(line)) {
+          flushParagraph();
+          blocks.push('<ul><li>' + inline(line.replace(/^[-*]\\s+/, '')) + '</li></ul>');
+          continue;
+        }
+        paragraph.push(line);
+      }
+      if (inCode) blocks.push('<pre><code>' + escapeHtml(code.join('\\n')) + '</code></pre>');
+      flushParagraph();
+      return blocks.join('');
     }
 
     vscode.postMessage({ type: 'ready' });

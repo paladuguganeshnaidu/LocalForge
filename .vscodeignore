@@ -9,3 +9,16 @@ tsconfig.json
 *.vsix
 .agents/**
 scratch/**
+artifacts/**
+coverage/**
+docs/**
+scripts/**
+*.log
+*.patch
+*.zip
+.git/**
+.DS_Store
+package-lock.json
+node_modules/**
+dist/**
+!dist/extension.bundle.js

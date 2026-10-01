@@ -113,7 +113,13 @@ export class CompositeProvider implements ModelProvider {
     await route.provider.streamChat(route.actualName, messages, onToken, signal);
   }
 
-  async chatWithTools(model: string, messages: ChatMessage[], tools: ModelToolDefinition[], signal?: AbortSignal): Promise<ChatMessage> {
+  async chatWithTools(
+    model: string,
+    messages: ChatMessage[],
+    tools: ModelToolDefinition[],
+    signal?: AbortSignal,
+    onContentDelta?: (delta: string) => void
+  ): Promise<ChatMessage> {
     let route = this.resolveRoute(model);
     if (!route) {
       await this.listModels();
@@ -121,7 +127,7 @@ export class CompositeProvider implements ModelProvider {
     }
     if (!route) throw new Error('The selected model is no longer available. Refresh the model list and try again.');
     if (!route.provider.chatWithTools) throw new Error(`Provider ${route.provider.id} does not support agent tool calls.`);
-    return route.provider.chatWithTools(route.actualName, messages, tools, signal);
+    return route.provider.chatWithTools(route.actualName, messages, tools, signal, onContentDelta);
   }
 
   addProvider(provider: ModelProvider): void {

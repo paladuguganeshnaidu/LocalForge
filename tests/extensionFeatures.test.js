@@ -37,6 +37,11 @@ test('isWebviewMessage accepts valid control messages', () => {
   assert.equal(isWebviewMessage({ type: 'setMode', mode: 'plan' }), true);
   assert.equal(isWebviewMessage({ type: 'setMode', mode: 'ask' }), true);
   assert.equal(isWebviewMessage({ type: 'setMode', mode: 'invalid' }), false);
+  assert.equal(isWebviewMessage({ type: 'setPermissionMode', mode: 'always_ask' }), true);
+  assert.equal(isWebviewMessage({ type: 'setPermissionMode', mode: 'unknown' }), false);
+  assert.equal(isWebviewMessage({ type: 'permissionResolved', requestId: 'perm-1', decision: 'allow' }), true);
+  assert.equal(isWebviewMessage({ type: 'permissionResolved', requestId: 'perm-1', decision: 'allow_session' }), true);
+  assert.equal(isWebviewMessage({ type: 'permissionResolved', requestId: 'perm-1', decision: 'always_allow' }), false);
 });
 
 test('isWebviewMessage validates chat payloads and rejects invalid inputs', () => {

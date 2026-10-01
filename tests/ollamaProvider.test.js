@@ -20,13 +20,19 @@ before(async () => {
       let body = '';
       request.on('data', (chunk) => { body += chunk; });
       request.on('end', () => {
-        if (!JSON.parse(body).stream) {
+        const input = JSON.parse(body);
+        if (!input.stream) {
           response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ message: {
             role: 'assistant', content: '', tool_calls: [{ function: { name: 'search_workspace', arguments: { query: 'parser' } } }]
           } }));
           return;
         }
         response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+        if (input.tools?.length) {
+          response.write(JSON.stringify({ message: { content: 'Inspecting ' } }) + '\n');
+          response.end(JSON.stringify({ message: { tool_calls: [{ function: { name: 'search_workspace', arguments: { query: 'parser' } } }] }, done: true }) + '\n');
+          return;
+        }
         response.write('{"message":{"content":"O"}}\n');
         response.write('{"message":{"content":"K"}}\n');
         response.end('{"done":true}\n');
@@ -65,6 +71,34 @@ test('streams chat tokens in order', async () => {
 test('decodes Ollama tool calls without streaming', async () => {
   const provider = new OllamaProvider(baseUrl);
   const message = await provider.chatWithTools('qwen:test', [{ role: 'user', content: 'find parser' }], []);
+  assert.equal(message.tool_calls[0].function.name, 'search_workspace');
+  assert.deepEqual(message.tool_calls[0].function.arguments, { query: 'parser' });
+});
+
+test('streams compact Ollama model text through the text-tool fallback', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  let visible = '';
+  const message = await provider.chatWithTools('qwen2.5-coder:1.5b', [{ role: 'user', content: 'Reply OK' }], [], undefined, (delta) => {
+    visible += delta;
+  });
+
+  assert.equal(visible, 'OK');
+  assert.equal(message.content, 'OK');
+});
+
+test('streams Ollama native tool calls and visible assistant text', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  let visible = '';
+  const message = await provider.chatWithTools(
+    'qwen:test',
+    [{ role: 'user', content: 'Search for parser' }],
+    [{ type: 'function', function: { name: 'search_workspace', description: 'Search', parameters: {} } }],
+    undefined,
+    (delta) => { visible += delta; }
+  );
+
+  assert.equal(visible, 'Inspecting ');
+  assert.equal(message.content, 'Inspecting ');
   assert.equal(message.tool_calls[0].function.name, 'search_workspace');
   assert.deepEqual(message.tool_calls[0].function.arguments, { query: 'parser' });
 });

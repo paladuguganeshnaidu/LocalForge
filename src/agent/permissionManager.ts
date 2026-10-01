@@ -6,6 +6,11 @@ export type PermissionMode =
   | 'ask_once_per_session'
   | 'always_ask';
 
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === 'request_review' || value === 'allow_safe_auto' || value === 'always_proceed' ||
+    value === 'ask_once_per_session' || value === 'always_ask';
+}
+
 export type CommandCategory =
   | 'read-only'
   | 'test'
@@ -33,6 +38,8 @@ export type ApprovalHandler = (request: PermissionRequest) => Promise<boolean>;
 
 const DESTRUCTIVE_COMMAND_PATTERNS = [
   /\brm\s+-rf\s+[\/\\]/i,
+  // rm with any flag order/spacing aimed at the filesystem root or the home directory
+  /\brm\s+(?:-[a-z-]+\s+)+(?:~|\$home|\$\{home\}|\/)/i,
   /\bdel\s+.*[a-z]:\\/i,
   /\bformat\s+[a-z]:/i,
   /\bmkfs\b/i,
@@ -41,6 +48,30 @@ const DESTRUCTIVE_COMMAND_PATTERNS = [
   />\s*\/dev\/sd[a-z]/i,
   /\bshutdown\b/i,
   /\breboot\b/i
+];
+
+// Commands that are not catastrophic (so they can still run) but must never be
+// auto-approved, not even in "always proceed" mode: the user has to confirm each one.
+const HIGH_RISK_COMMAND_PATTERNS = [
+  /\brm\s+\S/i,
+  /\bgit\s+push\b/i,
+  /\bgit\s+reset\s+.*--hard\b/i,
+  /\bgit\s+clean\b/i,
+  /\bgit\s+checkout\s+(?:--\s+)?\.(?:\s|$)/i,
+  /\bgit\s+branch\s+.*-[dD]\b/i,
+  /\bgit\s+(?:rebase|filter-branch|update-ref|gc\s+--prune)/i,
+  /\bchmod\s+-r\b|\bchown\s+-r\b/i,
+  /\b(?:curl|wget)\b.*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b/i,
+  /\bsudo\b/i,
+  /\bnpm\s+(?:publish|unpublish|login|adduser|token)\b/i,
+  /\b(?:id_rsa|id_ed25519)\b|\.ssh[\/\\]|\.aws[\/\\]credentials|\/etc\/(?:passwd|shadow)|\.npmrc|\.env\b/i
+];
+
+// Flags that turn an otherwise read-only git/node/npm command into code execution or a file write.
+const UNSAFE_AUTO_FLAGS: Array<{ command: RegExp; flag: RegExp }> = [
+  { command: /^git\b/, flag: /(?:^|\s)(?:-c|-C|--output(?:=|\s|$)|--ext-diff|--textconv|--exec-path|--upload-pack|--receive-pack|--config-env|--git-dir|--work-tree|--no-index)/ },
+  { command: /^node\b/, flag: /(?:^|\s)(?:-e|--eval|-p|--print|-r|--require|--import|--input-type|--loader|--experimental-loader|-)(?:=|\s|$)/ },
+  { command: /^npm\b/, flag: /(?:^|\s)(?:--prefix|--userconfig|--globalconfig|--script-shell|--registry|--ignore-scripts=false)(?:=|\s|$)/ }
 ];
 
 const SHELL_OPERATORS = [
@@ -175,6 +206,11 @@ export class PermissionManager {
     }
   }
 
+  public isHighRiskCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase();
+    return HIGH_RISK_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
+  }
+
   public isSafeCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
     try {
@@ -188,6 +224,27 @@ export class PermissionManager {
       return false;
     }
 
+    // Newlines separate commands in most shells but are not in SHELL_OPERATORS
+    if (/[\r\n]/.test(command)) {
+      return false;
+    }
+
+    // Reject flags that execute code or write files (git --output, node -e, npm --prefix ...)
+    for (const rule of UNSAFE_AUTO_FLAGS) {
+      if (rule.command.test(normalized) && rule.flag.test(normalized)) {
+        return false;
+      }
+    }
+
+    // `git branch` may create/delete/rename branches; only allow the listing forms
+    if (/^git\s+branch\b/.test(normalized)) {
+      const args = normalized.replace(/^git\s+branch\s*/, '').split(/\s+/).filter(Boolean);
+      const listingOnly = args.every((a) => ['-a', '-r', '-v', '-vv', '--list', '--show-current', '--all', '--remotes'].includes(a));
+      if (!listingOnly) {
+        return false;
+      }
+    }
+
     return SAFE_TEST_BUILD_COMMAND_PREFIXES.some(
       (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `)
     );
@@ -197,15 +254,24 @@ export class PermissionManager {
     return this.mode === 'always_proceed';
   }
 
-  public async checkPermission(toolName: string, args: Record<string, unknown>): Promise<boolean> {
-    const category = this.classifyTool(toolName);
+  public async checkPermission(
+    toolName: string,
+    args: Record<string, unknown>,
+    trustedBuiltinReadOnly = false
+  ): Promise<boolean> {
+    const category = trustedBuiltinReadOnly ? 'read' : this.classifyTool(toolName);
 
     // 0. Always proceed mode: auto allow after validating safety
     if (this.mode === 'always_proceed') {
       if (toolName === 'run_command' && typeof args.command === 'string') {
         this.validateCommandSafety(args.command);
+        // Commands outside the reviewed safe allow-list require explicit approval.
+        if (this.isSafeCommand(args.command)) {
+          return true;
+        }
+      } else {
+        return true;
       }
-      return true;
     }
 
     // 1. Read operations: auto allowed in request_review, allow_safe_auto, and ask_once_per_session

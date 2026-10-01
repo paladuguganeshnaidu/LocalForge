@@ -31,7 +31,8 @@ test('AgentLoop honors maxRounds step limits without infinite loops', async () =
   });
 
   assert.equal(calls, 3);
-  assert.match(result.response, /reached the step limit/);
+  assert.match(result.response, /did not provide a written summary/i);
+  assert.match(result.response, /Completed search_workspace/);
   assert.equal(result.state.steps.length, 3);
   assert.equal(result.state.status, 'completed');
 });
@@ -89,7 +90,8 @@ test('AgentLoop captures structured errors when tool execution fails', async () 
   const loop = new AgentLoop(provider, registry);
   const result = await loop.run('test-model', [{ role: 'user', content: 'Run tool' }]);
 
-  assert.equal(result.response, 'Handled failure cleanly.');
+  assert.match(result.response, /Handled failure cleanly/);
+  assert.match(result.response, /tool actions failed/i);
   assert.equal(result.state.errors.length, 1);
   assert.match(result.state.errors[0], /Disk full/);
 });

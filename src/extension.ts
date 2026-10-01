@@ -306,10 +306,11 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
   return { engine, viewProvider };
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
   if (engineInstance) {
     void engineInstance.remoteManager.disconnect();
     engineInstance.cancelCurrentTask();
+    await engineInstance.flushActivityHistory();
   }
 }
 

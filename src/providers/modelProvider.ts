@@ -50,6 +50,7 @@ export interface ModelProvider {
     model: string,
     messages: ChatMessage[],
     tools: ModelToolDefinition[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onContentDelta?: (delta: string) => void
   ): Promise<ChatMessage>;
 }

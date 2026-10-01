@@ -26,20 +26,8 @@ test('webview script contains 100% valid browser JavaScript without TypeScript s
     'Webview script must NOT contain TypeScript "as unknown" syntax'
   );
 
-  // 2. Write to a temporary file and run node --check
-  const tempScriptPath = path.join(__dirname, 'temp_webview_extracted.js');
-  try {
-    fs.writeFileSync(tempScriptPath, scriptContent, 'utf8');
-    const result = cp.spawnSync(process.execPath, ['--check', tempScriptPath], {
-      encoding: 'utf8'
-    });
-
-    if (result.status !== 0) {
-      assert.fail(`Webview JavaScript syntax error:\n${result.stderr || result.stdout}`);
-    }
-  } finally {
-    if (fs.existsSync(tempScriptPath)) {
-      fs.unlinkSync(tempScriptPath);
-    }
-  }
+  // 2. Syntax validity is asserted in webviewRenderedScript.test.js against the
+  // RENDERED html. The raw .ts text is a template literal, so running node --check
+  // on it here validates the wrong string (escapes like \\n and \\' are consumed at
+  // render time) and previously let a fatal webview syntax error ship.
 });
