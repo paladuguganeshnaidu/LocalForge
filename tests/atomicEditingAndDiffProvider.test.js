@@ -56,6 +56,7 @@ Module._load = function (request, parent, isMain) {
   if (request === 'vscode') {
     return {
       FileSystemError,
+      FileType: { File: 1, Directory: 2, SymbolicLink: 64 },
       EventEmitter,
       WorkspaceEdit,
       Range,
@@ -75,6 +76,11 @@ Module._load = function (request, parent, isMain) {
           return true;
         },
         fs: {
+          stat: async (uri) => {
+            const key = uri.fsPath.replace(/\\/g, '/');
+            if (!memoryFs.has(key)) throw new FileSystemError('Missing file');
+            return { type: 1, size: memoryFs.get(key).length };
+          },
           readFile: async (uri) => {
             const pathKey = (uri.fsPath || uri.path || String(uri)).replace(/\\/g, '/');
             if (!memoryFs.has(pathKey)) {
@@ -138,6 +144,8 @@ test('ProposedContentProvider provides proposed content for diff view', async ()
   const uriPkg = vscode.Uri.parse(`localforge-proposed:package.json?proposal=${proposal.id}`);
   const contentPkg = provider.provideTextDocumentContent(uriPkg);
   assert.equal(contentPkg, '{"name": "smoke"}');
+  const originalNewFile = vscode.Uri.parse(`localforge-proposed:package.json?proposal=${proposal.id}&side=original`);
+  assert.equal(provider.provideTextDocumentContent(originalNewFile), '');
 
   const uriUnknown = vscode.Uri.parse(`localforge-proposed:unknown.js?proposal=${proposal.id}`);
   assert.equal(provider.provideTextDocumentContent(uriUnknown), '');

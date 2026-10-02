@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { lstat } from 'node:fs/promises';
 import { assertWorkspaceFilePath, validateWorkspaceRelativePath } from '../core/workspacePaths';
 import { createUnifiedDiff } from './diffService';
 import {
@@ -24,6 +25,19 @@ export interface FileEditPlan {
   deletions: number;
   status: EditStatus;
   error?: string;
+  operation?: 'write' | 'create' | 'delete';
+  moveSourcePath?: string;
+  moveDestinationPath?: string;
+  binary?: boolean;
+}
+
+export interface FileEditInput {
+  path: string;
+  newContent: string;
+  operation?: 'write' | 'create' | 'delete';
+  moveSourcePath?: string;
+  moveDestinationPath?: string;
+  expectedOriginalHash?: string;
 }
 
 export interface EditProposal {
@@ -88,7 +102,7 @@ export class EditEngine {
    */
   public async proposeEdits(
     workspaceRoot: vscode.Uri,
-    edits: Array<{ path: string; newContent: string }>,
+    edits: FileEditInput[],
     summary: string = 'Multi-file code changes',
     metadata?: { conversationId?: string; turnId?: string },
     signal?: AbortSignal
@@ -113,14 +127,20 @@ export class EditEngine {
       targetPaths.add(normalizedPath);
       const uri = vscode.Uri.joinPath(workspaceRoot, ...segments);
       if (uri.scheme === 'file') await assertWorkspaceFilePath(workspaceRoot.fsPath, uri.fsPath, true);
+      if (!['write', 'create', 'delete'].includes(edit.operation ?? 'write')) throw new Error('Unsupported file operation.');
+      if (edit.operation === 'delete' && edit.newContent !== '') throw new Error('Deletion proposals cannot contain replacement text.');
       this.assertNoUnsavedChanges(uri);
       let originalContent = '';
       let originalState: FileOriginalState = 'missing';
       let hash = '';
+      let binary = false;
 
       try {
+        await this.assertRegularFileTarget(uri, false);
         const bytes = await vscode.workspace.fs.readFile(uri);
-        originalContent = new TextDecoder().decode(bytes);
+        if (bytes.includes(0) && edit.operation !== 'delete') throw new Error('Binary files can be moved or deleted, but cannot be replaced by a text edit.');
+        binary = bytes.includes(0);
+        originalContent = binary ? `Binary file (${bytes.length} bytes). Binary contents are not rendered in text previews.` : new TextDecoder().decode(bytes);
         originalState = 'present';
         hash = computeContentHash(bytes);
         originals.set(edit.path, Uint8Array.from(bytes));
@@ -131,8 +151,13 @@ export class EditEngine {
         originals.set(edit.path, new Uint8Array());
       }
 
+      if (edit.operation === 'create' && originalState !== 'missing') throw new Error(`File ${edit.path} already exists. No creation was proposed.`);
+      if (edit.operation === 'delete' && originalState !== 'present') throw new Error(`File ${edit.path} does not exist. No deletion was proposed.`);
+      if (edit.expectedOriginalHash !== undefined && hash !== edit.expectedOriginalHash) throw new Error(`File ${edit.path} changed while the edit was prepared. Read it again before retrying.`);
+
       signal?.throwIfAborted();
-      const diff = createUnifiedDiff(edit.path, originalContent, edit.newContent);
+      const diff = binary ? { patch: `Binary file operation: ${edit.path}. Binary contents are not rendered in text previews.`, stats: { additions: 0, deletions: 0 } }
+        : createUnifiedDiff(edit.path, originalContent, edit.newContent);
 
       originalHashes[edit.path] = hash;
       patches[edit.path] = diff.patch;
@@ -150,9 +175,34 @@ export class EditEngine {
         patch: diff.patch,
         additions: diff.stats.additions,
         deletions: diff.stats.deletions,
-        status: 'pending'
+        status: 'pending',
+        operation: edit.operation ?? 'write',
+        moveSourcePath: edit.moveSourcePath,
+        moveDestinationPath: edit.moveDestinationPath,
+        binary
       });
     }
+
+    for (const file of filePlans) {
+      if (file.moveDestinationPath) {
+        const destination = filePlans.find((candidate) => candidate.path === file.moveDestinationPath);
+        if (file.operation !== 'delete' || destination?.operation !== 'create' || destination.moveSourcePath !== file.path) throw new Error('A file move requires its matching source and destination.');
+      }
+      if (file.moveSourcePath) {
+        const source = filePlans.find((candidate) => candidate.path === file.moveSourcePath);
+        if (file.operation !== 'create' || source?.operation !== 'delete' || source.moveDestinationPath !== file.path) throw new Error('A file move requires its matching source and destination.');
+        file.binary = source.binary;
+        file.newContent = source.binary ? source.originalContent : new TextDecoder().decode(originals.get(source.path)!);
+        const diff = source.binary ? { patch: `Binary file move: ${source.path} to ${file.path}. Binary contents are not rendered in text previews.`, stats: { additions: 0, deletions: 0 } }
+          : createUnifiedDiff(file.path, '', file.newContent);
+        file.patch = diff.patch;
+        file.additions = diff.stats.additions;
+        file.deletions = diff.stats.deletions;
+        patches[file.path] = diff.patch;
+      }
+    }
+    totalAdditions = filePlans.reduce((total, file) => total + file.additions, 0);
+    totalDeletions = filePlans.reduce((total, file) => total + file.deletions, 0);
 
     const proposal: EditProposal = {
       id: proposalId,
@@ -172,6 +222,13 @@ export class EditEngine {
     this.proposalRoots.set(proposalId, workspaceRoot);
     this.originalBytes.set(proposalId, originals);
     return proposal;
+  }
+
+  public async proposeMove(workspaceRoot: vscode.Uri, sourcePath: string, destinationPath: string, signal?: AbortSignal): Promise<EditProposal> {
+    return this.proposeEdits(workspaceRoot, [
+      { path: sourcePath, newContent: '', operation: 'delete', moveDestinationPath: destinationPath },
+      { path: destinationPath, newContent: '', operation: 'create', moveSourcePath: sourcePath }
+    ], `Move ${sourcePath} to ${destinationPath}`, undefined, signal);
   }
 
   public getProposal(proposalId: string): EditProposal | undefined {
@@ -196,11 +253,14 @@ export class EditEngine {
     const filePlan = proposal.files.find((f) => f.path === filePath);
     if (!filePlan) throw new Error(`File ${filePath} not in proposal.`);
 
-    const tempDocUri = vscode.Uri.parse(`localforge-proposed:${filePath}?proposal=${proposalId}`);
+    const query = new URLSearchParams({ proposal: proposalId }).toString();
+    const encodedPath = encodeURI(filePath).replace(/#/g, '%23');
+    const tempDocUri = vscode.Uri.parse(`localforge-proposed:${encodedPath}?${query}`);
+    const originalUri = vscode.Uri.parse(`localforge-proposed:${encodedPath}?${query}&side=original`);
 
     await vscode.commands.executeCommand(
       'vscode.diff',
-      filePlan.uri,
+      originalUri,
       tempDocUri,
       `${filePath} (Proposed Changes)`
     );
@@ -244,6 +304,10 @@ export class EditEngine {
     const filesToApply = proposal.files.filter((file) =>
       (file.status === 'pending' || file.status === 'approved') && (!targetPaths || targetPaths.has(file.path)));
     if (!filesToApply.length) throw new Error('No pending proposal files were selected.');
+    for (const file of filesToApply) {
+      const linked = file.moveSourcePath ?? file.moveDestinationPath;
+      if (linked && !filesToApply.some((candidate) => candidate.path === linked)) throw new Error('Select both the source and destination when accepting a file move.');
+    }
 
     const result: EditApplyResult = {
       proposalId,
@@ -261,6 +325,7 @@ export class EditEngine {
     for (const file of filesToApply) {
       signal?.throwIfAborted();
       if (file.uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, file.uri.fsPath, file.originalState === 'missing');
+      await this.assertRegularFileTarget(file.uri, file.originalState === 'missing');
       this.assertNoUnsavedChanges(file.uri);
       const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
       file.currentHash = validation.currentHash;
@@ -286,7 +351,13 @@ export class EditEngine {
       signal?.throwIfAborted();
       const workspaceEdit = new vscode.WorkspaceEdit();
       for (const file of filesToApply) {
-        if (file.originalState === 'missing') {
+        if (file.moveSourcePath) continue;
+        if (file.moveDestinationPath) {
+          const destination = filesToApply.find((candidate) => candidate.path === file.moveDestinationPath)!;
+          workspaceEdit.renameFile(file.uri, destination.uri, { overwrite: false, ignoreIfExists: false });
+        } else if (file.operation === 'delete') {
+          workspaceEdit.deleteFile(file.uri, { recursive: false, ignoreIfNotExists: false });
+        } else if (file.originalState === 'missing') {
           workspaceEdit.createFile(file.uri, {
             ignoreIfExists: false,
             overwrite: false,
@@ -312,14 +383,18 @@ export class EditEngine {
           originalState: file.originalState,
           originalBytes: Buffer.from(this.originalBytes.get(proposalId)!.get(file.path)!).toString('base64'),
           originalHash: file.originalHash,
-          expectedHash: computeContentHash(Buffer.from(file.newContent, 'utf8')),
-          reverted: false
+          expectedHash: file.operation === 'delete' ? '' : file.moveSourcePath
+            ? proposal.files.find((candidate) => candidate.path === file.moveSourcePath)!.originalHash
+            : computeContentHash(Buffer.from(file.newContent, 'utf8')),
+          reverted: false,
+          linkedPath: file.moveSourcePath ?? file.moveDestinationPath
         }))
       });
       result.recoveryId = recovery.id;
       for (const file of filesToApply) {
         signal?.throwIfAborted();
         if (file.uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, file.uri.fsPath, file.originalState === 'missing');
+        await this.assertRegularFileTarget(file.uri, file.originalState === 'missing');
         this.assertNoUnsavedChanges(file.uri);
         const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
         if (!validation.valid) throw new Error(`The file ${file.path} changed while its recovery snapshot was saved. No edits were submitted.`);
@@ -332,6 +407,13 @@ export class EditEngine {
 
       const committed: Array<{ path: string; expectedHash: string }> = [];
       for (const file of filesToApply) {
+        if (file.operation === 'delete' || file.moveSourcePath) {
+          const expectedHash = recovery.files.find((candidate) => candidate.path === file.path)!.expectedHash;
+          if (await computeFileHash(file.uri) !== expectedHash) throw new Error(`The file operation for ${file.path} did not produce the expected state. Inspect the retained recovery record.`);
+          committed.push({ path: file.path, expectedHash });
+          await this.journal.update(recovery.id, 'prepared', [{ path: file.path, expectedHash }]);
+          continue;
+        }
         let expectedText = file.newContent;
         if (file.originalState === 'present') {
           const document = await vscode.workspace.openTextDocument(file.uri);
@@ -387,6 +469,9 @@ export class EditEngine {
       if (paths && Array.from(paths).some((path) => !record.files.some((file) => file.path === path))) throw new Error('The rollback selection contains an unknown file.');
       const files = record.files.filter((file) => !file.reverted && (!paths || paths.has(file.path)));
       if (!files.length) throw new Error('No recoverable files were selected.');
+      for (const file of files) {
+        if (file.linkedPath && !files.some((candidate) => candidate.path === file.linkedPath) && !record.files.find((candidate) => candidate.path === file.linkedPath)?.reverted) throw new Error('Select both the source and destination when restoring a file move.');
+      }
       const result: EditRollbackResult = { recoveryId, success: false, restoredFiles: [], unchangedFiles: [], conflicts: [] };
       const targets: Array<{ file: typeof files[number]; uri: vscode.Uri }> = [];
       for (const file of files) {
@@ -394,6 +479,7 @@ export class EditEngine {
         const uri = vscode.Uri.joinPath(root, ...validateWorkspaceRelativePath(file.path));
         try {
           if (uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, uri.fsPath, true);
+          await this.assertRegularFileTarget(uri, true);
           this.assertNoUnsavedChanges(uri);
           const currentHash = await computeFileHash(uri);
           if (currentHash === file.originalHash) {
@@ -442,6 +528,20 @@ export class EditEngine {
     }
   }
 
+  private async assertRegularFileTarget(uri: vscode.Uri, allowMissing: boolean): Promise<void> {
+    try {
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.size > 8 * 1024 * 1024) throw new Error('Reviewed file operations are limited to 8 MiB per file.');
+      if (stat.type !== undefined && stat.type !== vscode.FileType.File) throw new Error('Reviewed file operations require a regular file, not a directory or symbolic link.');
+      if (uri.scheme === 'file') {
+        const entry = await lstat(uri.fsPath);
+        if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('Reviewed file operations require a regular file, not a directory or symbolic link.');
+      }
+    } catch (error) {
+      if (!allowMissing || !['ENOENT', 'FileNotFound'].includes((error as { code?: string }).code ?? '')) throw error;
+    }
+  }
+
   private assertNoUnsavedChanges(uri: vscode.Uri): void {
     const document = vscode.workspace.textDocuments?.find((candidate) => candidate.uri.toString() === uri.toString());
     if (document?.isDirty) throw new Error('Save or discard your unsaved changes to this file before generating or applying an edit proposal.');
@@ -476,7 +576,7 @@ export class ProposedContentProvider implements vscode.TextDocumentContentProvid
     if (!proposal) return '';
     const rawPath = uri.path.replace(/^\//, '');
     const file = proposal.files.find((f) => f.path === rawPath || f.path === uri.path);
-    return file ? file.newContent : '';
+    return file ? new URLSearchParams(uri.query).get('side') === 'original' ? file.originalContent : file.newContent : '';
   }
 
   public update(uri: vscode.Uri): void {

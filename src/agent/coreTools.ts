@@ -3,7 +3,8 @@ import { assertWorkspaceFilePath, validateWorkspaceRelativePath } from '../core/
 import { exec, execFile } from 'node:child_process';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { ToolRegistry } from './toolRegistry';
-import { EditEngine } from '../editing/editEngine';
+import { EditEngine, EditProposal } from '../editing/editEngine';
+import { computeContentHash } from '../editing/patchService';
 import { TerminalManager } from '../terminal/terminalManager';
 import { ArtifactManager } from '../core/artifactManager';
 import { BrowserTool } from '../browser/browserTool';
@@ -148,24 +149,12 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
-      const content = typeof args.content === 'string' ? args.content : '';
-      if (content.length > maximumWriteBytes) throw new Error('File content exceeds 512KB limit.');
-
-      if (context.editEngine) {
-        const root = getWorkspaceRootUri();
-        const proposal = await context.editEngine.proposeEdits(root, [{ path: relPath, newContent: content }], `Write ${relPath}`, undefined, execution.signal);
-        if (typeof context.autoApply === 'function' ? context.autoApply() : context.autoApply) {
-          execution.signal.throwIfAborted();
-          const res = await context.editEngine.applyProposal(proposal.id, undefined, execution.signal);
-          return { success: res.success, path: relPath, applied: true, proposalId: proposal.id };
-        }
-        return { success: true, path: relPath, proposed: true, proposalId: proposal.id };
-      }
-
-      const uri = await resolveWorkspaceUri(relPath, true);
+      const content = getFileContent(args.content, 'content');
+      await resolveWorkspaceUri(relPath, true);
       execution.signal.throwIfAborted();
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-      return { success: true, path: relPath, bytesWritten: content.length };
+      const editEngine = requireEditEngine(context);
+      const proposal = await editEngine.proposeEdits(getWorkspaceRootUri(), [{ path: relPath, newContent: content }], `Write ${relPath}`, undefined, execution.signal);
+      return submitFileProposal(context, proposal, { path: relPath }, execution.signal);
     },
     { category: 'edit', riskLevel: 'low_risk' }
   );
@@ -190,20 +179,13 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
-      const content = typeof args.content === 'string' ? args.content : '';
-      if (content.length > maximumWriteBytes) throw new Error('File content exceeds 512KB limit.');
-      const uri = await resolveWorkspaceUri(relPath, true);
-
-      try {
-        await vscode.workspace.fs.stat(uri);
-        throw new Error(`File ${relPath} already exists. Use write_file to overwrite.`);
-      } catch (err: any) {
-        if (!['ENOENT', 'FileNotFound'].includes(err.code)) throw err;
-      }
-
+      const content = getFileContent(args.content, 'content');
+      await resolveWorkspaceUri(relPath, true);
       execution.signal.throwIfAborted();
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-      return { success: true, path: relPath, created: true, bytesWritten: content.length };
+      const proposal = await requireEditEngine(context).proposeEdits(getWorkspaceRootUri(), [
+        { path: relPath, newContent: content, operation: 'create' }
+      ], `Create ${relPath}`, undefined, execution.signal);
+      return submitFileProposal(context, proposal, { path: relPath, operation: 'create' }, execution.signal);
     },
     { category: 'edit', riskLevel: 'low_risk' }
   );
@@ -232,24 +214,29 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       const relPath = getString(args.path, 'path', 500);
       const startLine = Number(args.start_line);
       const endLine = Number(args.end_line);
-      const replacement = typeof args.replacement === 'string' ? args.replacement : '';
+      const replacement = getFileContent(args.replacement, 'replacement');
 
       const uri = await resolveWorkspaceUri(relPath);
       const bytes = await vscode.workspace.fs.readFile(uri);
+      if (bytes.length > maximumWriteBytes || bytes.includes(0)) throw new Error('Line replacement requires a text file up to 512KB.');
       const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
 
-      if (startLine < 1 || endLine < startLine || startLine > lines.length) {
+      if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length) {
         throw new Error(`Invalid line range: ${startLine} to ${endLine} (file has ${lines.length} lines).`);
       }
 
       const before = lines.slice(0, startLine - 1);
       const after = lines.slice(endLine);
       const newLines = replacement ? replacement.split(/\r?\n/) : [];
-      const updated = [...before, ...newLines, ...after].join('\n');
+      const newline = new TextDecoder().decode(bytes).includes('\r\n') ? '\r\n' : '\n';
+      const updated = [...before, ...newLines, ...after].join(newline);
+      getFileContent(updated, 'updated content');
 
       execution.signal.throwIfAborted();
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));
-      return { success: true, path: relPath, replacedLines: endLine - startLine + 1, newTotalLines: lines.length };
+      const proposal = await requireEditEngine(context).proposeEdits(getWorkspaceRootUri(), [
+        { path: relPath, newContent: updated, expectedOriginalHash: computeContentHash(bytes) }
+      ], `Replace lines ${startLine}-${endLine} in ${relPath}`, undefined, execution.signal);
+      return submitFileProposal(context, proposal, { path: relPath, replacedLines: endLine - startLine + 1 }, execution.signal);
     },
     { category: 'edit', riskLevel: 'low_risk' }
   );
@@ -273,10 +260,12 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
-      const uri = await resolveWorkspaceUri(relPath);
+      await resolveWorkspaceUri(relPath);
       execution.signal.throwIfAborted();
-      await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: true });
-      return { success: true, path: relPath, deleted: true };
+      const proposal = await requireEditEngine(context).proposeEdits(getWorkspaceRootUri(), [
+        { path: relPath, newContent: '', operation: 'delete' }
+      ], `Delete ${relPath}`, undefined, execution.signal);
+      return submitFileProposal(context, proposal, { path: relPath, operation: 'delete' }, execution.signal);
     },
     { category: 'edit', riskLevel: 'destructive', requiresApproval: true }
   );
@@ -302,13 +291,13 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     async (args, execution) => {
       const srcPath = getString(args.source_path, 'source_path', 500);
       const dstPath = getString(args.destination_path, 'destination_path', 500);
-      const srcUri = await resolveWorkspaceUri(srcPath);
-      const dstUri = await resolveWorkspaceUri(dstPath, true);
+      await resolveWorkspaceUri(srcPath);
+      await resolveWorkspaceUri(dstPath, true);
       execution.signal.throwIfAborted();
-      await vscode.workspace.fs.rename(srcUri, dstUri, { overwrite: false });
-      return { success: true, from: srcPath, to: dstPath };
+      const proposal = await requireEditEngine(context).proposeMove(getWorkspaceRootUri(), srcPath, dstPath, execution.signal);
+      return submitFileProposal(context, proposal, { from: srcPath, to: dstPath, operation: 'move' }, execution.signal);
     },
-    { category: 'edit', riskLevel: 'low_risk' }
+    { category: 'edit', riskLevel: 'destructive', requiresApproval: true }
   );
 
   // 8. list_directory
@@ -730,6 +719,26 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     { category: 'edit', riskLevel: 'low_risk' }
   );
+}
+
+function requireEditEngine(context: CoreToolContext): EditEngine {
+  if (!context.editEngine) throw new Error('The reviewed edit engine is unavailable. No direct filesystem mutation was attempted.');
+  return context.editEngine;
+}
+
+function getFileContent(value: unknown, name: string): string {
+  if (typeof value !== 'string') throw new Error(`Tool argument ${name} must be a string (empty text is allowed).`);
+  if (Buffer.byteLength(value, 'utf8') > maximumWriteBytes) throw new Error('File content exceeds the 512KB limit.');
+  return value;
+}
+
+async function submitFileProposal(context: CoreToolContext, proposal: EditProposal, details: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  signal.throwIfAborted();
+  if (typeof context.autoApply === 'function' ? context.autoApply() : context.autoApply) {
+    const result = await requireEditEngine(context).applyProposal(proposal.id, undefined, signal);
+    return { ...details, success: result.success, applied: result.appliedCount > 0, proposalId: proposal.id, recoveryId: result.recoveryId, errors: result.errors };
+  }
+  return { ...details, success: true, proposed: true, proposalId: proposal.id, message: 'Awaiting review in Changes. No file operation has been applied.' };
 }
 
 function getString(value: unknown, name: string, maxLength: number): string {

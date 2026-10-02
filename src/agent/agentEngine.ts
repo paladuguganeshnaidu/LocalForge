@@ -49,7 +49,7 @@ export class AgentEngine {
       onToolEnd: (name, result, error, id) => {
         if (['write_workspace_file', 'edit_workspace_file', 'write_file', 'create_file', 'replace_range', 'delete_file', 'move_file'].includes(name) && !error) {
           const res = result as { path?: string; from?: string; to?: string; applied?: boolean; success?: boolean; proposed?: boolean };
-          if (res && res.success !== false && !res.proposed && (res.applied || res.success)) {
+          if (res && !res.proposed && (res.applied || res.success !== false && res.success)) {
             for (const path of [res.path, res.from, res.to]) {
               if (path && !filesModified.includes(path)) filesModified.push(path);
             }

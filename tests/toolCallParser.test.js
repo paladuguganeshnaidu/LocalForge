@@ -205,6 +205,16 @@ test('ToolCallParser handles normal text response without tool calls', () => {
   assert.equal(parsed.userVisibleText, content);
 });
 
+test('registered creation and move tools retain their exact semantics instead of becoming overwrite aliases', () => {
+  const calls = [
+    { function: { name: 'create_file', arguments: { path: 'new.txt', content: '' } } },
+    { function: { name: 'move_file', arguments: { source_path: 'old.txt', destination_path: 'new.txt' } } }
+  ];
+  const parsed = ToolCallParser.parse('', calls, new Set(['create_file', 'move_file', 'write_workspace_file']));
+  assert.deepEqual(parsed.toolCalls.map((call) => call.function.name), ['create_file', 'move_file']);
+  assert.equal(JSON.parse(parsed.toolCalls[0].function.arguments).content, '');
+});
+
 test('ToolCallParser removes standalone raw tool error JSON from visible text', () => {
   const parsed = ToolCallParser.parse('The action ran.\n{"error":"target_content must be non-empty"}\nPlease review.', undefined, new Set());
 

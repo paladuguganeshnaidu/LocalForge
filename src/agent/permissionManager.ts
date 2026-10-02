@@ -319,7 +319,7 @@ export class PermissionManager {
         signal
       };
 
-      const approved = await withCancellation(this.approvalHandler(request), signal);
+      const approved = await withCancellation(this.approvalHandler(request), signal) === true;
       signal?.throwIfAborted();
       if (approved && this.mode === 'ask_once_per_session') {
         this.sessionApprovedTools.add(sessionKey);

@@ -13,6 +13,7 @@ class FileSystemError extends Error {}
 class WorkspaceEdit {
   constructor() { this.operations = []; }
   createFile(uri, options) { this.operations.push({ uri, create: true, overwrite: options.overwrite, content: options.contents }); }
+  renameFile(uri, destination) { this.operations.push({ uri, destination, rename: true }); }
   deleteFile(uri) { this.operations.push({ uri, remove: true }); }
   insert(uri, _position, content) { this.operations.push({ uri, content }); }
   replace(uri, _range, content) { this.operations.push({ uri, content }); }
@@ -40,7 +41,8 @@ const vscode = {
     applyEdit: async (edit) => {
       if (declineEdits) return false;
       for (const operation of edit.operations) {
-        if (operation.remove) await fs.unlink(operation.uri.fsPath);
+        if (operation.rename) await fs.rename(operation.uri.fsPath, operation.destination.fsPath);
+        else if (operation.remove) await fs.unlink(operation.uri.fsPath);
         else if (operation.create) await fs.writeFile(operation.uri.fsPath, operation.content, { flag: operation.overwrite ? 'w' : 'wx' });
         else await fs.writeFile(operation.uri.fsPath, operation.content);
       }
@@ -54,11 +56,14 @@ Module._load = function (request, parent, isMain) {
   return originalLoad.apply(this, arguments);
 };
 const { EditEngine } = require('../dist/editing/editEngine.js');
+const { AgentLoop } = require('../dist/agent/agentLoop.js');
 const { registerAllCoreTools } = require('../dist/agent/coreTools.js');
 const { executeWorkspaceTool } = require('../dist/agent/workspaceTools.js');
 const { applyReviewedSelection } = require('../dist/editing/selectionEdits.js');
 Module._load = originalLoad;
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
+const { PermissionManager } = require('../dist/agent/permissionManager.js');
+const { TerminalManager } = require('../dist/terminal/terminalManager.js');
 const { assertWorkspaceFilePath, validateWorkspaceRelativePath } = require('../dist/core/workspacePaths.js');
 const { EditJournal, EDIT_JOURNAL_KEY } = require('../dist/editing/editJournal.js');
 const { computeContentHash } = require('../dist/editing/patchService.js');
@@ -137,14 +142,14 @@ test('accept rechecks links changed after a proposal was created', async () => f
   await assert.rejects(fs.stat(path.join(external, 'file.txt')), { code: 'ENOENT' });
 }));
 
-test('cancelling during a deferred existence check prevents the actual core file write', async () => fixture(async () => {
+test('cancelling during a deferred existence check prevents the actual core file write', async () => fixture(async ({ root }) => {
   let release;
   let started;
   const gate = new Promise((resolve) => { release = resolve; });
   const checking = new Promise((resolve) => { started = resolve; });
   statHook = async () => { started(); await gate; throw Object.assign(new Error('missing'), { code: 'ENOENT' }); };
   const registry = new ToolRegistry();
-  registerAllCoreTools(registry, {});
+  registerAllCoreTools(registry, { editEngine: new EditEngine(), autoApply: true });
   const controller = new AbortController();
   const outcome = registry.executeTool('create_file', { path: 'cancelled.txt', content: 'unsafe' }, undefined, { signal: controller.signal });
   await checking;
@@ -153,6 +158,7 @@ test('cancelling during a deferred existence check prevents the actual core file
   release();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(writes, 0);
+  await assert.rejects(fs.stat(path.join(root, 'cancelled.txt')), { code: 'ENOENT' });
 }));
 
 test('VS Code refusing an edit is never overridden by direct file writes', async () => fixture(async ({ root }) => {
@@ -370,4 +376,200 @@ test('selection edits share recorded recovery and preserve unselected text', asy
   assert.equal(await fs.readFile(target, 'utf8'), 'prefix CHANGED suffix');
   assert.equal((await engine.rollbackChanges(result.recoveryId)).success, true);
   assert.equal(await fs.readFile(target, 'utf8'), 'prefix ORIGINAL suffix');
+}));
+
+test('create_file prepares a reviewable creation, refuses an existing target, and supports Undo', async () => fixture(async ({ root }) => {
+  const engine = new EditEngine(storageFixture());
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, { editEngine: engine });
+  const result = await registry.executeTool('create_file', { path: 'new.txt', content: '' });
+  assert.equal(result.proposed, true);
+  await assert.rejects(fs.stat(path.join(root, 'new.txt')), { code: 'ENOENT' });
+  assert.equal(engine.getProposal(result.proposalId).files[0].operation, 'create');
+  const applied = await engine.applyProposal(result.proposalId);
+  assert.equal(applied.success, true, JSON.stringify(applied.errors));
+  assert.equal((await fs.stat(path.join(root, 'new.txt'))).size, 0);
+  await assert.rejects(registry.executeTool('create_file', { path: 'new.txt', content: 'overwrite' }), /already exists/);
+  assert.equal((await engine.rollbackChanges(applied.recoveryId)).success, true);
+  await assert.rejects(fs.stat(path.join(root, 'new.txt')), { code: 'ENOENT' });
+}));
+
+test('replace_range uses reviewed editing, preserves CRLF, validates full ranges, and restores exact bytes', async () => fixture(async ({ root }) => {
+  const target = path.join(root, 'lines.txt');
+  const original = Buffer.from('\ufefffirst\r\nsecond\r\nthird\r\n');
+  await fs.writeFile(target, original);
+  const engine = new EditEngine(storageFixture());
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, { editEngine: engine });
+  for (const [start_line, end_line] of [[NaN, 2], [1.5, 2], [2, 1], [1, 99]]) {
+    await assert.rejects(registry.executeTool('replace_range', { path: 'lines.txt', start_line, end_line, replacement: 'unsafe' }), /Invalid line range/);
+  }
+  const result = await registry.executeTool('replace_range', { path: 'lines.txt', start_line: 2, end_line: 2, replacement: 'changed' });
+  assert.equal(result.proposed, true);
+  assert.deepEqual(await fs.readFile(target), original);
+  const proposal = engine.getProposal(result.proposalId);
+  assert.equal(proposal.files[0].newContent, 'first\r\nchanged\r\nthird\r\n');
+  const applied = await engine.applyProposal(proposal.id);
+  assert.equal(applied.success, true);
+  assert.equal((await engine.rollbackChanges(applied.recoveryId)).success, true);
+  assert.deepEqual(await fs.readFile(target), original);
+}));
+
+test('deletion requires explicit approval, awaits review, and restores a binary file after engine recreation', async () => fixture(async ({ root }) => {
+  const target = path.join(root, 'binary.dat');
+  const original = Buffer.from([0, 255, 17, 128, 0, 200]);
+  await fs.writeFile(target, original);
+  const storage = storageFixture();
+  const engine = new EditEngine(storage);
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, { editEngine: engine });
+  const permissions = new PermissionManager('always_proceed', async () => false);
+  await assert.rejects(registry.executeTool('delete_file', { path: 'binary.dat' }, permissions), /rejected/);
+  assert.equal(engine.getPendingProposals().length, 0);
+  permissions.setApprovalHandler(async () => true);
+  const result = await registry.executeTool('delete_file', { path: 'binary.dat' }, permissions);
+  assert.equal(result.proposed, true);
+  assert.deepEqual(await fs.readFile(target), original);
+  const applied = await engine.applyProposal(result.proposalId);
+  assert.equal(applied.success, true, JSON.stringify(applied.errors));
+  await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+  const restored = await new EditEngine(storage).rollbackChanges(applied.recoveryId);
+  assert.equal(restored.success, true, JSON.stringify(restored.conflicts));
+  assert.deepEqual(await fs.readFile(target), original);
+}));
+
+test('file moves require approval and paired review, preserve binary bytes, and Undo both paths together', async () => fixture(async ({ root }) => {
+  const original = Buffer.from([0, 254, 0, 128, 73]);
+  const source = path.join(root, 'source.dat');
+  const destination = path.join(root, 'destination.dat');
+  await fs.writeFile(source, original);
+  const storage = storageFixture();
+  const engine = new EditEngine(storage);
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, { editEngine: engine });
+  const permissions = new PermissionManager('allow_safe_auto', async () => false);
+  await assert.rejects(registry.executeTool('move_file', { source_path: 'source.dat', destination_path: 'destination.dat' }, permissions), /rejected/);
+  permissions.setApprovalHandler(async () => true);
+  const result = await registry.executeTool('move_file', { source_path: 'source.dat', destination_path: 'destination.dat' }, permissions);
+  assert.equal(result.proposed, true);
+  await assert.rejects(engine.applyProposal(result.proposalId, ['source.dat']), /both.*source.*destination/);
+  assert.deepEqual(await fs.readFile(source), original);
+  await assert.rejects(fs.stat(destination), { code: 'ENOENT' });
+  const applied = await engine.applyProposal(result.proposalId);
+  assert.equal(applied.success, true, JSON.stringify(applied.errors));
+  await assert.rejects(fs.stat(source), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readFile(destination), original);
+  const recreated = new EditEngine(storage);
+  await assert.rejects(recreated.rollbackChanges(applied.recoveryId, ['source.dat']), /both.*source.*destination/);
+  const restored = await recreated.rollbackChanges(applied.recoveryId);
+  assert.equal(restored.success, true, JSON.stringify(restored.conflicts));
+  assert.deepEqual(await fs.readFile(source), original);
+  await assert.rejects(fs.stat(destination), { code: 'ENOENT' });
+}));
+
+test('moves refuse collisions and changed destination contents without losing either version', async () => fixture(async ({ root }) => {
+  await fs.writeFile(path.join(root, 'source.txt'), 'original');
+  await fs.writeFile(path.join(root, 'collision.txt'), 'existing destination');
+  const engine = new EditEngine(storageFixture());
+  await assert.rejects(engine.proposeMove(uri(root), 'source.txt', 'collision.txt'), /already exists/);
+  await assert.rejects(engine.proposeMove(uri(root), 'source.txt', 'source.txt'), /duplicate/);
+  const proposal = await engine.proposeMove(uri(root), 'source.txt', 'moved.txt');
+  const applied = await engine.applyProposal(proposal.id);
+  await fs.writeFile(path.join(root, 'moved.txt'), 'later manual edit');
+  const rollback = await engine.rollbackChanges(applied.recoveryId);
+  assert.equal(rollback.success, false);
+  await assert.rejects(fs.stat(path.join(root, 'source.txt')), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(root, 'moved.txt'), 'utf8'), 'later manual edit');
+  assert.equal(await fs.readFile(path.join(root, 'collision.txt'), 'utf8'), 'existing destination');
+}));
+
+test('mixed write, creation, and deletion share one reviewed native transaction and recovery record', async () => fixture(async ({ root }) => {
+  await fs.writeFile(path.join(root, 'edit.txt'), 'before');
+  await fs.writeFile(path.join(root, 'delete.txt'), 'delete original');
+  const engine = new EditEngine(storageFixture());
+  const proposal = await engine.proposeEdits(uri(root), [
+    { path: 'edit.txt', newContent: 'after' },
+    { path: 'create.txt', newContent: 'created', operation: 'create' },
+    { path: 'delete.txt', newContent: '', operation: 'delete' }
+  ]);
+  const applied = await engine.applyProposal(proposal.id);
+  assert.equal(applied.success, true, JSON.stringify(applied.errors));
+  assert.equal(applied.appliedCount, 3);
+  await assert.rejects(fs.stat(path.join(root, 'delete.txt')), { code: 'ENOENT' });
+  const restored = await engine.rollbackChanges(applied.recoveryId);
+  assert.equal(restored.success, true, JSON.stringify(restored.conflicts));
+  assert.equal(await fs.readFile(path.join(root, 'edit.txt'), 'utf8'), 'before');
+  assert.equal(await fs.readFile(path.join(root, 'delete.txt'), 'utf8'), 'delete original');
+  await assert.rejects(fs.stat(path.join(root, 'create.txt')), { code: 'ENOENT' });
+}));
+
+test('a file replaced by an internal junction cannot redirect accepted deletion', async () => fixture(async ({ root }) => {
+  const target = path.join(root, 'target.txt');
+  const other = path.join(root, 'other');
+  await fs.writeFile(target, 'same bytes');
+  await fs.mkdir(other);
+  await fs.writeFile(path.join(other, 'preserved.txt'), 'same bytes');
+  const engine = new EditEngine(storageFixture());
+  const proposal = await engine.proposeEdits(uri(root), [{ path: 'target.txt', newContent: '', operation: 'delete' }]);
+  await fs.unlink(target);
+  await fs.symlink(other, target, 'junction');
+  await assert.rejects(engine.applyProposal(proposal.id), /regular file/);
+  assert.equal(await fs.readFile(path.join(other, 'preserved.txt'), 'utf8'), 'same bytes');
+}));
+
+test('missing edit-engine context cannot silently bypass reviewed file operations', async () => fixture(async ({ root }) => {
+  await fs.writeFile(path.join(root, 'existing.txt'), 'original');
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, {});
+  for (const [name, args] of [
+    ['write_file', { path: 'existing.txt', content: 'unsafe' }],
+    ['create_file', { path: 'new.txt', content: 'unsafe' }],
+    ['replace_range', { path: 'existing.txt', start_line: 1, end_line: 1, replacement: 'unsafe' }],
+    ['delete_file', { path: 'existing.txt' }],
+    ['move_file', { source_path: 'existing.txt', destination_path: 'new.txt' }]
+  ]) await assert.rejects(registry.executeTool(name, args), /reviewed edit engine is unavailable/);
+  assert.equal(await fs.readFile(path.join(root, 'existing.txt'), 'utf8'), 'original');
+  await assert.rejects(fs.stat(path.join(root, 'new.txt')), { code: 'ENOENT' });
+}));
+
+test('the actual agent loop creates, fixes, moves, runs, and deletes a program with permissions and recoverable mutations', async () => fixture(async ({ root }) => {
+  const editEngine = new EditEngine(storageFixture());
+  const terminalManager = new TerminalManager();
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, { editEngine, terminalManager, autoApply: true });
+  const approvals = [];
+  const permissions = new PermissionManager('always_ask', async (request) => { approvals.push(request.toolName); return true; });
+  const actions = [
+    ['create_file', { path: 'program.js', content: "console.log('first');\r\n" }],
+    ['replace_range', { path: 'program.js', start_line: 1, end_line: 1, replacement: "console.log('VERIFIED_FILE_OPS');" }],
+    ['move_file', { source_path: 'program.js', destination_path: 'moved.js' }],
+    ['run_command', { command: 'node moved.js' }],
+    ['delete_file', { path: 'moved.js' }]
+  ];
+  let round = 0;
+  let commandResult;
+  const provider = { id: 'scripted-file-workflow-fixture', chatWithTools: async () => {
+    const action = actions[round++];
+    return action ? { content: '', tool_calls: [{ function: { name: action[0], arguments: JSON.stringify(action[1]) } }] }
+      : { content: 'Created, corrected, moved, executed, and removed the temporary program.' };
+  } };
+  try {
+    const result = await new AgentLoop(provider, registry, permissions).run('scripted', [{ role: 'user', content: 'Create a temporary program, correct its output, move it, run it, and remove it.' }], {
+      mode: 'agent', onToolEnd: (name, output) => { if (name === 'run_command') commandResult = output; }
+    });
+    assert.equal(result.state.status, 'completed', JSON.stringify(result.state.unresolvedErrors));
+    assert.deepEqual(approvals, actions.map((action) => action[0]));
+    assert.equal(commandResult.exitCode, 0);
+    assert.equal(commandResult.stdout, 'VERIFIED_FILE_OPS');
+    assert.equal(terminalManager.getAllProcesses()[0].status, 'completed');
+    await assert.rejects(fs.stat(path.join(root, 'program.js')), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(path.join(root, 'moved.js')), { code: 'ENOENT' });
+    const history = editEngine.getRecoveryHistory();
+    assert.equal(history.length, 4);
+    for (const record of history) assert.equal((await editEngine.rollbackChanges(record.id)).success, true);
+    await assert.rejects(fs.stat(path.join(root, 'program.js')), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(path.join(root, 'moved.js')), { code: 'ENOENT' });
+  } finally {
+    for (const process of terminalManager.getRunningProcesses()) terminalManager.stopProcess(process.id);
+  }
 }));

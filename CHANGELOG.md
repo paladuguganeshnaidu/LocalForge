@@ -4,6 +4,12 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [Unreleased]
 
+- Route built-in file creation, line replacement, deletion, and move tools through the shared proposal, native edit, and durable recovery engine; remove their direct filesystem mutation fallbacks.
+- Require explicit deletion/move approvals, bind source and destination acceptance/Undo, preserve binary moves/deletions, and refuse collisions, dirty buffers, directories, and symbolic links.
+- Validate integer line ranges and preparation hashes, preserve existing CRLF in line replacement, label file operations in review, and provide original snapshot documents for new-file diffs.
+- Require actual boolean approval decisions and verify a create/fix/move/run/delete agent workflow plus binary move/deletion recovery across real VS Code processes.
+- Retry transient backup-file sharing violations with a bounded delay without deleting the previous snapshot or bypassing access controls.
+
 - Record original bytes before reviewed edits in synced, atomically replaced local workspace-storage snapshots; recover and undo changes after extension/VS Code restart.
 - Provide confirmed Undo and Remove backup controls in the Changes drawer and a Command Palette Undo action; preserve later manual changes, dirty editors, and workspace boundaries.
 - Route accepted selection fixes through the same reviewed-edit recovery engine and expose metadata-only recovery tools with explicit destructive-action approvals.

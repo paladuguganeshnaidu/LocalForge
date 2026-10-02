@@ -18,6 +18,7 @@ export interface RecoveryFile {
   originalHash: string;
   expectedHash: string;
   reverted: boolean;
+  linkedPath?: string;
 }
 
 export interface RecoveryRecord {
@@ -46,6 +47,16 @@ function contentHash(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+export async function replaceJournalFile(source: string, destination: string, replace: (source: string, destination: string) => Promise<void> = rename): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try { await replace(source, destination); return; }
+    catch (error) {
+      if (attempt >= 6 || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
+    }
+  }
+}
+
 function isRecord(value: unknown): value is RecoveryRecord {
   if (!value || typeof value !== 'object') return false;
   const record = value as RecoveryRecord;
@@ -61,7 +72,7 @@ function isRecord(value: unknown): value is RecoveryRecord {
   for (const file of record.files) {
     if (!file || typeof file.path !== 'string' || file.path.length > 1024 ||
         !['present', 'missing'].includes(file.originalState) || typeof file.originalBytes !== 'string' ||
-        typeof file.reverted !== 'boolean' || !/^[a-f0-9]{64}$/.test(file.expectedHash) ||
+        typeof file.reverted !== 'boolean' || typeof file.expectedHash !== 'string' || (file.expectedHash !== '' && !/^[a-f0-9]{64}$/.test(file.expectedHash)) ||
         typeof file.originalHash !== 'string' || file.originalBytes.length > maximumBytes) return false;
     try { validateWorkspaceRelativePath(file.path); } catch { return false; }
     bytesTotal += file.originalBytes.length + file.path.length;
@@ -73,6 +84,13 @@ function isRecord(value: unknown): value is RecoveryRecord {
     const bytes = Buffer.from(file.originalBytes, 'base64');
     if (bytes.toString('base64') !== file.originalBytes) return false;
     if (file.originalState === 'missing' ? file.originalBytes !== '' || file.originalHash !== '' : contentHash(bytes) !== file.originalHash) return false;
+    if (file.originalState === 'missing' && file.expectedHash === '') return false;
+    if (file.linkedPath !== undefined) {
+      const linked = record.files.find((candidate) => candidate?.path === file.linkedPath);
+      if (typeof file.linkedPath !== 'string' || file.linkedPath === file.path || !linked || linked.linkedPath !== file.path) return false;
+      if (file.originalState === 'present' ? file.expectedHash !== '' || linked.originalState !== 'missing' || linked.expectedHash !== file.originalHash
+        : linked.originalState !== 'present' || linked.expectedHash !== '' || file.expectedHash !== linked.originalHash) return false;
+    }
   }
   return true;
 }
@@ -205,7 +223,7 @@ export class EditJournal {
             await handle.writeFile(JSON.stringify(payload), 'utf8');
             await handle.sync();
           } finally { await handle.close(); }
-          await rename(temporary, join(this.directory, 'edit-recovery.v1.json'));
+          await replaceJournalFile(temporary, join(this.directory, 'edit-recovery.v1.json'));
         } finally {
           await unlink(temporary).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
         }

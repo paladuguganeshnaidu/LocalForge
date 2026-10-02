@@ -2152,7 +2152,8 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         activeProposal.files.forEach(f => {
           const item = document.createElement('div');
           item.className = 'diff-item';
-          item.innerHTML = '<span>' + escapeHtml(f.path) + '</span>' +
+          const operation = f.moveSourcePath ? 'Move destination' : f.moveDestinationPath ? 'Move source' : f.operation === 'delete' ? 'Delete' : f.operation === 'create' ? 'Create' : 'Edit';
+          item.innerHTML = '<span>' + escapeHtml(operation) + ' · ' + escapeHtml(f.path) + '</span>' +
             '<div class="diff-stats"><span class="stat-add">+' + f.additions + '</span><span class="stat-del">-' + f.deletions + '</span></div>';
           item.addEventListener('click', () => {
             vscode.postMessage({ type: 'showDiff', proposalId: displayedProposal.id, filePath: f.path });
@@ -2167,7 +2168,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           '<div class="artifact-title"><span>Changes: ' + activeProposal.files.length + ' file(s) changed (+' + activeProposal.additions + ' -' + activeProposal.deletions + ')</span></div>' +
           '<span class="model-badge">Review</span></div>' +
           '<div class="artifact-body">' +
-          activeProposal.files.map(f => '<div>' + escapeHtml(f.path) + ' <span class="stat-add">+' + f.additions + '</span> <span class="stat-del">-' + f.deletions + '</span></div>').join('') +
+          activeProposal.files.map(f => '<div>' + escapeHtml(f.moveSourcePath ? 'Move destination' : f.moveDestinationPath ? 'Move source' : f.operation === 'delete' ? 'Delete' : f.operation === 'create' ? 'Create' : 'Edit') + ' · ' + escapeHtml(f.path) + ' <span class="stat-add">+' + f.additions + '</span> <span class="stat-del">-' + f.deletions + '</span></div>').join('') +
           '</div>' +
           '<div class="artifact-actions">' +
           '<button class="action-btn" id="apply-all-' + activeProposal.id + '">Accept changes</button>' +

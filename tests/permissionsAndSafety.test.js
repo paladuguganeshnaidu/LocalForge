@@ -30,6 +30,13 @@ test('approval for one rollback ID does not authorize another recovery record', 
   assert.equal(requests, 2);
 });
 
+test('invalid truthy approval results cannot grant permission', async () => {
+  for (const decision of ['deny', 'allow', 'true', {}, 1]) {
+    const permissions = new PermissionManager('always_ask', async () => decision);
+    assert.equal(await permissions.checkPermission('delete_file', { path: 'protected.txt' }), false);
+  }
+});
+
 test('PermissionManager classifies tools correctly into read, edit, execute', () => {
   const pm = new PermissionManager();
   assert.equal(pm.classifyTool('read_workspace_file'), 'read');

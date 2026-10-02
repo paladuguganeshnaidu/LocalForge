@@ -402,6 +402,7 @@ ${toolList}
 Workflow:
 1. Inspect relevant files and search workspace context before making changes.
 2. Apply clean, surgical file edits using edit_workspace_file or write_workspace_file.
+   Use create_file for creation-only, replace_range for line replacements, delete_file for deletion, and move_file for renames/moves. These file tools prepare reviewable proposals unless explicitly configured to apply approved actions.
 3. Run tests or check status with run_command if needed.
 4. Conclude with a clear explanation of all changes made.
 
@@ -411,6 +412,7 @@ Safety and accuracy:
 - If an action fails, do not claim that it succeeded. Retry only after correcting the cause; otherwise stop and explain what failed.
 - Never show raw tool JSON or raw tool error payloads to the user.
 - Report completion only when tool results confirm the requested changes.
+- A proposed edit is not an applied edit. If results say proposed or pending, tell the user the changes await review; do not claim that files were changed or tests validated the proposal.
 
 When a tool is required, output exactly one LOCALFORGE_TOOL_CALL object:
 { "tool": "tool_name", "arguments": {...} }
@@ -471,7 +473,8 @@ You may also invoke tools using native provider function calls or <tool_call>{"n
         const result = call.result && typeof call.result === 'object'
           ? call.result as Record<string, unknown>
           : {};
-        const path = typeof result.path === 'string' ? result.path : '';
+        const path = typeof result.path === 'string' ? result.path : typeof result.from === 'string' && typeof result.to === 'string'
+          ? `${result.from} → ${result.to}` : '';
 
         if (result.proposed === true || result.status === 'pending') {
           return path

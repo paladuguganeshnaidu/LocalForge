@@ -514,10 +514,11 @@ export class LocalForgeEngine {
               cat = 'Reading';
               targetPath = (args as any).path;
               title = `Reading ${targetPath || 'file'}`;
-            } else if (name === 'write_workspace_file' || name === 'edit_workspace_file') {
+            } else if (['write_workspace_file', 'edit_workspace_file', 'write_file', 'create_file', 'replace_range', 'delete_file', 'move_file'].includes(name)) {
               cat = 'Editing';
-              targetPath = (args as any).path;
-              title = `Preparing edit for ${targetPath || 'file'}`;
+              targetPath = String(args.path ?? args.source_path ?? '');
+              title = name === 'delete_file' ? `Preparing deletion of ${targetPath}` : name === 'move_file'
+                ? `Preparing move: ${targetPath} → ${String(args.destination_path ?? '')}` : `Preparing edit for ${targetPath || 'file'}`;
             } else if (name === 'run_command') {
               cat = 'Running';
               title = `Running: ${(args as any).command || ''}`;

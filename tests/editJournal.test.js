@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { EditJournal, EDIT_JOURNAL_KEY } = require('../dist/editing/editJournal.js');
+const { EditJournal, EDIT_JOURNAL_KEY, replaceJournalFile } = require('../dist/editing/editJournal.js');
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const input = (summary = 'Recorded edit') => ({
@@ -110,4 +110,59 @@ test('legacy workspace backups migrate on the first durable update', async (cont
   assert.equal(migrated.list()[0].id, record.id);
   await migrated.update(record.id, 'applied');
   assert.equal(new EditJournal(undefined, directory).list()[0].status, 'applied');
+});
+
+test('move recovery records validate both endpoints and reject malformed linked entries without crashing', async () => {
+  const journal = new EditJournal();
+  const moved = input();
+  moved.files[0].expectedHash = '';
+  moved.files[0].linkedPath = 'destination.txt';
+  moved.files.push({ path: 'destination.txt', originalState: 'missing', originalBytes: '', originalHash: '', expectedHash: hash('original'), reverted: false, linkedPath: 'file.txt' });
+  assert.ok((await journal.prepare(moved)).id);
+  for (const invalid of [
+    { ...moved, files: [moved.files[0], null] },
+    { ...moved, files: [moved.files[0], { ...moved.files[1], expectedHash: hash('different bytes') }] },
+    { ...moved, files: [{ ...moved.files[0], expectedHash: [hash('original')] }, moved.files[1]] }
+  ]) await assert.rejects(journal.prepare(invalid), /invalid/);
+});
+
+test('atomic backup replacement retries transient locks without removing the previous backup', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'localforge-journal-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'new.tmp');
+  const destination = path.join(directory, 'previous.json');
+  fs.writeFileSync(source, 'new backup');
+  fs.writeFileSync(destination, 'previous backup');
+  let attempts = 0;
+  await replaceJournalFile(source, destination, async (temporary, target) => {
+    attempts += 1;
+    assert.equal(fs.readFileSync(target, 'utf8'), 'previous backup');
+    if (attempts <= 2) throw Object.assign(new Error('transient file lock'), { code: 'EPERM' });
+    await fs.promises.rename(temporary, target);
+  });
+  assert.equal(attempts, 3);
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'new backup');
+});
+
+test('persistent replacement failures preserve both backups and terminate after bounded retries', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'localforge-journal-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'new.tmp');
+  const destination = path.join(directory, 'previous.json');
+  fs.writeFileSync(source, 'new backup');
+  fs.writeFileSync(destination, 'previous backup');
+  let attempts = 0;
+  await assert.rejects(replaceJournalFile(source, destination, async () => {
+    attempts += 1;
+    throw Object.assign(new Error('still locked'), { code: 'EBUSY' });
+  }), /still locked/);
+  assert.equal(attempts, 7);
+  assert.equal(fs.readFileSync(source, 'utf8'), 'new backup');
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'previous backup');
+  attempts = 0;
+  await assert.rejects(replaceJournalFile(source, destination, async () => {
+    attempts += 1;
+    throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
+  }), /no space/);
+  assert.equal(attempts, 1);
 });
