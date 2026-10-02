@@ -1,4 +1,4 @@
-import { ChatMessage, LocalModel, ModelProvider, ModelToolDefinition } from './modelProvider';
+import { ChatMessage, LocalModel, ModelProvider, ModelPullProgress, ModelToolDefinition } from './modelProvider';
 import { evaluateRuntimeCapabilities } from './modelCapabilities';
 
 interface OllamaTagsResponse {
@@ -20,11 +20,26 @@ interface OllamaToolResponse {
   error?: string;
 }
 
+interface OllamaPullChunk {
+  status?: string;
+  total?: number;
+  completed?: number;
+  error?: string;
+}
+
 export class OllamaProvider implements ModelProvider {
   readonly id: string;
+  readonly source: 'local' | 'remote';
 
   constructor(private readonly baseUrl: string, id = 'ollama') {
     this.id = id;
+    let loopback = false;
+    try {
+      const endpoint = new URL(baseUrl);
+      loopback = (endpoint.protocol === 'http:' || endpoint.protocol === 'https:') &&
+        (endpoint.hostname === 'localhost' || endpoint.hostname === '[::1]' || /^127\./.test(endpoint.hostname));
+    } catch {}
+    this.source = id === 'ollama' && loopback ? 'local' : 'remote';
   }
 
   async detect(): Promise<boolean> {
@@ -68,9 +83,88 @@ export class OllamaProvider implements ModelProvider {
     const data = await response.json() as OllamaTagsResponse;
     return (data.models ?? []).map((model) => ({
       name: model.name,
+      source: this.source,
       size: model.size,
       modifiedAt: model.modified_at
     }));
+  }
+
+  async pullModel(
+    name: string,
+    onProgress: (progress: ModelPullProgress) => void,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const normalizedName = name.trim();
+    if (!normalizedName || normalizedName.length > 128 || /[\u0000-\u001f\u007f]/.test(normalizedName)) {
+      throw new Error('Enter a valid Ollama model name (up to 128 characters).');
+    }
+
+    const response = await fetch(`${this.baseUrl}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: normalizedName, stream: true }),
+      signal
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Ollama model download failed (${response.status}): ${detail || response.statusText}`);
+    }
+    if (!response.body) throw new Error('Ollama returned an empty model-download stream.');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    let completedSuccessfully = false;
+    const consume = (line: string) => {
+      if (!line.trim()) return;
+      let chunk: OllamaPullChunk;
+      try {
+        chunk = JSON.parse(line) as OllamaPullChunk;
+      } catch {
+        throw new Error('Ollama returned an invalid model-download progress event.');
+      }
+      if (chunk.error) throw new Error(chunk.error);
+      if (chunk.status === 'success') completedSuccessfully = true;
+      onProgress({
+        status: typeof chunk.status === 'string' ? chunk.status : 'Downloading',
+        ...(Number.isFinite(chunk.total) && chunk.total! >= 0 ? { total: chunk.total } : {}),
+        ...(Number.isFinite(chunk.completed) && chunk.completed! >= 0 ? { completed: chunk.completed } : {})
+      });
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        pending += decoder.decode(value, { stream: !done });
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) consume(line);
+        if (done) break;
+      }
+      if (pending.trim()) consume(pending);
+      signal?.throwIfAborted();
+      if (!completedSuccessfully) throw new Error('Ollama ended the model-download stream before confirming success. Retry the download to continue.');
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
+  }
+
+  async deleteModel(name: string, signal?: AbortSignal): Promise<void> {
+    const normalizedName = name.trim();
+    if (!normalizedName || normalizedName.length > 128 || /[\u0000-\u001f\u007f]/.test(normalizedName)) {
+      throw new Error('Enter a valid Ollama model name (up to 128 characters).');
+    }
+    const response = await fetch(`${this.baseUrl}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: normalizedName }),
+      signal
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Ollama model deletion failed (${response.status}): ${detail || response.statusText}`);
+    }
   }
 
   private formatMessagesForOllama(messages: ChatMessage[]): any[] {

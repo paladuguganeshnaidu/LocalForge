@@ -5,6 +5,8 @@ const { OllamaProvider } = require('../dist/providers/ollamaProvider.js');
 
 let server;
 let baseUrl;
+let pullRequest;
+let deleteRequest;
 
 before(async () => {
   server = http.createServer((request, response) => {
@@ -14,6 +16,47 @@ before(async () => {
     }
     if (request.url === '/api/tags') {
       response.writeHead(200, { 'Content-Type': 'application/json' }).end('{"models":[{"name":"qwen:test","size":42,"modified_at":"2026-09-01T00:00:00Z"}]}');
+      return;
+    }
+    if (request.url === '/api/pull') {
+      let body = '';
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        pullRequest = JSON.parse(body);
+        response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+        if (pullRequest.name === 'invalid:test') {
+          response.end('invalid-json\n');
+          return;
+        }
+        response.write('{"status":"pulling manifest"}\n');
+        if (pullRequest.name === 'truncated:test') {
+          response.end('{"status":"pulling layers","total":1024,"completed":512}\n');
+          return;
+        }
+        if (pullRequest.name === 'error:test') {
+          response.end('{"error":"model manifest not found"}\n');
+          return;
+        }
+        if (pullRequest.name === 'tail:test') {
+          response.end('{"status":"success"}');
+          return;
+        }
+        if (pullRequest.name === 'slow:test') {
+          setTimeout(() => response.end('{"status":"success"}\n'), 300);
+          return;
+        }
+        response.write('{"status":"pulling layers","total":1024,"completed":512}\n');
+        response.end('{"status":"success","total":1024,"completed":1024}\n');
+      });
+      return;
+    }
+    if (request.url === '/api/delete') {
+      let body = '';
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        deleteRequest = JSON.parse(body);
+        response.writeHead(200).end();
+      });
       return;
     }
     if (request.url === '/api/chat') {
@@ -54,9 +97,65 @@ test('detects Ollama and maps installed model metadata', async () => {
   assert.equal(await provider.detect(), true);
   assert.deepEqual(await provider.listModels(), [{
     name: 'qwen:test',
+    source: 'local',
     size: 42,
     modifiedAt: '2026-09-01T00:00:00Z'
   }]);
+});
+
+test('classifies LAN, internet, and SSH-tunneled Ollama endpoints as remote', () => {
+  assert.equal(new OllamaProvider('http://127.0.0.1:11434').source, 'local');
+  assert.equal(new OllamaProvider('http://localhost:11434').source, 'local');
+  assert.equal(new OllamaProvider('http://[::1]:11434').source, 'local');
+  assert.equal(new OllamaProvider('http://192.168.1.10:11434').source, 'remote');
+  assert.equal(new OllamaProvider('https://models.example.com').source, 'remote');
+  assert.equal(new OllamaProvider('http://127.0.0.1:11435', 'ssh-remote-ollama').source, 'remote');
+});
+
+test('pulls an Ollama model and reports streamed progress', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  const updates = [];
+  await provider.pullModel('qwen2.5-coder:7b', (progress) => updates.push(progress));
+
+  assert.deepEqual(pullRequest, { name: 'qwen2.5-coder:7b', stream: true });
+  assert.deepEqual(updates, [
+    { status: 'pulling manifest' },
+    { status: 'pulling layers', total: 1024, completed: 512 },
+    { status: 'success', total: 1024, completed: 1024 }
+  ]);
+});
+
+test('rejects invalid Ollama model names before making a request', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  await assert.rejects(provider.pullModel('bad\nmodel', () => {}), /valid Ollama model name/);
+});
+
+test('rejects incomplete or corrupt download streams instead of claiming a successful install', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  await assert.rejects(provider.pullModel('truncated:test', () => {}), /before confirming success/);
+  await assert.rejects(provider.pullModel('invalid:test', () => {}), /invalid model-download progress event/);
+  await assert.rejects(provider.pullModel('error:test', () => {}), /model manifest not found/);
+});
+
+test('accepts the final download success event without a trailing newline', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  const progress = [];
+  await provider.pullModel('tail:test', (item) => progress.push(item));
+  assert.equal(progress.at(-1).status, 'success');
+});
+
+test('deletes a named Ollama model through the local delete endpoint', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  await provider.deleteModel('qwen2.5-coder:7b');
+  assert.deepEqual(deleteRequest, { name: 'qwen2.5-coder:7b' });
+});
+
+test('cancels an active Ollama model download when its signal is aborted', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  const controller = new AbortController();
+  const pending = provider.pullModel('slow:test', () => {}, controller.signal);
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(pending, (error) => error.name === 'AbortError');
 });
 
 test('streams chat tokens in order', async () => {

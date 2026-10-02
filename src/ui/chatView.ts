@@ -176,6 +176,13 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  public setSelectedModel(model: string): void {
+    this.selectedModel = model;
+    this.post({ type: 'selectedModel', model });
+    this.post({ type: 'history', messages: this.conversations.get(model) ?? [] });
+    this.postActivityHistory();
+  }
+
   private postActivityHistory(): void {
     const conversationId = this.engine?.sessionManager.getActiveSession().id;
     this.post({
@@ -1922,7 +1929,18 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
             activeModelBadge.className = 'model-badge' + (found.source === 'remote' ? ' remote' : '');
           }
         }
+        renderModelList();
       }
+
+      if (msg.type === 'selectedModel') {
+        selectedModelId = msg.model || 'auto';
+        const found = availableModels.find(m => (m.id || m.name) === selectedModelId);
+        activeModelLabel.textContent = found ? found.displayName || found.name : 'Auto';
+        activeModelBadge.textContent = found?.source === 'remote' ? 'Remote' : 'Local';
+        activeModelBadge.className = 'model-badge' + (found?.source === 'remote' ? ' remote' : '');
+        renderModelList();
+      }
+
 
       if (msg.type === 'mode') {
         currentMode = msg.mode;

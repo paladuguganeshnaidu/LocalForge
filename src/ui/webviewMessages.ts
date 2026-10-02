@@ -11,6 +11,11 @@ export type WebviewMessage =
   | { type: 'configureRemote' }
   | { type: 'getRemoteStatus' }
   | { type: 'selectModel'; model: string }
+  | { type: 'installModel'; model: string }
+  | { type: 'pauseModelInstall' }
+  | { type: 'cancelModelInstall' }
+  | { type: 'deleteModel'; modelId: string }
+  | { type: 'setDefaultModel'; modelId: string }
   | { type: 'setMode'; mode: AgentMode }
   | {
       type: 'chat';
@@ -58,6 +63,8 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
     case 'disconnectRemote':
     case 'configureRemote':
     case 'getRemoteStatus':
+    case 'pauseModelInstall':
+    case 'cancelModelInstall':
     case 'newSession':
     case 'continueTask':
     case 'diagnose':
@@ -65,6 +72,19 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
 
     case 'selectModel':
       return typeof msg.model === 'string';
+
+    case 'installModel':
+      return typeof msg.model === 'string' &&
+        msg.model.trim().length > 0 &&
+        msg.model.length <= 128 &&
+        !/[\u0000-\u001f\u007f]/.test(msg.model);
+
+    case 'deleteModel':
+    case 'setDefaultModel':
+      return typeof msg.modelId === 'string' &&
+        msg.modelId.trim().length > 0 &&
+        msg.modelId.length <= 256 &&
+        !/[\u0000-\u001f\u007f]/.test(msg.modelId);
 
     case 'setMode':
       return msg.mode === 'ask' || msg.mode === 'plan' || msg.mode === 'agent';

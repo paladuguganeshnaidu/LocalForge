@@ -25,6 +25,10 @@ LOMVREN is a VS Code coding assistant that connects to local Ollama or an Ollama
 
 ## Modes of Operation
 
+### Model management
+
+Open the **Models** view in the LOMVREN sidebar to search installed models, select one for chat, or set a default for chat and agent tasks. Enter an Ollama model name to install or update it. Downloads show live progress and provide Pause, Resume, and Cancel controls. Resume sends a new pull request for the same model; Ollama may reuse completed layers. Paused downloads survive closing and reopening the view during the current extension session. Deletion requires confirmation and is limited to discovered local Ollama models. Start Ollama before installing or discovering local models.
+
 | Mode | Purpose | Tools Allowed | Safety Behavior |
 | :--- | :--- | :--- | :--- |
 | **Ask** | Understand & explain code | Read-only (`read_workspace_file`, `search_workspace`, `list_directory`) | Non-destructive; answers questions with code references. |
@@ -76,7 +80,7 @@ The LOMVREN agent panel follows a native, focused hierarchy:
   - Any OpenAI-compatible server (LM Studio, vLLM, llama.cpp) on `http://127.0.0.1:1234/v1`, or
   - A remote Linux host with Ollama and an NVIDIA GPU accessible via SSH.
 
-Recommended coding models:
+Recommended coding models (install from the **Models** view, or use the CLI):
 ```bash
 ollama pull qwen2.5-coder:7b
 # for fast inline completions:

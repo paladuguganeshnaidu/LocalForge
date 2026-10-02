@@ -23,6 +23,7 @@
   ],
   "activationEvents": [
     "onView:localforge.chatView",
+    "onView:localforge.modelsView",
     "onCommand:localforge.openAgent",
     "onCommand:localforge.newConversation",
     "onCommand:localforge.continueTask",
@@ -58,6 +59,11 @@
           "type": "webview",
           "id": "localforge.chatView",
           "name": "LOMVREN Agent"
+        },
+        {
+          "type": "webview",
+          "id": "localforge.modelsView",
+          "name": "Models"
         }
       ]
     },

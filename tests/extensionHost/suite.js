@@ -67,6 +67,10 @@ async function run() {
         `Command "${cmd}" must be registered in the extension host.`
       );
     }
+    const extension = vscode.extensions.all.find((item) => item.packageJSON?.name === 'localforge-vscode');
+    assert.ok(extension, 'The LocalForge extension must be present in the host.');
+    const contributedViews = extension.packageJSON.contributes?.views?.['localforge-secondary'] || [];
+    assert.ok(contributedViews.some((view) => view.id === 'localforge.modelsView'), 'The dedicated Models view must be contributed.');
   });
 
   // Stage 3: Built-in Command Executions
@@ -130,6 +134,7 @@ async function run() {
         webviewEvents.push(msg);
         if (msg.type === 'permissionRequest' && (autoApprovePath || autoApproveCommand || autoApproveSessionCommand)) {
           const request = msg.request;
+          console.log(`[ExtensionHost] Permission bridge received ${request.toolName}`);
           permissionRequests.push(request);
           const approved = (request.toolName === 'write_workspace_file' && request.path === autoApprovePath) ||
             (request.toolName === 'run_command' && request.command === autoApproveCommand);
@@ -227,7 +232,16 @@ async function run() {
       api.engine.turnManager.completeTurn(approvalTurn.turnId, 'completed');
     }
 
-    if (process.env.LOCALFORGE_REAL_OLLAMA_EDIT !== '1') {
+    const originalExecuteTask = api.engine.executeTask;
+    const previousMode = api.viewProvider.activeMode;
+    try {
+      api.engine.executeTask = async (prompt, mode, model, callbacks) => {
+        assert.equal(prompt, 'test prompt from extension host');
+        assert.equal(mode, 'ask', 'The IPC chat probe must use read-only Ask mode');
+        callbacks.onToken('LOCALFORGE_IPC_OK');
+        return { response: 'LOCALFORGE_IPC_OK', errors: [] };
+      };
+      await messageHandler({ type: 'setMode', mode: 'ask' });
       await messageHandler({
         type: 'chat',
         model: 'auto',
@@ -236,6 +250,13 @@ async function run() {
         includeWorkspace: true,
         agentMode: false
       });
+      assert.ok(webviewEvents.some((event) => event.type === 'chunk' && event.content === 'LOCALFORGE_IPC_OK'),
+        'Runtime token callbacks should be sent to the webview');
+      assert.ok(webviewEvents.some((event) => event.type === 'done' && event.fullResponse === 'LOCALFORGE_IPC_OK'),
+        'The completed runtime response should be sent to the webview');
+    } finally {
+      api.engine.executeTask = originalExecuteTask;
+      api.viewProvider.activeMode = previousMode;
     }
   });
 
@@ -372,6 +393,10 @@ async function run() {
       }
     });
   }
+
+  await runStage('Models view activation', async () => {
+    await vscode.commands.executeCommand('localforge.modelsView.focus');
+  });
 
   console.log('=====================================================');
   console.log(`  ALL ${completedStages} EXTENSION HOST INTEGRATION STAGES PASSED`);

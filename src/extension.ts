@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { LocalForgeEngine } from './core/LocalForgeEngine';
 import { LocalForgeViewProvider } from './ui/chatView';
+import { ModelCenterViewProvider } from './ui/modelCenter';
 import { LocalForgeCompletionProvider } from './completion/completionProvider';
 import { isWebviewMessage } from './ui/webviewMessages';
 import { validateRelativeWorkspacePath } from './agent/workspaceTools';
@@ -71,6 +72,14 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
   engineInstance = engine;
 
   const viewProvider = new LocalForgeViewProvider(engine.compositeProvider, context, engine);
+  const modelCenterProvider = new ModelCenterViewProvider(engine.compositeProvider, async () => {
+    const models = await engine.modelRegistry.discoverAll();
+    const selectedModel = viewProvider.selectedModel;
+    if (selectedModel && selectedModel !== 'auto' && !models.some((model) => model.id === selectedModel || model.name === selectedModel)) {
+      viewProvider.setSelectedModel('auto');
+    }
+    await viewProvider.refresh();
+  });
 
   const completionProvider = new LocalForgeCompletionProvider(
     engine.compositeProvider,
@@ -79,7 +88,11 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
   );
 
   context.subscriptions.push(
+    modelCenterProvider,
     vscode.window.registerWebviewViewProvider('localforge.chatView', viewProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
+    vscode.window.registerWebviewViewProvider('localforge.modelsView', modelCenterProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.workspace.registerTextDocumentContentProvider(
@@ -282,7 +295,7 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
         if (pick) modelId = pick.id;
       }
       if (modelId) {
-        viewProvider.selectedModel = modelId;
+        viewProvider.setSelectedModel(modelId);
         void vscode.window.showInformationMessage(`Selected model: ${modelId}`);
       }
     }),

@@ -1,4 +1,4 @@
-import { ChatMessage, LocalModel, ModelProvider, ModelToolDefinition } from './modelProvider';
+import { ChatMessage, LocalModel, ModelProvider, ModelPullProgress, ModelToolDefinition } from './modelProvider';
 import { inferModelCapabilities } from './modelCapabilities';
 
 export class CompositeProvider implements ModelProvider {
@@ -42,6 +42,25 @@ export class CompositeProvider implements ModelProvider {
       }
     }
     return output.sort((left, right) => (left.displayName ?? left.name).localeCompare(right.displayName ?? right.name));
+  }
+
+  async pullModel(name: string, onProgress: (progress: ModelPullProgress) => void, signal?: AbortSignal): Promise<void> {
+    const ollama = this.providers.find((provider) => provider.id === 'ollama' &&
+      (!provider.source || provider.source === 'local') && provider.pullModel);
+    if (!ollama?.pullModel) {
+      throw new Error('Model downloads are available when a local Ollama provider is configured and running.');
+    }
+    await ollama.pullModel(name, onProgress, signal);
+  }
+
+  async deleteModel(modelId: string, signal?: AbortSignal): Promise<void> {
+    const installed = (await this.listModels()).find((model) => model.id === modelId || model.name === modelId);
+    const route = installed ? this.resolveRoute(installed.id || installed.name) : undefined;
+    if (!route || (installed?.source && installed.source !== 'local') ||
+        (route.provider.source && route.provider.source !== 'local') || route.provider.id !== 'ollama' || !route.provider.deleteModel) {
+      throw new Error('Only installed models from the configured local Ollama provider can be deleted here.');
+    }
+    await route.provider.deleteModel(route.actualName, signal);
   }
 
   public resolveProvider(model: string): { provider: ModelProvider; actualName: string } | undefined {

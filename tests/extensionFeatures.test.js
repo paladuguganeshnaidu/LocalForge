@@ -33,6 +33,14 @@ test('isWebviewMessage accepts valid control messages', () => {
   assert.equal(isWebviewMessage({ type: 'configureRemote' }), true);
   assert.equal(isWebviewMessage({ type: 'getRemoteStatus' }), true);
   assert.equal(isWebviewMessage({ type: 'selectModel', model: 'ollama:qwen2.5-coder' }), true);
+  assert.equal(isWebviewMessage({ type: 'installModel', model: 'qwen2.5-coder:7b' }), true);
+  assert.equal(isWebviewMessage({ type: 'installModel', model: '  ' }), false);
+  assert.equal(isWebviewMessage({ type: 'installModel', model: 'x'.repeat(129) }), false);
+  assert.equal(isWebviewMessage({ type: 'installModel', model: 'model\nother' }), false);
+  assert.equal(isWebviewMessage({ type: 'cancelModelInstall' }), true);
+  assert.equal(isWebviewMessage({ type: 'deleteModel', modelId: 'ollama:qwen%3Atest' }), true);
+  assert.equal(isWebviewMessage({ type: 'deleteModel', modelId: '' }), false);
+  assert.equal(isWebviewMessage({ type: 'setDefaultModel', modelId: 'ollama:qwen%3Atest' }), true);
   assert.equal(isWebviewMessage({ type: 'setMode', mode: 'agent' }), true);
   assert.equal(isWebviewMessage({ type: 'setMode', mode: 'plan' }), true);
   assert.equal(isWebviewMessage({ type: 'setMode', mode: 'ask' }), true);

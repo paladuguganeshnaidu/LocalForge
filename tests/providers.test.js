@@ -109,6 +109,61 @@ test('routes namespaced composite model ids to the provider that discovered them
   assert.equal(output, 'Local answer');
 });
 
+test('routes model installation only to the configured local Ollama provider', async () => {
+  let installed;
+  const localOllama = {
+    id: 'ollama',
+    pullModel: async (name, onProgress, signal) => {
+      installed = { name, onProgress, signal };
+    }
+  };
+  const remoteOllama = {
+    id: 'ssh-remote-ollama',
+    pullModel: async () => { throw new Error('Remote installs must not be selected.'); }
+  };
+  const composite = new CompositeProvider([remoteOllama, localOllama]);
+  const controller = new AbortController();
+  const onProgress = () => {};
+
+  await composite.pullModel('qwen2.5-coder:7b', onProgress, controller.signal);
+  assert.deepEqual(installed, { name: 'qwen2.5-coder:7b', onProgress, signal: controller.signal });
+});
+
+test('remote endpoints named ollama cannot be mutated by local model-management actions', async () => {
+  let mutations = 0;
+  const provider = {
+    id: 'ollama', source: 'remote',
+    listModels: async () => [{ name: 'remote:test', source: 'remote' }],
+    pullModel: async () => { mutations += 1; },
+    deleteModel: async () => { mutations += 1; }
+  };
+  const composite = new CompositeProvider([provider]);
+  await assert.rejects(composite.pullModel('remote:test', () => {}), /local Ollama provider/);
+  await assert.rejects(composite.deleteModel('ollama:remote%3Atest'), /Only installed models/);
+  assert.equal(mutations, 0);
+});
+
+test('deletes only an installed local Ollama model, never a remote model', async () => {
+  let deleted;
+  const localOllama = {
+    id: 'ollama',
+    listModels: async () => [{ name: 'qwen:test' }],
+    deleteModel: async (name) => { deleted = name; }
+  };
+  const remoteOllama = {
+    id: 'ssh-remote-ollama',
+    listModels: async () => [{ name: 'large:test' }],
+    deleteModel: async () => { throw new Error('Remote model deletion must not be allowed.'); }
+  };
+  const composite = new CompositeProvider([localOllama, remoteOllama]);
+
+  await composite.deleteModel('ollama:qwen%3Atest');
+  assert.equal(deleted, 'qwen:test');
+  await assert.rejects(composite.deleteModel('ssh-remote-ollama:large%3Atest'), /Only installed models from the configured local Ollama provider/);
+  await assert.rejects(composite.deleteModel('ollama:not-installed'), /Only installed models from the configured local Ollama provider/);
+  assert.equal(deleted, 'qwen:test');
+});
+
 test('model routing honors a task preference and falls back to the explicit selection', () => {
   const models = [
     { name: 'ollama:qwen', providerId: 'ollama' },

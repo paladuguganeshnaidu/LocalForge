@@ -2,6 +2,15 @@
 
 All notable changes to the LocalForge extension are documented in this file.
 
+## [Unreleased]
+
+- Add a dedicated Models view for installed local Ollama models, downloads, default selection, and removal.
+- Show streamed download progress with pause/resume and cancellation, and refresh discovery after successful installs.
+- Preserve active and paused downloads across Models view recreation without letting model selection or discovery notices reset their controls.
+- Reject interrupted download streams that never confirm success, and reject deletion of undiscovered models.
+- Refresh the agent model registry after model management actions so newly installed models can be selected immediately.
+- Distinguish loopback Ollama services from LAN, internet, and SSH endpoints, and keep local model-management actions scoped to local services.
+
 ## [0.2.23] - 2026-10-01
 
 - Persist requested, approved, denied, and cancelled tool permissions in the expandable run timeline.

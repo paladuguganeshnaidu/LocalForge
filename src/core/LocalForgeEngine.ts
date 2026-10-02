@@ -87,7 +87,7 @@ export class LocalForgeEngine {
 
     this.compositeProvider = new CompositeProvider(defaultProviders);
     this.modelRegistry = new ModelRegistry();
-    this.modelRegistry.registerProvider(localOllama, 'local', ollamaUrl);
+    this.modelRegistry.registerProvider(localOllama, localOllama.source, ollamaUrl);
     if (options.openAiEndpoint) {
       this.modelRegistry.registerProvider(new OpenAiCompatibleProvider('openai', options.openAiEndpoint), 'local', options.openAiEndpoint);
     }

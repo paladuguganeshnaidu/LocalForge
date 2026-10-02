@@ -38,8 +38,11 @@ export interface ModelToolDefinition {
 
 export interface ModelProvider {
   readonly id: string;
+  readonly source?: ModelSource;
   detect(): Promise<boolean>;
   listModels(): Promise<LocalModel[]>;
+  pullModel?(name: string, onProgress: (progress: ModelPullProgress) => void, signal?: AbortSignal): Promise<void>;
+  deleteModel?(name: string, signal?: AbortSignal): Promise<void>;
   streamChat(
     model: string,
     messages: ChatMessage[],
@@ -53,4 +56,10 @@ export interface ModelProvider {
     signal?: AbortSignal,
     onContentDelta?: (delta: string) => void
   ): Promise<ChatMessage>;
+}
+
+export interface ModelPullProgress {
+  status: string;
+  total?: number;
+  completed?: number;
 }
