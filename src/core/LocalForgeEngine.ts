@@ -12,7 +12,7 @@ import { ToolRegistry } from '../agent/toolRegistry';
 import { isPermissionMode, PermissionManager } from '../agent/permissionManager';
 import { AgentEngine, AgentRunSummary } from '../agent/agentEngine';
 import { AgentMode } from '../agent/agentLoop';
-import { EditEngine } from '../editing/editEngine';
+import { EditEngine, EditRollbackResult } from '../editing/editEngine';
 import { RemoteManager } from '../remote/remoteManager';
 import { SessionManager } from './sessionManager';
 import { TaskManager } from './taskManager';
@@ -98,7 +98,7 @@ export class LocalForgeEngine {
     this.permissionManager = new PermissionManager(isPermissionMode(savedPermissionMode) ? savedPermissionMode : 'always_ask');
     this.toolRegistry = new ToolRegistry();
 
-    this.editEngine = new EditEngine();
+    this.editEngine = new EditEngine(context.workspaceState, context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined);
     this.terminalManager = new TerminalManager();
     this.agentEngine = new AgentEngine(this.toolRegistry, this.permissionManager, this.editEngine, this.terminalManager);
     this.remoteManager = new RemoteManager(context, this.compositeProvider, this.modelRegistry);
@@ -739,6 +739,39 @@ export class LocalForgeEngine {
       this.turnManager.completeTurn(turn.turnId, signal.aborted ? 'cancelled' : 'failed');
       emitAct(signal.aborted ? 'Cancelled' : 'Failed', signal.aborted ? 'Review validation cancelled; inspect any already applied changes' : 'Review application or validation failed', signal.aborted ? 'cancelled' : 'error', error instanceof Error ? error.message : String(error));
       throw error;
+    }
+  }
+
+  public async rollbackRecordedChanges(recoveryId: string, files?: string[], onActivity?: (activity: TurnActivity) => void): Promise<EditRollbackResult> {
+    if (this.isBusy()) throw new Error('Wait for the current task or cancel it before restoring changes.');
+    const controller = new AbortController();
+    const session = this.sessionManager.getActiveSession();
+    const turn = this.turnManager.startTurn({ conversationId: session.id, modelId: session.model || '', mode: 'agent', strategy: 'fast' });
+    const activity = this.turnManager.addActivity(turn.turnId, {
+      category: 'Editing', title: 'Restoring recorded changes', status: 'running', toolName: 'rollback_changes', inputSummary: recoveryId
+    });
+    this.currentAbortController = controller;
+    try {
+      onActivity?.(activity);
+      const result = await this.editEngine.rollbackChanges(recoveryId, files, controller.signal);
+      const updated = this.turnManager.updateActivity(turn.turnId, activity.id, {
+        status: result.success ? 'success' : 'error',
+        title: result.success ? `Restored ${result.restoredFiles.length} file(s)` : 'Rollback refused or incomplete',
+        outputSummary: JSON.stringify(result), durationMs: Date.now() - activity.timestamp
+      });
+      if (updated) onActivity?.(updated);
+      this.turnManager.completeTurn(turn.turnId, result.success ? 'completed' : 'failed', result.restoredFiles);
+      return result;
+    } catch (error) {
+      const updated = this.turnManager.updateActivity(turn.turnId, activity.id, {
+        status: controller.signal.aborted ? 'cancelled' : 'error',
+        error: error instanceof Error ? error.message : String(error), durationMs: Date.now() - activity.timestamp
+      });
+      if (updated) onActivity?.(updated);
+      this.turnManager.completeTurn(turn.turnId, controller.signal.aborted ? 'cancelled' : 'failed');
+      throw error;
+    } finally {
+      if (this.currentAbortController === controller) this.currentAbortController = undefined;
     }
   }
 

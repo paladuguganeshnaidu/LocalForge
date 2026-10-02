@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { applyReviewedSelection } from './editing/selectionEdits';
 import { randomUUID } from 'node:crypto';
 import { LocalForgeEngine } from './core/LocalForgeEngine';
 import { LocalForgeViewProvider } from './ui/chatView';
@@ -246,6 +247,23 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
       }
     }),
 
+    vscode.commands.registerCommand('localforge.undoChanges', async (recoveryId?: string) => {
+      let selectedId = typeof recoveryId === 'string' ? recoveryId : undefined;
+      if (!selectedId) {
+        const records = engine.editEngine.getRecoveryHistory().filter((record) => record.remainingFiles.length > 0);
+        if (!records.length) {
+          void vscode.window.showInformationMessage('No recorded changes are available to restore.');
+          return;
+        }
+        const selected = await vscode.window.showQuickPick(records.map((record) => ({
+          label: record.summary, description: record.status.replace(/_/g, ' '),
+          detail: `${record.remainingFiles.length} file(s) · ${new Date(record.createdAt).toLocaleString()}`, id: record.id
+        })), { placeHolder: 'Choose the recorded edit to restore' });
+        selectedId = selected?.id;
+      }
+      if (selectedId) await viewProvider.rollbackRecordedChanges(selectedId);
+    }),
+
     vscode.commands.registerCommand('localforge.showArtifacts', async () => {
       const session = engine.sessionManager.getActiveSession();
       const artifacts = engine.artifactManager.getArtifactsByConversation(session.id);
@@ -443,10 +461,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
     return;
   }
 
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(editor.document.uri, targetRange, replacement);
-  const applied = await vscode.workspace.applyEdit(edit);
-  if (applied) void vscode.window.showInformationMessage('LOMVREN applied the reviewed fix.');
+  await applyRecordedSelection(engine, viewProvider, editor.document, targetRange, replacement, controller.signal);
 }
 
 async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
@@ -530,10 +545,27 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
     return;
   }
 
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(editor.document.uri, targetRange, replacement);
-  const applied = await vscode.workspace.applyEdit(edit);
-  if (applied) void vscode.window.showInformationMessage('LOMVREN applied the reviewed edit.');
+  await applyRecordedSelection(engine, viewProvider, editor.document, targetRange, replacement, controller.signal);
+}
+
+async function applyRecordedSelection(
+  engine: LocalForgeEngine,
+  viewProvider: LocalForgeViewProvider,
+  document: vscode.TextDocument,
+  range: vscode.Range,
+  replacement: string,
+  signal: AbortSignal
+): Promise<void> {
+  try {
+    if (engine.isBusy()) throw new Error('Wait for the running task before applying a selection edit.');
+    const result = await applyReviewedSelection(engine.editEngine, document, range, replacement, signal);
+    if (!result.success) throw new Error(result.errors.map((error) => error.error).join('\n'));
+    void vscode.window.showInformationMessage('LOMVREN saved the reviewed edit. Recorded Undo is available in Changes or the command palette.');
+  } catch (error) {
+    void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+  } finally {
+    viewProvider.postRecoveryHistory();
+  }
 }
 
 async function searchWorkspace(): Promise<void> {

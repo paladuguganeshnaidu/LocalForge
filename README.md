@@ -40,6 +40,14 @@ Open the **Models** view in the LOMVREN sidebar to search installed models, sele
 - **Fast**: Direct execution for small, focused tasks (variable renames, single-function fixes, inline queries).
 - **Planning**: Deep repository inspection, Task List and Implementation Plan deliverables, approval pause, and structured verification.
 
+### Undo reviewed changes
+
+Open **Changes → Recorded changes**, or run **LOMVREN: Undo Recorded Changes** from the Command Palette. Select a recorded edit and confirm restoration. Reviewed chat edits and accepted selection fixes save the original bytes before applying changes; recovery survives restarting VS Code. Restoring removes files created by that edit and preserves original encoding markers and line endings. It refuses to overwrite later changes, dirty editors, or paths outside the original open workspace. Restore newer edits first when they affect the same files.
+
+Backups contain source code and are stored locally in this extension's per-workspace storage, outside the project. The interface and recovery-list tool expose metadata, not backup contents. **Remove backup** permanently removes that record's Undo capability after confirmation. Storage is capped at 40 records / 16 MiB; only fully restored records may be pruned automatically. If full or unreadable, further reviewed edits are blocked rather than discarding recoverable backups. Recovery covers reviewed text edits, not arbitrary terminal commands, direct filesystem tools, or MCP mutations; it is not a whole-workspace backup or a command sandbox.
+
+Developers can run `npm run test:recovery-restart` to verify exact file restoration and editor synchronization across two separate VS Code processes in a disposable workspace.
+
 ---
 
 ## Interaction & Information Architecture

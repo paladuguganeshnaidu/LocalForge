@@ -4,6 +4,32 @@ const { test } = require('node:test');
 const { PermissionManager } = require('../dist/agent/permissionManager.js');
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 
+test('destructive tool metadata requires explicit approval even in automatic modes', async () => {
+  for (const mode of ['request_review', 'allow_safe_auto', 'always_proceed']) {
+    let executions = 0;
+    let requests = 0;
+    const registry = new ToolRegistry();
+    registry.registerTool({ type: 'function', function: { name: 'delete_file', description: 'Delete a recorded test file', parameters: {} } },
+      async () => { executions += 1; }, { category: 'edit', riskLevel: 'destructive', requiresApproval: true });
+    const permissions = new PermissionManager(mode, async () => { requests += 1; return false; });
+    await assert.rejects(registry.executeTool('delete_file', { path: 'safe.txt' }, permissions), /rejected/);
+    assert.equal(requests, 1);
+    assert.equal(executions, 0);
+  }
+});
+
+test('approval for one rollback ID does not authorize another recovery record', async () => {
+  let requests = 0;
+  const permissions = new PermissionManager('ask_once_per_session', async () => { requests += 1; return true; });
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'rollback_changes', description: 'Restore a recorded edit', parameters: {} } },
+    async () => ({ success: true }), { category: 'edit', riskLevel: 'destructive', requiresApproval: true });
+  await registry.executeTool('rollback_changes', { recoveryId: 'one' }, permissions);
+  await registry.executeTool('rollback_changes', { recoveryId: 'one' }, permissions);
+  await registry.executeTool('rollback_changes', { recoveryId: 'two' }, permissions);
+  assert.equal(requests, 2);
+});
+
 test('PermissionManager classifies tools correctly into read, edit, execute', () => {
   const pm = new PermissionManager();
   assert.equal(pm.classifyTool('read_workspace_file'), 'read');

@@ -37,6 +37,18 @@ test('rendered webview script (after template-literal evaluation) is valid JavaS
   assert.doesNotThrow(() => new vm.Script(match[1]), 'Rendered webview script has a syntax error');
 });
 
+test('rendered Changes drawer exposes guarded recovery controls and binds cards to their own proposals', () => {
+  const html = renderHtml();
+  assert.match(html, /id="recoveryList"/);
+  assert.match(html, /Undo recorded edit/);
+  assert.match(html, /Remove backup/);
+  assert.match(html, /type: 'rollbackEdit'/);
+  assert.match(html, /type: 'forgetEditRecovery'/);
+  assert.match(html, /proposalId: displayedProposal.id/);
+  assert.match(html, /activeProposal.id === msg.proposalId/);
+  assert.doesNotMatch(html, /record.originalBytes/);
+});
+
 test('rendered chat exposes expandable run evidence and approval modes', () => {
   const html = renderHtml();
   assert.match(html, /permissionModeSelect/);

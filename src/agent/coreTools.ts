@@ -21,6 +21,29 @@ export interface CoreToolContext {
 }
 
 export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolContext): void {
+  if (context.editEngine) {
+    const editEngine = context.editEngine;
+    registry.registerTool({
+      type: 'function', function: {
+        name: 'get_edit_recovery', description: 'List local edit recovery metadata and IDs without exposing source backups.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false }
+      }
+    }, async () => editEngine.getRecoveryHistory(), { category: 'read', riskLevel: 'read_only' });
+    registry.registerTool({
+      type: 'function', function: {
+        name: 'rollback_changes', description: 'Restore a recorded edit to its exact original file state, deleting newly created files. Requires explicit approval and refuses changed files.',
+        parameters: {
+          type: 'object', properties: {
+            recoveryId: { type: 'string', description: 'Recovery ID returned by get_edit_recovery' },
+            files: { type: 'array', items: { type: 'string' }, description: 'Optional recorded file paths to restore' }
+          }, required: ['recoveryId'], additionalProperties: false
+        }
+      }
+    }, async (args, execution) => {
+      if (args.files !== undefined && (!Array.isArray(args.files) || !args.files.every((path) => typeof path === 'string'))) throw new Error('Rollback files must be an array of recorded relative paths.');
+      return editEngine.rollbackChanges(getString(args.recoveryId, 'recoveryId', 100), args.files as string[] | undefined, execution.signal);
+    }, { category: 'edit', riskLevel: 'destructive', requiresApproval: true });
+  }
   // 1. read_file
   registry.registerTool(
     {

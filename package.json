@@ -28,6 +28,7 @@
     "onCommand:localforge.newConversation",
     "onCommand:localforge.continueTask",
     "onCommand:localforge.reviewChanges",
+    "onCommand:localforge.undoChanges",
     "onCommand:localforge.showArtifacts",
     "onCommand:localforge.diagnose",
     "onCommand:localforge.doctor",
@@ -137,6 +138,10 @@
         "title": "LOMVREN: Propose a Diff-Reviewed Edit"
       },
       {
+        "command": "localforge.undoChanges",
+        "title": "LOMVREN: Undo Recorded Changes"
+      },
+      {
         "command": "localforge.explain",
         "title": "LOMVREN: Explain Selected Code"
       },
@@ -221,6 +226,7 @@
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
     "test:extension-host": "npm run build && node tests/runExtensionHostTests.js",
+    "test:recovery-restart": "npm run build && node tests/runRecoveryRestartTests.js",
     "test:ollama-smoke": "node scripts/smoke-ollama.cjs",
     "test:ollama-agent": "npm run compile && node scripts/smoke-ollama-agent.cjs",
     "package": "npm run build && vsce package && node scripts/verify-marketplace-package.cjs"

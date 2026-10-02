@@ -90,7 +90,7 @@ Module._load = function (request, parent, isMain) {
         }
       },
       Uri: {
-        file: (path) => ({ fsPath: path.replace(/\\/g, '/'), path: path.replace(/\\/g, '/'), scheme: 'memfs' }),
+        file: (path) => ({ fsPath: path.replace(/\\/g, '/'), path: path.replace(/\\/g, '/'), scheme: 'memfs', toString: () => `memfs:${path.replace(/\\/g, '/')}` }),
         joinPath: (base, ...segments) => {
           const combined = [base.fsPath || base.path, ...segments].join('/').replace(/\\/g, '/');
           return { fsPath: combined, path: combined, scheme: base.scheme };

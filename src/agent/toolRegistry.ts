@@ -151,7 +151,8 @@ export class ToolRegistry {
     if (permissionManager) {
       const trustedBuiltinReadOnly = tool.source === 'builtin' &&
         tool.category === 'read' && tool.riskLevel === 'read_only' && !tool.requiresApproval;
-      const allowed = await permissionManager.checkPermission(name, args, trustedBuiltinReadOnly, options.signal);
+      const requireExplicitApproval = tool.requiresApproval && ['high_risk', 'destructive', 'privileged', 'network'].includes(tool.riskLevel);
+      const allowed = await permissionManager.checkPermission(name, args, trustedBuiltinReadOnly, options.signal, requireExplicitApproval);
       options.signal?.throwIfAborted();
       if (!allowed) {
         throw new Error(`Execution of tool “${name}” was rejected by user or permission policy.`);

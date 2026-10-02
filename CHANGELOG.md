@@ -4,6 +4,12 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [Unreleased]
 
+- Record original bytes before reviewed edits in synced, atomically replaced local workspace-storage snapshots; recover and undo changes after extension/VS Code restart.
+- Provide confirmed Undo and Remove backup controls in the Changes drawer and a Command Palette Undo action; preserve later manual changes, dirty editors, and workspace boundaries.
+- Route accepted selection fixes through the same reviewed-edit recovery engine and expose metadata-only recovery tools with explicit destructive-action approvals.
+- Bound backup storage without silently evicting recoverable edits, fail closed on corrupt durable storage, and verify real process-restart recovery.
+- Bind inline proposal actions to their own proposal and prevent replaced chat requests from overwriting newer streaming/busy state.
+
 - Bind model requests, permission waits, and tool execution to per-run cancellation signals; cancelled approvals cannot execute actions or grant session permissions later.
 - Start tool execution deadlines after permission approval, abort supported commands and HTTP requests on cancellation, and guard file mutations after asynchronous preparation.
 - Restore pending approval cards when chat reloads and remove cancelled cards automatically.

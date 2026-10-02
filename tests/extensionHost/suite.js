@@ -45,6 +45,7 @@ async function run() {
     'localforge.newConversation',
     'localforge.continueTask',
     'localforge.reviewChanges',
+    'localforge.undoChanges',
     'localforge.showArtifacts',
     'localforge.diagnose',
     'localforge.doctor',
@@ -285,15 +286,18 @@ async function run() {
       const directoryUri = vscode.Uri.joinPath(root, directoryName);
       const target = vscode.Uri.joinPath(directoryUri, 'existing.txt');
       await vscode.workspace.fs.createDirectory(directoryUri);
+      let recoveryId;
       try {
         await vscode.workspace.fs.writeFile(target, Buffer.from('original'));
         const proposal = await ext.exports.engine.editEngine.proposeEdits(root, [
           { path: `${directoryName}/existing.txt`, newContent: 'reviewed and persisted' }
         ]);
         const result = await ext.exports.engine.editEngine.applyProposal(proposal.id);
-        assert.equal(result.success, true);
+        recoveryId = result.recoveryId;
+        assert.equal(result.success, true, JSON.stringify(result.errors));
         assert.equal(Buffer.from(await vscode.workspace.fs.readFile(target)).toString('utf8'), 'reviewed and persisted');
       } finally {
+        if (recoveryId) await ext.exports.engine.editEngine.forgetRecovery(recoveryId);
         await vscode.workspace.fs.delete(directoryUri, { recursive: true, useTrash: false }).catch(() => {});
       }
     });
@@ -314,6 +318,7 @@ async function run() {
       const expectedMarker = 'LOCALFORGE_REVIEWED_EDIT_OK';
       const originalMode = api.engine.permissionManager.getMode();
       const toolCalls = [];
+      let recoveryId;
 
       await vscode.workspace.fs.createDirectory(directoryUri);
       autoApprovePath = relativePath;
@@ -364,10 +369,12 @@ async function run() {
         await assert.rejects(vscode.workspace.fs.readFile(fileUri));
 
         const accepted = await api.engine.editEngine.applyProposal(proposal.id);
+        recoveryId = accepted.recoveryId;
         assert.equal(accepted.success, true, 'Accepting the reviewed proposal should apply it');
         const written = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString('utf8');
         assert.ok(written.includes(expectedMarker), `The accepted file should contain the requested model-generated content; actual content: ${JSON.stringify(written)}; proposal: ${JSON.stringify(proposal.files[0].newContent)}; agent response: ${result.response}`);
       } finally {
+        if (recoveryId) await api.engine.editEngine.forgetRecovery(recoveryId);
         autoApprovePath = undefined;
         api.engine.permissionManager.setMode(originalMode);
         await vscode.workspace.fs.delete(directoryUri, { recursive: true, useTrash: false }).catch(() => {});

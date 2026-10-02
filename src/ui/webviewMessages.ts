@@ -32,6 +32,8 @@ export type WebviewMessage =
   | { type: 'diagnose' }
   | { type: 'applyEdit'; proposalId: string; files?: string[] }
   | { type: 'rejectEdit'; proposalId: string }
+  | { type: 'rollbackEdit'; recoveryId: string; files?: string[] }
+  | { type: 'forgetEditRecovery'; recoveryId: string }
   | { type: 'showDiff'; proposalId: string; filePath: string }
   | { type: 'openFile'; filePath: string }
   | { type: 'proceedArtifact'; artifactId: string }
@@ -118,7 +120,11 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
 
     case 'applyEdit':
     case 'rejectEdit':
-      return typeof msg.proposalId === 'string';
+      return typeof msg.proposalId === 'string' && msg.proposalId.length > 0 && msg.proposalId.length <= 200 && isFileSelection(msg.files);
+
+    case 'rollbackEdit':
+    case 'forgetEditRecovery':
+      return typeof msg.recoveryId === 'string' && /^undo-[a-f0-9-]{36}$/.test(msg.recoveryId) && isFileSelection(msg.files);
 
     case 'showDiff':
       return typeof msg.proposalId === 'string' && typeof msg.filePath === 'string';
@@ -171,4 +177,8 @@ export function isSafeRelativePath(input: string): boolean {
   if (!p || p.length > 1024 || p.includes('\0')) return false;
   if (p.startsWith('/') || p.startsWith('//') || /^[A-Za-z]:/.test(p)) return false;
   return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+
+function isFileSelection(files: unknown): boolean {
+  return files === undefined || (Array.isArray(files) && files.length > 0 && files.length <= 1000 && files.every((path) => typeof path === 'string' && isSafeRelativePath(path)));
 }

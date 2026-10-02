@@ -20,6 +20,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private models: LocalModel[] = [];
   private readonly conversations = new Map<string, ChatMessage[]>();
   private busy = false;
+  private activeInteraction?: symbol;
   private activeChat?: AbortController;
   private remoteSession?: { tunnel: SshOllamaTunnel; providerId: string; profileName: string };
   public selectedModel?: string;
@@ -205,6 +206,49 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       type: 'activityHistory',
       activities: conversationId ? this.engine?.getActivityHistory(conversationId) ?? [] : []
     });
+    this.postRecoveryHistory();
+  }
+
+  public postRecoveryHistory(): void {
+    this.post({ type: 'editRecovery', records: this.engine?.editEngine.getRecoveryHistory() ?? [] });
+  }
+
+  public async rollbackRecordedChanges(recoveryId: string, files?: string[]): Promise<void> {
+    if (!this.engine) return;
+    const record = this.engine.editEngine.getRecoveryHistory().find((entry) => entry.id === recoveryId);
+    if (!record) {
+      this.post({ type: 'error', message: 'This edit recovery record is unavailable.' });
+      return;
+    }
+    const selectedFiles = files ?? record.remainingFiles;
+    const choice = await vscode.window.showWarningMessage(
+      `Restore ${selectedFiles.length} recorded file(s)? Newly created files will be removed. Files changed since this edit will not be overwritten.`,
+      { modal: true }, 'Restore changes'
+    );
+    if (choice !== 'Restore changes') return;
+    if (this.engine.isBusy()) {
+      this.post({ type: 'error', message: 'Wait for the running task before restoring recorded changes.' });
+      return;
+    }
+    const interaction = Symbol('rollback');
+    this.activeInteraction = interaction;
+    this.busy = true;
+    this.post({ type: 'status', state: 'running', message: 'Restoring recorded changes...' });
+    try {
+      const result = await this.engine.rollbackRecordedChanges(recoveryId, files, (activity) => this.post({ type: 'activity', activity }));
+      this.post({ type: 'recoveryResult', success: result.success, summary: result.success
+        ? `Restored ${result.restoredFiles.length} file(s); ${result.unchangedFiles.length} were already unchanged.`
+        : `Rollback refused or incomplete: ${result.conflicts.map((conflict) => `${conflict.path}: ${conflict.error}`).join('\n')}` });
+    } catch (error) {
+      this.post({ type: 'recoveryResult', success: false, summary: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.postRecoveryHistory();
+      if (this.activeInteraction === interaction) {
+        this.busy = false;
+        this.activeInteraction = undefined;
+        this.post({ type: 'status', state: 'ready', message: 'Ready' });
+      }
+    }
   }
 
   public postActiveEditor(relPath: string): void {
@@ -375,39 +419,74 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
       if (message.type === 'applyEdit') {
         if (this.engine && message.proposalId) {
-          const res = await this.engine.applyProposalAndValidate(
-            message.proposalId,
-            message.files,
-            (act: TurnActivity) => this.post({ type: 'activity', activity: act }),
-            (p: string) => this.post({ type: 'status', state: 'running', message: p }),
-            (art: Artifact) => this.post({ type: 'artifact', artifact: art })
-          );
-          this.post({
-            type: 'editResult',
-            success: res.success && res.validationPassed !== false,
-            applied: res.success,
-            validationPassed: res.validationPassed,
-            summary: res.success
-              ? res.validationPassed === false
-                ? `Applied changes to ${res.appliedCount} file(s), but project validation did not pass.`
-                : `Applied changes to ${res.appliedCount} file(s).`
-              : `Apply failed: ${res.errors?.map((e: any) => e.error).join(', ') || 'Validation failed'}`
-          });
-          this.post({ type: 'status', state: 'ready', message: 'Ready' });
+          if (this.engine.isBusy()) {
+            this.post({ type: 'error', message: 'Wait for the running task before applying a proposal.' });
+            return;
+          }
+          const interaction = Symbol('apply');
+          this.activeInteraction = interaction;
+          this.busy = true;
+          try {
+            const res = await this.engine.applyProposalAndValidate(
+              message.proposalId,
+              message.files,
+              (activity: TurnActivity) => this.post({ type: 'activity', activity }),
+              (progress: string) => { if (this.activeInteraction === interaction) this.post({ type: 'status', state: 'running', message: progress }); },
+              (artifact: Artifact) => this.post({ type: 'artifact', artifact })
+            );
+            this.post({
+              type: 'editResult',
+              proposalId: message.proposalId,
+              success: res.success && res.validationPassed !== false,
+              applied: res.appliedCount > 0,
+              validationPassed: res.validationPassed,
+              summary: res.success
+                ? res.validationPassed === false
+                  ? `Applied changes to ${res.appliedCount} file(s), but project validation did not pass.`
+                  : `Applied changes to ${res.appliedCount} file(s).`
+                : `Apply failed: ${res.errors?.map((error: any) => error.error).join(', ') || 'Validation failed'}`
+            });
+          } catch (error) {
+            this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+          } finally {
+            this.postRecoveryHistory();
+            if (this.activeInteraction === interaction) {
+              this.busy = false;
+              this.activeInteraction = undefined;
+              this.post({ type: 'status', state: 'ready', message: 'Ready' });
+            }
+          }
+        }
+      }
+
+      if (message.type === 'rollbackEdit') {
+        await this.rollbackRecordedChanges(message.recoveryId, message.files);
+      }
+
+      if (message.type === 'forgetEditRecovery' && this.engine) {
+        const choice = await vscode.window.showWarningMessage('Remove this local source backup? Its recorded Undo will no longer be available. This does not change workspace files.', { modal: true }, 'Remove backup');
+        if (choice === 'Remove backup') {
+          try { await this.engine.editEngine.forgetRecovery(message.recoveryId); }
+          catch (error) { this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
+          this.postRecoveryHistory();
         }
       }
 
       if (message.type === 'rejectEdit') {
         if (this.engine && message.proposalId) {
-          this.engine.editEngine.rejectProposal(message.proposalId);
-          this.post({ type: 'editResult', success: false, summary: 'Proposed edits discarded.' });
-          this.post({ type: 'activity', activity: {
-            id: `act-${Date.now()}`,
-            category: 'Cancelled',
-            title: 'Proposal rejected by user',
-            status: 'cancelled',
-            timestamp: Date.now()
-          }});
+          try {
+            this.engine.editEngine.rejectProposal(message.proposalId);
+            this.post({ type: 'editResult', proposalId: message.proposalId, success: false, summary: 'Pending proposed edits discarded.' });
+            this.post({ type: 'activity', activity: {
+              id: `act-${Date.now()}`,
+              category: 'Cancelled',
+              title: 'Proposal rejected by user',
+              status: 'cancelled',
+              timestamp: Date.now()
+            }});
+          } catch (error) {
+            this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+          }
         }
       }
 
@@ -563,6 +642,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       console.warn('[LocalForge] Cancelling prior in-flight task for incoming prompt.');
       this.cancelActiveChat();
     }
+    const interaction = Symbol('chat');
+    this.activeInteraction = interaction;
     this.busy = true;
 
     const modelName = (message.model && message.model !== 'auto')
@@ -584,10 +665,10 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           {
             strategy: this.activeStrategy,
             onProgress: (progress) => {
-              this.post({ type: 'status', state: 'running', message: progress });
+              if (this.activeInteraction === interaction) this.post({ type: 'status', state: 'running', message: progress });
             },
             onToken: (token) => {
-              this.post({ type: 'chunk', content: token });
+              if (this.activeInteraction === interaction) this.post({ type: 'chunk', content: token });
             },
             onActivity: (activity: TurnActivity) => {
               this.post({ type: 'activity', activity });
@@ -597,6 +678,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
             }
           }
         );
+        if (this.activeInteraction !== interaction) return;
 
         // Check for pending proposals in the edit engine
         const pending = this.engine.editEngine.getPendingProposals();
@@ -629,11 +711,13 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           modelName,
           messages,
           (token) => {
+            if (this.activeInteraction !== interaction) return;
             full += token;
             this.post({ type: 'chunk', content: token });
           },
           this.activeChat.signal
         );
+        if (this.activeInteraction !== interaction) return;
 
         history.push({ role: 'user', content: message.prompt });
         history.push({ role: 'assistant', content: full });
@@ -644,11 +728,15 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error: any) {
       const errMsg = error?.name === 'AbortError' ? 'Task cancelled.' : error?.message || 'Request failed';
-      this.post({ type: 'error', message: errMsg });
+      if (this.activeInteraction === interaction) this.post({ type: 'error', message: errMsg });
     } finally {
-      this.busy = false;
-      this.activeChat = undefined;
-      this.post({ type: 'status', state: 'ready', message: finalStatusMessage });
+      this.postRecoveryHistory();
+      if (this.activeInteraction === interaction) {
+        this.busy = false;
+        this.activeChat = undefined;
+        this.activeInteraction = undefined;
+        this.post({ type: 'status', state: 'ready', message: finalStatusMessage });
+      }
     }
   }
 
@@ -1534,6 +1622,11 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     </div>
     <div style="font-size:12px; color:var(--subtle);" id="proposalSummary">No active proposals</div>
     <div class="diff-list" id="diffFileList"></div>
+    <details id="recoverySection" style="margin-top:12px; font-size:12px; max-height:45vh; overflow-y:auto;">
+      <summary>Recorded changes · Undo</summary>
+      <p style="color:var(--subtle);">Local source backups survive reload. Later manual changes are protected.</p>
+      <div id="recoveryList">No recorded changes.</div>
+    </details>
     <div style="display:flex; gap:8px; margin-top:auto;">
       <button class="action-btn" id="acceptAllBtn" style="flex:1;">Accept All</button>
       <button class="action-btn secondary" id="rejectAllBtn" style="flex:1;">Reject All</button>
@@ -2051,6 +2144,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       }
 
       if (msg.type === 'proposal') {
+        const displayedProposal = msg.proposal;
         activeProposal = msg.proposal;
         changesBadge.textContent = String(activeProposal.files.length);
         proposalSummary.textContent = activeProposal.summary + ' (' + activeProposal.files.length + ' files)';
@@ -2061,7 +2155,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           item.innerHTML = '<span>' + escapeHtml(f.path) + '</span>' +
             '<div class="diff-stats"><span class="stat-add">+' + f.additions + '</span><span class="stat-del">-' + f.deletions + '</span></div>';
           item.addEventListener('click', () => {
-            vscode.postMessage({ type: 'showDiff', proposalId: activeProposal.id, filePath: f.path });
+            vscode.postMessage({ type: 'showDiff', proposalId: displayedProposal.id, filePath: f.path });
           });
           diffFileList.appendChild(item);
         });
@@ -2086,7 +2180,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         const applyBtn = document.getElementById('apply-all-' + activeProposal.id);
         if (applyBtn) {
           applyBtn.addEventListener('click', () => {
-            vscode.postMessage({ type: 'applyEdit', proposalId: activeProposal.id });
+            if (!isBusy) vscode.postMessage({ type: 'applyEdit', proposalId: displayedProposal.id });
             card.remove();
           });
         }
@@ -2095,17 +2189,60 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           reviewBtn.addEventListener('click', () => {
             changesDrawer.classList.add('open');
             if (activeProposal.files.length > 0) {
-              vscode.postMessage({ type: 'showDiff', proposalId: activeProposal.id, filePath: activeProposal.files[0].path });
+              vscode.postMessage({ type: 'showDiff', proposalId: displayedProposal.id, filePath: displayedProposal.files[0].path });
             }
           });
         }
         const rejectBtn = document.getElementById('reject-' + activeProposal.id);
         if (rejectBtn) {
           rejectBtn.addEventListener('click', () => {
-            vscode.postMessage({ type: 'rejectEdit', proposalId: activeProposal.id });
+            if (!isBusy) vscode.postMessage({ type: 'rejectEdit', proposalId: displayedProposal.id });
             card.remove();
           });
         }
+      }
+
+      if (msg.type === 'editRecovery') {
+        const list = document.getElementById('recoveryList');
+        list.replaceChildren();
+        const records = Array.isArray(msg.records) ? msg.records : [];
+        if (!records.length) list.textContent = 'No recorded changes.';
+        records.forEach(record => {
+          const row = document.createElement('div');
+          row.style.cssText = 'padding:10px 0; border-top:1px solid var(--border);';
+          const title = document.createElement('div');
+          title.textContent = record.summary;
+          const meta = document.createElement('div');
+          meta.style.cssText = 'color:var(--subtle); margin:4px 0; overflow-wrap:anywhere;';
+          meta.textContent = record.status.replace(/_/g, ' ') + ' · ' + record.remainingFiles.length + ' recoverable file(s) · ' + new Date(record.createdAt).toLocaleString();
+          const paths = document.createElement('div');
+          paths.textContent = record.files.join(', ');
+          paths.style.cssText = 'font-size:11px; color:var(--subtle); overflow-wrap:anywhere; margin-bottom:6px;';
+          row.append(title, meta, paths);
+          if (record.remainingFiles.length) {
+            const undo = document.createElement('button');
+            undo.className = 'action-btn secondary';
+            undo.textContent = 'Undo recorded edit';
+            undo.onclick = () => { if (!isBusy) vscode.postMessage({ type: 'rollbackEdit', recoveryId: record.id }); };
+            row.appendChild(undo);
+          }
+          const forget = document.createElement('button');
+          forget.className = 'action-btn secondary';
+          forget.style.marginLeft = '6px';
+          forget.textContent = 'Remove backup';
+          forget.onclick = () => { if (!isBusy) vscode.postMessage({ type: 'forgetEditRecovery', recoveryId: record.id }); };
+          row.appendChild(forget);
+          list.appendChild(row);
+        });
+      }
+
+      if (msg.type === 'recoveryResult') {
+        const result = document.createElement('div');
+        result.className = 'msg-assistant';
+        result.style.whiteSpace = 'pre-wrap';
+        result.textContent = msg.summary || 'Recovery finished.';
+        mainScroll.appendChild(result);
+        scrollToLatest(false);
       }
 
       if (msg.type === 'permissionCancelled') {
@@ -2193,10 +2330,12 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           '<div style=\"font-size:12px; line-height:1.4;\">' + escapeHtml(msg.summary || '') + '</div>';
         mainScroll.appendChild(card);
         scrollToLatest(false);
-        activeProposal = null;
-        changesBadge.textContent = '0';
-        proposalSummary.textContent = 'No pending changes';
-        diffFileList.innerHTML = '';
+        if (!activeProposal || !msg.proposalId || activeProposal.id === msg.proposalId) {
+          activeProposal = null;
+          changesBadge.textContent = '0';
+          proposalSummary.textContent = 'No pending changes';
+          diffFileList.innerHTML = '';
+        }
       }
 
       if (msg.type === 'userMessage') {

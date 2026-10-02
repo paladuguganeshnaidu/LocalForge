@@ -261,13 +261,14 @@ export class PermissionManager {
     toolName: string,
     args: Record<string, unknown>,
     trustedBuiltinReadOnly = false,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    requireExplicitApproval = false
   ): Promise<boolean> {
     signal?.throwIfAborted();
     const category = trustedBuiltinReadOnly ? 'read' : this.classifyTool(toolName);
 
     // 0. Always proceed mode: auto allow after validating safety
-    if (this.mode === 'always_proceed') {
+    if (this.mode === 'always_proceed' && !requireExplicitApproval) {
       if (toolName === 'run_command' && typeof args.command === 'string') {
         this.validateCommandSafety(args.command);
         // Commands outside the reviewed safe allow-list require explicit approval.
@@ -280,7 +281,7 @@ export class PermissionManager {
     }
 
     // 1. Read operations: auto allowed in request_review, allow_safe_auto, and ask_once_per_session
-    if (category === 'read') {
+    if (category === 'read' && !requireExplicitApproval) {
       return true;
     }
 
@@ -288,17 +289,17 @@ export class PermissionManager {
     if (toolName === 'run_command' && typeof args.command === 'string') {
       this.validateCommandSafety(args.command);
       // Auto-approved only if explicitly safe without chaining
-      if ((this.mode === 'allow_safe_auto' || this.mode === 'request_review') && this.isSafeCommand(args.command)) {
+      if (!requireExplicitApproval && (this.mode === 'allow_safe_auto' || this.mode === 'request_review') && this.isSafeCommand(args.command)) {
         return true;
       }
     }
 
     // 3. Edit operations: allowed to generate proposals for user diff review in request_review and allow_safe_auto
-    if (category === 'edit' && (this.mode === 'request_review' || this.mode === 'allow_safe_auto')) {
+    if (!requireExplicitApproval && category === 'edit' && (this.mode === 'request_review' || this.mode === 'allow_safe_auto')) {
       return true;
     }
 
-    const sessionKey = `${toolName}:${args.path || args.command || ''}`;
+    const sessionKey = `${toolName}:${requireExplicitApproval ? JSON.stringify(args) : args.path || args.command || ''}`;
     if (this.mode === 'ask_once_per_session' && this.sessionApprovedTools.has(sessionKey)) {
       return true;
     }

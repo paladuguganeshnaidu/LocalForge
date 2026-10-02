@@ -5,10 +5,11 @@ import {
   computeContentHash,
   validateFileState,
   FileOriginalState,
-  StaleEditError
+  computeFileHash
 } from './patchService';
+import { EditJournal, RecoverySummary } from './editJournal';
 
-export type EditStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'stale' | 'failed';
+export type EditStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'stale' | 'failed' | 'reverted';
 
 export interface FileEditPlan {
   path: string;
@@ -48,12 +49,39 @@ export interface EditApplyResult {
   staleCount: number;
   appliedFiles: string[];
   errors: Array<{ path: string; error: string }>;
+  recoveryId?: string;
+}
+
+export interface EditRollbackResult {
+  recoveryId: string;
+  success: boolean;
+  restoredFiles: string[];
+  unchangedFiles: string[];
+  conflicts: Array<{ path: string; error: string }>;
 }
 
 export class EditEngine {
   private proposals = new Map<string, EditProposal>();
   private proposalRoots = new Map<string, vscode.Uri>();
   private applyingProposals = new Set<string>();
+  private originalBytes = new Map<string, Map<string, Uint8Array>>();
+  private mutationActive = false;
+  private readonly journal: EditJournal;
+
+  constructor(storage?: vscode.Memento, recoveryDirectory?: string) {
+    this.journal = new EditJournal(storage, recoveryDirectory);
+  }
+
+  public getRecoveryHistory(): RecoverySummary[] {
+    return this.journal.list();
+  }
+
+  public async forgetRecovery(id: string): Promise<void> {
+    if (this.mutationActive) throw new Error('Wait for the current edit operation before removing recovery records.');
+    this.mutationActive = true;
+    try { await this.journal.forget(id); }
+    finally { this.mutationActive = false; }
+  }
 
   /**
    * Propose a set of edits across one or more files in the workspace.
@@ -65,6 +93,7 @@ export class EditEngine {
     metadata?: { conversationId?: string; turnId?: string },
     signal?: AbortSignal
   ): Promise<EditProposal> {
+    if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before preparing file edits.');
     if (!edits.length) throw new Error('An edit proposal must contain at least one file.');
     const proposalId = `prop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const filePlans: FileEditPlan[] = [];
@@ -73,11 +102,13 @@ export class EditEngine {
     let totalAdditions = 0;
     let totalDeletions = 0;
     const targetPaths = new Set<string>();
+    const originals = new Map<string, Uint8Array>();
 
     for (const edit of edits) {
       signal?.throwIfAborted();
       const segments = validateWorkspaceRelativePath(edit.path);
-      const normalizedPath = segments.join('/');
+      const relativePath = segments.join('/');
+      const normalizedPath = workspaceRoot.scheme === 'file' && process.platform === 'win32' ? relativePath.toLowerCase() : relativePath;
       if (targetPaths.has(normalizedPath)) throw new Error('An edit proposal cannot contain duplicate file paths.');
       targetPaths.add(normalizedPath);
       const uri = vscode.Uri.joinPath(workspaceRoot, ...segments);
@@ -92,10 +123,12 @@ export class EditEngine {
         originalContent = new TextDecoder().decode(bytes);
         originalState = 'present';
         hash = computeContentHash(bytes);
+        originals.set(edit.path, Uint8Array.from(bytes));
       } catch (error) {
         if (!['ENOENT', 'FileNotFound'].includes((error as { code?: string }).code || '')) throw error;
         originalContent = '';
         originalState = 'missing';
+        originals.set(edit.path, new Uint8Array());
       }
 
       signal?.throwIfAborted();
@@ -137,6 +170,7 @@ export class EditEngine {
 
     this.proposals.set(proposalId, proposal);
     this.proposalRoots.set(proposalId, workspaceRoot);
+    this.originalBytes.set(proposalId, originals);
     return proposal;
   }
 
@@ -180,12 +214,15 @@ export class EditEngine {
     selectedPaths?: string[],
     signal?: AbortSignal
   ): Promise<EditApplyResult> {
-    if (this.applyingProposals.has(proposalId)) throw new Error('This proposal is already being applied.');
+    if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before applying file edits.');
+    if (this.applyingProposals.has(proposalId) || this.mutationActive) throw new Error('An edit operation is already in progress.');
+    this.mutationActive = true;
     this.applyingProposals.add(proposalId);
     try {
       return await this.applyValidatedProposal(proposalId, selectedPaths, signal);
     } finally {
       this.applyingProposals.delete(proposalId);
+      this.mutationActive = false;
     }
   }
 
@@ -266,18 +303,49 @@ export class EditEngine {
 
       signal?.throwIfAborted();
       for (const file of filesToApply) this.assertNoUnsavedChanges(file.uri);
+      const recovery = await this.journal.prepare({
+        proposalId,
+        root: root.toString(),
+        summary: proposal.summary.slice(0, 2000),
+        files: filesToApply.map((file) => ({
+          path: file.path,
+          originalState: file.originalState,
+          originalBytes: Buffer.from(this.originalBytes.get(proposalId)!.get(file.path)!).toString('base64'),
+          originalHash: file.originalHash,
+          expectedHash: computeContentHash(Buffer.from(file.newContent, 'utf8')),
+          reverted: false
+        }))
+      });
+      result.recoveryId = recovery.id;
+      for (const file of filesToApply) {
+        signal?.throwIfAborted();
+        if (file.uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, file.uri.fsPath, file.originalState === 'missing');
+        this.assertNoUnsavedChanges(file.uri);
+        const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
+        if (!validation.valid) throw new Error(`The file ${file.path} changed while its recovery snapshot was saved. No edits were submitted.`);
+      }
+      signal?.throwIfAborted();
+      if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed before the edit was submitted.');
       const applied = await vscode.workspace.applyEdit(workspaceEdit);
       if (!applied) throw new Error('VS Code declined the edit transaction. No direct file-write fallback was attempted.');
       nativeApplied = true;
 
+      const committed: Array<{ path: string; expectedHash: string }> = [];
       for (const file of filesToApply) {
+        let expectedText = file.newContent;
         if (file.originalState === 'present') {
           const document = await vscode.workspace.openTextDocument(file.uri);
           if (document.isDirty && !await document.save()) {
             throw new Error(`Changes were applied in the editor, but ${file.path} could not be saved. Inspect the modified documents before continuing.`);
           }
+          if (typeof document.getText === 'function') expectedText = document.getText();
         }
+        const bytes = await vscode.workspace.fs.readFile(file.uri);
+        if (new TextDecoder().decode(bytes) !== expectedText) throw new Error(`The applied content of ${file.path} changed unexpectedly. Inspect it before attempting recovery.`);
+        committed.push({ path: file.path, expectedHash: computeContentHash(bytes) });
+        await this.journal.update(recovery.id, 'prepared', [committed[committed.length - 1]]);
       }
+      await this.journal.update(recovery.id, 'applied', committed);
 
       for (const file of filesToApply) {
         file.status = 'applied';
@@ -289,6 +357,10 @@ export class EditEngine {
       result.success = true;
     } catch (error: any) {
       proposal.status = 'failed';
+      if (result.recoveryId) {
+        try { await this.journal.update(result.recoveryId, 'failed'); }
+        catch (journalError) { result.errors.push({ path: 'recovery', error: `The prepared recovery snapshot was retained, but finalization failed: ${journalError instanceof Error ? journalError.message : String(journalError)}` }); }
+      }
       if (nativeApplied) {
         result.appliedCount = filesToApply.length;
         result.appliedFiles = filesToApply.map((file) => file.path);
@@ -301,18 +373,88 @@ export class EditEngine {
     return result;
   }
 
+  public async rollbackChanges(recoveryId: string, selectedPaths?: string[], signal?: AbortSignal): Promise<EditRollbackResult> {
+    if (this.mutationActive) throw new Error('An edit operation is already in progress.');
+    if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before restoring file changes.');
+    this.mutationActive = true;
+    try {
+      signal?.throwIfAborted();
+      const record = this.journal.get(recoveryId);
+      if (!record) throw new Error('The edit recovery record is unavailable.');
+      const root = vscode.workspace.workspaceFolders?.find((folder) => folder.uri.toString() === record.root)?.uri;
+      if (!root) throw new Error('Open the original workspace folder before restoring this edit.');
+      const paths = selectedPaths ? new Set(selectedPaths) : undefined;
+      if (paths && Array.from(paths).some((path) => !record.files.some((file) => file.path === path))) throw new Error('The rollback selection contains an unknown file.');
+      const files = record.files.filter((file) => !file.reverted && (!paths || paths.has(file.path)));
+      if (!files.length) throw new Error('No recoverable files were selected.');
+      const result: EditRollbackResult = { recoveryId, success: false, restoredFiles: [], unchangedFiles: [], conflicts: [] };
+      const targets: Array<{ file: typeof files[number]; uri: vscode.Uri }> = [];
+      for (const file of files) {
+        signal?.throwIfAborted();
+        const uri = vscode.Uri.joinPath(root, ...validateWorkspaceRelativePath(file.path));
+        try {
+          if (uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, uri.fsPath, true);
+          this.assertNoUnsavedChanges(uri);
+          const currentHash = await computeFileHash(uri);
+          if (currentHash === file.originalHash) {
+            result.unchangedFiles.push(file.path);
+          } else if (currentHash === file.expectedHash) {
+            targets.push({ file, uri });
+          } else {
+            result.conflicts.push({ path: file.path, error: 'This file changed after the recorded edit. No files were restored.' });
+          }
+        } catch (error) {
+          result.conflicts.push({ path: file.path, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (result.conflicts.length) return result;
+      signal?.throwIfAborted();
+      if (targets.length) {
+        const edit = new vscode.WorkspaceEdit();
+        for (const { file, uri } of targets) {
+          this.assertNoUnsavedChanges(uri);
+          if (file.originalState === 'missing') edit.deleteFile(uri, { recursive: false, ignoreIfNotExists: false });
+          else edit.createFile(uri, { overwrite: true, contents: Buffer.from(file.originalBytes, 'base64') });
+        }
+        signal?.throwIfAborted();
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed before rollback was submitted.');
+        if (!await vscode.workspace.applyEdit(edit)) {
+          result.conflicts.push({ path: 'transaction', error: 'VS Code declined the rollback transaction. No direct file-write fallback was attempted.' });
+          return result;
+        }
+        for (const { file, uri } of targets) {
+          if (await computeFileHash(uri) === file.originalHash) result.restoredFiles.push(file.path);
+          else result.conflicts.push({ path: file.path, error: 'Rollback did not restore the exact original file state. Inspect the file and retained recovery snapshot.' });
+        }
+      }
+      const reverted = [...result.restoredFiles, ...result.unchangedFiles];
+      const allReverted = record.files.every((file) => file.reverted || reverted.includes(file.path));
+      await this.journal.update(recoveryId, allReverted ? 'reverted' : 'partially_reverted', reverted.map((path) => ({ path, reverted: true })));
+      const proposal = this.proposals.get(record.proposalId);
+      if (proposal) {
+        for (const file of proposal.files) if (reverted.includes(file.path)) file.status = 'reverted';
+        proposal.status = proposal.files.every((file) => file.status === 'reverted') ? 'reverted' : proposal.status;
+      }
+      result.success = result.conflicts.length === 0;
+      return result;
+    } finally {
+      this.mutationActive = false;
+    }
+  }
+
   private assertNoUnsavedChanges(uri: vscode.Uri): void {
     const document = vscode.workspace.textDocuments?.find((candidate) => candidate.uri.toString() === uri.toString());
     if (document?.isDirty) throw new Error('Save or discard your unsaved changes to this file before generating or applying an edit proposal.');
   }
 
   public rejectProposal(proposalId: string): void {
+    if (this.applyingProposals.has(proposalId)) throw new Error('An accepted edit is already being applied. Wait for it to finish, then use recorded Undo.');
     const proposal = this.proposals.get(proposalId);
     if (proposal) {
-      proposal.status = 'rejected';
       for (const file of proposal.files) {
-        file.status = 'rejected';
+        if (file.status === 'pending' || file.status === 'approved') file.status = 'rejected';
       }
+      proposal.status = proposal.files.some((file) => file.status === 'applied') ? 'applied' : 'rejected';
     }
   }
 
