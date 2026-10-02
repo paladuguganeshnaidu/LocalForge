@@ -30,8 +30,10 @@ class EventEmitter {
 }
 
 class WorkspaceEdit {
-  createFile() {}
-  replace() {}
+  constructor() { this.operations = []; }
+  createFile(uri, options) { this.operations.push({ uri, create: true, content: options.contents }); }
+  replace(uri, _range, content) { this.operations.push({ uri, content }); }
+  insert(uri, _position, content) { this.operations.push({ uri, content }); }
 }
 
 class Range {
@@ -60,7 +62,18 @@ Module._load = function (request, parent, isMain) {
       Position,
       workspace: {
         isTrusted: true,
-        applyEdit: async () => false,
+        openTextDocument: async () => ({ isDirty: false }),
+        applyEdit: async (edit) => {
+          const updated = new Map(memoryFs);
+          for (const operation of edit.operations) {
+            const key = operation.uri.fsPath.replace(/\\/g, '/');
+            if (operation.create && updated.has(key)) return false;
+            updated.set(key, Buffer.from(operation.content || ''));
+          }
+          memoryFs.clear();
+          for (const [key, value] of updated) memoryFs.set(key, value);
+          return true;
+        },
         fs: {
           readFile: async (uri) => {
             const pathKey = (uri.fsPath || uri.path || String(uri)).replace(/\\/g, '/');
@@ -77,10 +90,10 @@ Module._load = function (request, parent, isMain) {
         }
       },
       Uri: {
-        file: (path) => ({ fsPath: path.replace(/\\/g, '/'), path: path.replace(/\\/g, '/'), scheme: 'file' }),
+        file: (path) => ({ fsPath: path.replace(/\\/g, '/'), path: path.replace(/\\/g, '/'), scheme: 'memfs' }),
         joinPath: (base, ...segments) => {
           const combined = [base.fsPath || base.path, ...segments].join('/').replace(/\\/g, '/');
-          return { fsPath: combined, path: combined, scheme: 'file' };
+          return { fsPath: combined, path: combined, scheme: base.scheme };
         },
         parse: (str) => {
           const qIdx = str.indexOf('?');

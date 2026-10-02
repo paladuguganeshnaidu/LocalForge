@@ -1,5 +1,15 @@
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { PermissionManager, ToolCategory } from './permissionManager';
+import { withCancellation } from '../core/cancellation';
+
+export interface ToolExecutionContext {
+  signal: AbortSignal;
+}
+
+export interface ToolExecutionOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
 
 export type ToolRiskLevel =
   | 'read_only'
@@ -17,7 +27,7 @@ export interface RegisteredTool {
   riskLevel: ToolRiskLevel;
   requiresApproval: boolean;
   capabilitiesRequired?: string[];
-  handler: (args: Record<string, unknown>) => Promise<unknown>;
+  handler: (args: Record<string, unknown>, context: ToolExecutionContext) => Promise<unknown>;
   validate?: (args: Record<string, unknown>) => void;
   redact?: (result: unknown) => unknown;
   timeout?: number;
@@ -42,7 +52,7 @@ export class ToolRegistry {
 
   public registerTool(
     definition: ModelToolDefinition,
-    handler: (args: Record<string, unknown>) => Promise<unknown>,
+    handler: (args: Record<string, unknown>, context: ToolExecutionContext) => Promise<unknown>,
     categoryOrOptions?: ToolCategory | RegisterToolOptions,
     source: 'builtin' | 'mcp' | 'custom' = 'builtin'
   ): void {
@@ -125,8 +135,10 @@ export class ToolRegistry {
   public async executeTool(
     name: string,
     args: Record<string, unknown>,
-    permissionManager?: PermissionManager
+    permissionManager?: PermissionManager,
+    options: ToolExecutionOptions = {}
   ): Promise<unknown> {
+    options.signal?.throwIfAborted();
     const tool = this.tools.get(name);
     if (!tool) {
       throw new Error(`Tool “${name}” is not allow-listed or registered.`);
@@ -139,32 +151,31 @@ export class ToolRegistry {
     if (permissionManager) {
       const trustedBuiltinReadOnly = tool.source === 'builtin' &&
         tool.category === 'read' && tool.riskLevel === 'read_only' && !tool.requiresApproval;
-      const allowed = await permissionManager.checkPermission(name, args, trustedBuiltinReadOnly);
+      const allowed = await permissionManager.checkPermission(name, args, trustedBuiltinReadOnly, options.signal);
+      options.signal?.throwIfAborted();
       if (!allowed) {
         throw new Error(`Execution of tool “${name}” was rejected by user or permission policy.`);
       }
     }
 
-    let result: unknown;
-    if (tool.timeout && tool.timeout > 0) {
-      let timer: NodeJS.Timeout | undefined;
-      const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Tool "${name}" execution timed out after ${tool.timeout}ms.`)), tool.timeout);
-      });
-      try {
-        result = await Promise.race([tool.handler(args), timeoutPromise]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    } else {
-      result = await tool.handler(args);
+    const controller = new AbortController();
+    const abort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const timeoutMs = tool.timeout ?? options.timeoutMs;
+    let timer: NodeJS.Timeout | undefined;
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(() => controller.abort(new DOMException(`Tool "${name}" execution timed out after ${timeoutMs}ms.`, 'TimeoutError')), timeoutMs);
     }
-
-    if (tool.redact) {
-      return tool.redact(result);
+    try {
+      controller.signal.throwIfAborted();
+      const result = await withCancellation(tool.handler(args, { signal: controller.signal }), controller.signal);
+      controller.signal.throwIfAborted();
+      return tool.redact ? tool.redact(result) : result;
+    } finally {
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
     }
-
-    return result;
   }
 
   private inferCategory(name: string): ToolCategory {

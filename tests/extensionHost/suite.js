@@ -225,6 +225,23 @@ async function run() {
       assert.ok(webviewEvents.filter((event) => event.type === 'activity')
         .some((event) => event.activity.title.startsWith('Denied by user:')),
       'The updated approval decision should be sent to the visible timeline');
+      autoApproveCommand = undefined;
+      autoApproveSessionCommand = undefined;
+      api.engine.permissionManager.setMode('always_ask');
+      const approvalController = new AbortController();
+      const cancelledApproval = api.engine.permissionManager.checkPermission('run_command', {
+        command: 'echo LOCALFORGE_CANCELLED_APPROVAL'
+      }, false, approvalController.signal);
+      const cancelledRequest = webviewEvents.filter((event) => event.type === 'permissionRequest').at(-1).request;
+      await messageHandler({ type: 'ready' });
+      assert.ok(webviewEvents.filter((event) => event.type === 'permissionRequest' && event.request.id === cancelledRequest.id).length >= 2,
+        'Pending approvals should be replayed when the view reloads');
+      approvalController.abort();
+      await assert.rejects(cancelledApproval, (error) => error.name === 'AbortError');
+      assert.ok(webviewEvents.some((event) => event.type === 'permissionCancelled' && event.requestId === cancelledRequest.id),
+        'Cancellation should remove the pending approval card');
+      await messageHandler({ type: 'permissionResolved', requestId: cancelledRequest.id, decision: 'allow_session' });
+      assert.equal(api.engine.permissionManager.getMode(), 'always_ask', 'A stale approval must not grant session permissions');
     } finally {
       autoApproveCommand = undefined;
       autoApproveSessionCommand = undefined;
@@ -261,6 +278,26 @@ async function run() {
   });
 
   if (process.env.LOCALFORGE_REAL_OLLAMA_EDIT === '1') {
+    await runStage('Native reviewed existing-file edits persist to disk', async () => {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+      assert.ok(root, 'A workspace is required for native edit verification');
+      const directoryName = `.localforge-native-edit-${Date.now()}`;
+      const directoryUri = vscode.Uri.joinPath(root, directoryName);
+      const target = vscode.Uri.joinPath(directoryUri, 'existing.txt');
+      await vscode.workspace.fs.createDirectory(directoryUri);
+      try {
+        await vscode.workspace.fs.writeFile(target, Buffer.from('original'));
+        const proposal = await ext.exports.engine.editEngine.proposeEdits(root, [
+          { path: `${directoryName}/existing.txt`, newContent: 'reviewed and persisted' }
+        ]);
+        const result = await ext.exports.engine.editEngine.applyProposal(proposal.id);
+        assert.equal(result.success, true);
+        assert.equal(Buffer.from(await vscode.workspace.fs.readFile(target)).toString('utf8'), 'reviewed and persisted');
+      } finally {
+        await vscode.workspace.fs.delete(directoryUri, { recursive: true, useTrash: false }).catch(() => {});
+      }
+    });
+
     await runStage('Stage 9: Live Ollama file proposal and approval', async () => {
       const api = ext.exports;
       const requestedModel = process.env.LOCALFORGE_OLLAMA_MODEL || 'qwen2.5-coder:1.5b';

@@ -5,6 +5,7 @@ import { ToolRegistry } from './toolRegistry';
 import { PermissionManager } from './permissionManager';
 import { ValidationEngine, ValidationAttempt } from './validationEngine';
 import { EditEngine } from '../editing/editEngine';
+import { TerminalManager } from '../terminal/terminalManager';
 
 export interface AgentRunSummary {
   runId: string;
@@ -24,9 +25,10 @@ export class AgentEngine {
   constructor(
     private readonly toolRegistry: ToolRegistry,
     private readonly permissionManager: PermissionManager,
-    private readonly editEngine?: EditEngine
+    private readonly editEngine?: EditEngine,
+    terminalManager?: TerminalManager
   ) {
-    this.validationEngine = new ValidationEngine();
+    this.validationEngine = new ValidationEngine(terminalManager);
   }
 
   public async runTask(
@@ -45,18 +47,22 @@ export class AgentEngine {
     const { response, state } = await loop.run(model, messages, {
       ...options,
       onToolEnd: (name, result, error, id) => {
-        if ((name === 'write_workspace_file' || name === 'edit_workspace_file') && !error) {
-          const res = result as { path?: string; applied?: boolean; success?: boolean; proposed?: boolean };
-          if (res?.path && !res.proposed && (res.applied || res.success) && !filesModified.includes(res.path)) {
-            filesModified.push(res.path);
+        if (['write_workspace_file', 'edit_workspace_file', 'write_file', 'create_file', 'replace_range', 'delete_file', 'move_file'].includes(name) && !error) {
+          const res = result as { path?: string; from?: string; to?: string; applied?: boolean; success?: boolean; proposed?: boolean };
+          if (res && res.success !== false && !res.proposed && (res.applied || res.success)) {
+            for (const path of [res.path, res.from, res.to]) {
+              if (path && !filesModified.includes(path)) filesModified.push(path);
+            }
           }
         }
         options.onToolEnd?.(name, result, error, id);
       }
     });
 
+    options.signal?.throwIfAborted();
+
     // If agent mode made file modifications that were auto-applied, run validation/repair loop
-    if (options.mode === 'agent' && filesModified.length > 0 && workspaceRoot) {
+    if ((options.mode ?? 'agent') === 'agent' && state.status === 'completed' && filesModified.length > 0 && workspaceRoot) {
       const attempts = await this.validateAndRepair(
         provider,
         model,
@@ -69,15 +75,18 @@ export class AgentEngine {
       validationAttempts.push(...attempts);
     }
 
+    const validationFailed = validationAttempts.length > 0 && !validationAttempts.at(-1)!.result.passed;
+    const validationError = validationFailed ? `Verification failed: ${validationAttempts.at(-1)!.result.command}` : undefined;
+
     return {
       runId: state.runId,
       task: state.task,
       mode: state.mode,
-      response,
+      response: validationError ? `${response}\n\n${validationError}. Review the validation output before continuing.` : response,
       filesModified,
       validationAttempts,
-      status: state.status,
-      errors: [...state.unresolvedErrors],
+      status: validationFailed ? 'failed' : state.status,
+      errors: [...state.unresolvedErrors, ...(validationError ? [validationError] : [])],
       durationMs: Date.now() - startTime
     };
   }
@@ -92,11 +101,21 @@ export class AgentEngine {
     options: AgentLoopOptions = {}
   ): Promise<ValidationAttempt[]> {
     const validationAttempts: ValidationAttempt[] = [];
+    options.signal?.throwIfAborted();
     const projectInfo = await this.validationEngine.detectProject(workspaceRoot);
+    options.signal?.throwIfAborted();
     if (!projectInfo.testCommand) return validationAttempts;
 
+    const runValidation = async () => {
+      options.signal?.throwIfAborted();
+      const approved = await this.permissionManager.checkPermission('run_command', { command: projectInfo.testCommand }, false, options.signal);
+      if (!approved) throw new Error(`Validation command was not approved: ${projectInfo.testCommand}`);
+      options.signal?.throwIfAborted();
+      return this.validationEngine.runValidation(workspaceRoot, projectInfo.testCommand, 60000, options.signal);
+    };
+
     options.onProgress?.(`Validating changes with ${projectInfo.testCommand}...`);
-    let currentResult = await this.validationEngine.runValidation(workspaceRoot, projectInfo.testCommand);
+    let currentResult = await runValidation();
 
     validationAttempts.push({
       attemptNumber: 1,
@@ -125,7 +144,7 @@ export class AgentEngine {
         }
       );
 
-      currentResult = await this.validationEngine.runValidation(workspaceRoot, projectInfo.testCommand);
+      currentResult = await runValidation();
       repairAttempt += 1;
       validationAttempts.push({
         attemptNumber: repairAttempt,

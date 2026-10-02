@@ -142,7 +142,9 @@ Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (
 
 - **Inference destinations**: Local providers use configured endpoints. SSH remote mode forwards requests to the host explicitly selected by the user. OpenAI-compatible endpoints can be remote; verify the configured server and its data policy. The extension does not operate a vendor-hosted inference or telemetry service.
 - **Workspace Trust Enforced**: Untrusted workspaces cannot execute workspace tools, read files, or run terminal commands.
-- **Two-Phase Atomic Commit**: Changes across multiple files are checked simultaneously. If any file has been modified externally, all changes are halted to prevent overwrites.
+- **Reviewed native edits**: All selected files are checked for stale content and workspace boundaries before one native VS Code edit transaction. A declined transaction is never retried using direct filesystem writes.
+- **Workspace boundaries**: Local file access resolves existing symlinks and junctions, including parents of new files. Review proposals recheck their targets before acceptance. These checks do not constitute an operating-system sandbox against concurrent external filesystem changes.
+- **Cancellation**: Cancelling a task invalidates its pending approvals, requests managed command-tree termination, aborts browser requests, and prevents later built-in writes. Processes remain in a stopping state until exit is observed; operating-system termination can take time. Tool deadlines begin after approval. Custom handlers receive an execution-specific abort signal and must honor it before side effects; arbitrary code ignoring cancellation cannot be forcibly rolled back. Already-submitted native editor transactions may finish.
 - **Host Key Pinning**: Remote SSH connections verify and store SHA-256 host key fingerprints to prevent MITM attacks.
 - **Command execution**: Only commands in the reviewed safe-command allow-list run without a prompt in automatic modes. Other commands require approval where an approval UI is available; shell execution is not a security sandbox.
 
@@ -155,7 +157,7 @@ LOMVREN employs a rigorous multi-tier testing strategy:
 - **Unit & Integration Tests**: `npm test` compiles TypeScript and runs the checked-in automated regression tests.
 - **High-Volume Stress Tests**: `tests/highVolumeStress.test.js` exercises 1,000 tool-call parser inputs across all syntaxes, 1,000 malformed inputs, 1,000 path security traversals, 1,000 webview message validations, 100 edit proposals, 100 permission checks, 100 synthetic agent loops, 10 real terminal executions, and concurrent cancellation scenarios.
 - **VS Code Extension Host Tests**: `npm run test:extension-host` verifies extension activation, command registration, Secondary Sidebar view contributions, diagnostics execution, and live webview IPC inside real VS Code Electron runtime environments.
-- **Production Packaging**: `npm run package` compiles the TypeScript codebase and packages the production-ready `.vsix` bundle via `@vscode/vsce`.
+- **Packaging**: `npm run package` compiles the TypeScript codebase and checks the `.vsix` bundle via `@vscode/vsce`. Packaging success is not proof that every production workflow is verified.
 
 ---
 

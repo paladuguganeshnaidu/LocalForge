@@ -1,3 +1,5 @@
+import { withCancellation } from '../core/cancellation';
+
 export type ToolCategory = 'read' | 'edit' | 'execute';
 export type PermissionMode =
   | 'request_review'
@@ -32,6 +34,7 @@ export interface PermissionRequest {
   commandCategory?: CommandCategory;
   path?: string;
   args?: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 export type ApprovalHandler = (request: PermissionRequest) => Promise<boolean>;
@@ -257,8 +260,10 @@ export class PermissionManager {
   public async checkPermission(
     toolName: string,
     args: Record<string, unknown>,
-    trustedBuiltinReadOnly = false
+    trustedBuiltinReadOnly = false,
+    signal?: AbortSignal
   ): Promise<boolean> {
+    signal?.throwIfAborted();
     const category = trustedBuiltinReadOnly ? 'read' : this.classifyTool(toolName);
 
     // 0. Always proceed mode: auto allow after validating safety
@@ -309,10 +314,12 @@ export class PermissionManager {
         command: cmd,
         commandCategory: cmd ? this.categorizeCommand(cmd) : undefined,
         path: typeof args.path === 'string' ? args.path : undefined,
-        args
+        args,
+        signal
       };
 
-      const approved = await this.approvalHandler(request);
+      const approved = await withCancellation(this.approvalHandler(request), signal);
+      signal?.throwIfAborted();
       if (approved && this.mode === 'ask_once_per_session') {
         this.sessionApprovedTools.add(sessionKey);
       }

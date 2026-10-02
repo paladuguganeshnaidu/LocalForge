@@ -4,6 +4,17 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [Unreleased]
 
+- Bind model requests, permission waits, and tool execution to per-run cancellation signals; cancelled approvals cannot execute actions or grant session permissions later.
+- Start tool execution deadlines after permission approval, abort supported commands and HTTP requests on cancellation, and guard file mutations after asynchronous preparation.
+- Restore pending approval cards when chat reloads and remove cancelled cards automatically.
+- Route validation and repair commands through the managed terminal and permission engine, and report exhausted validation repairs as failed.
+- Pass Git commit messages as process arguments rather than interpolating them into a shell command.
+- Enforce real-path boundaries for new files and reviewed proposals, including external junction parents; recheck targets before acceptance and reject unsafe path segments.
+- Preserve per-file pending review, block duplicate applies, and respect native edit rejection instead of falling back to unreviewed direct writes.
+- Keep replacement-task cancellation isolated, make review validation cancellable, and distinguish failed, repaired, and unrun validation in task history.
+- Initialize new-file content in the native edit transaction; wait for actual process exit before reporting stop/timeout completion or restarting, and expose stopping state while termination is in progress.
+- Save accepted existing-file edits before validation and refuse proposals that would overwrite unsaved user buffers.
+
 - Add a dedicated Models view for installed local Ollama models, downloads, default selection, and removal.
 - Show streamed download progress with pause/resume and cancellation, and refresh discovery after successful installs.
 - Preserve active and paused downloads across Models view recreation without letting model selection or discovery notices reset their controls.

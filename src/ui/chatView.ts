@@ -32,6 +32,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     request: PermissionRequest;
     activityId?: string;
     turnId?: string;
+    abortCleanup?: () => void;
   }>();
 
   constructor(
@@ -61,27 +62,39 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private initPermissionHandler(): void {
     if (!this.engine) return;
     this.engine.permissionManager.setApprovalHandler(async (request) => {
+      if (request.signal?.aborted) return false;
       return new Promise<boolean>((resolve) => {
         const activity = this.recordPermissionRequest(request);
+        const abort = () => this.resolvePermissionRequest(request.id, 'cancelled');
         this.pendingPermissionRequests.set(request.id, {
           resolve,
           request,
           activityId: activity?.activityId,
-          turnId: activity?.turnId
+          turnId: activity?.turnId,
+          abortCleanup: () => request.signal?.removeEventListener('abort', abort)
         });
-        this.post({
-          type: 'permissionRequest',
-          request: {
-            id: request.id,
-            toolName: request.toolName,
-            category: request.category,
-            commandCategory: request.commandCategory,
-            description: request.description,
-            command: request.command,
-            path: request.path
-          }
-        });
+        request.signal?.addEventListener('abort', abort, { once: true });
+        if (request.signal?.aborted) {
+          abort();
+          return;
+        }
+        this.postPermissionRequest(request);
       });
+    });
+  }
+
+  private postPermissionRequest(request: PermissionRequest): void {
+    this.post({
+      type: 'permissionRequest',
+      request: {
+        id: request.id,
+        toolName: request.toolName,
+        category: request.category,
+        commandCategory: request.commandCategory,
+        description: request.description,
+        command: request.command,
+        path: request.path
+      }
     });
   }
 
@@ -111,6 +124,9 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     const pending = this.pendingPermissionRequests.get(requestId);
     if (!pending) return;
     this.pendingPermissionRequests.delete(requestId);
+    pending.abortCleanup?.();
+    if (pending.request.signal?.aborted) decision = 'cancelled';
+    if (decision === 'cancelled') this.post({ type: 'permissionCancelled', requestId });
 
     if (decision === 'allow_session') this.setPermissionMode('ask_once_per_session');
 
@@ -481,6 +497,9 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         message: `${this.models.length} model(s) available`
       });
       this.post({ type: 'permissionMode', mode: this.engine?.permissionManager.getMode() ?? 'always_ask' });
+      for (const pending of this.pendingPermissionRequests.values()) {
+        if (!pending.request.signal?.aborted) this.postPermissionRequest(pending.request);
+      }
     } catch (error) {
       this.post({
         type: 'status',
@@ -2089,8 +2108,13 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         }
       }
 
+      if (msg.type === 'permissionCancelled') {
+        document.getElementById('perm-' + msg.requestId)?.remove();
+      }
+
       if (msg.type === 'permissionRequest') {
         const req = msg.request;
+        document.getElementById('perm-' + req.id)?.remove();
         const card = document.createElement('div');
         card.className = 'permission-card';
         card.id = 'perm-' + req.id;

@@ -60,7 +60,7 @@ test('AgentLoop halts immediately when AbortSignal is cancelled', async () => {
   const loop = new AgentLoop(provider, registry);
   await assert.rejects(
     () => loop.run('test-model', [{ role: 'user', content: 'Cancel me' }], { signal: controller.signal }),
-    /cancelled/
+    { name: 'AbortError' }
   );
 });
 

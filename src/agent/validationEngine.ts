@@ -1,8 +1,5 @@
 import * as vscode from 'vscode';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execAsync = promisify(exec);
+import { TerminalManager } from '../terminal/terminalManager';
 
 export type ProjectType = 'node' | 'python' | 'rust' | 'go' | 'java' | 'cpp' | 'unknown';
 
@@ -29,6 +26,7 @@ export interface ValidationAttempt {
 }
 
 export class ValidationEngine {
+  constructor(private readonly terminalManager = new TerminalManager()) {}
   /**
    * Detect the workspace project type and standard commands by inspecting files in the root.
    */
@@ -89,33 +87,20 @@ export class ValidationEngine {
   public async runValidation(
     workspaceRoot: vscode.Uri,
     command: string,
-    timeoutMs = 60000
+    timeoutMs = 60000,
+    signal?: AbortSignal
   ): Promise<ValidationResult> {
-    const startTime = Date.now();
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        cwd: workspaceRoot.fsPath,
-        timeout: timeoutMs,
-        maxBuffer: 1024 * 1024
-      });
-      return {
-        command,
-        passed: true,
-        exitCode: 0,
-        stdout: (stdout || '').trim().slice(0, 10000),
-        stderr: (stderr || '').trim().slice(0, 5000),
-        durationMs: Date.now() - startTime
-      };
-    } catch (error: any) {
-      return {
-        command,
-        passed: false,
-        exitCode: typeof error.code === 'number' ? error.code : 1,
-        stdout: (error.stdout || '').toString().trim().slice(0, 10000),
-        stderr: (error.stderr || error.message || '').toString().trim().slice(0, 5000),
-        durationMs: Date.now() - startTime
-      };
-    }
+    signal?.throwIfAborted();
+    const process = await this.terminalManager.runCommand(command, workspaceRoot.fsPath, false, timeoutMs, signal);
+    signal?.throwIfAborted();
+    return {
+      command,
+      passed: process.status === 'completed' && process.exitCode === 0,
+      exitCode: process.exitCode ?? 1,
+      stdout: process.stdout.trim().slice(0, 10000),
+      stderr: process.stderr.trim().slice(0, 5000),
+      durationMs: process.duration ?? 0
+    };
   }
 
   private async listRootFiles(root: vscode.Uri): Promise<Set<string>> {

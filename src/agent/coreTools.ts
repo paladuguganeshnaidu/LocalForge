@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
-import { realpath } from 'node:fs/promises';
-import { isAbsolute, relative, sep } from 'node:path';
-import { exec } from 'node:child_process';
+import { assertWorkspaceFilePath, validateWorkspaceRelativePath } from '../core/workspacePaths';
+import { exec, execFile } from 'node:child_process';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { ToolRegistry } from './toolRegistry';
 import { EditEngine } from '../editing/editEngine';
@@ -18,8 +17,7 @@ export interface CoreToolContext {
   terminalManager?: TerminalManager;
   artifactManager?: ArtifactManager;
   browserTool?: BrowserTool;
-  autoApply?: boolean;
-  signal?: AbortSignal;
+  autoApply?: boolean | (() => boolean);
 }
 
 export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolContext): void {
@@ -125,22 +123,24 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
       const content = typeof args.content === 'string' ? args.content : '';
       if (content.length > maximumWriteBytes) throw new Error('File content exceeds 512KB limit.');
 
       if (context.editEngine) {
         const root = getWorkspaceRootUri();
-        const proposal = await context.editEngine.proposeEdits(root, [{ path: relPath, newContent: content }], `Write ${relPath}`);
-        if (context.autoApply) {
-          const res = await context.editEngine.applyProposal(proposal.id);
+        const proposal = await context.editEngine.proposeEdits(root, [{ path: relPath, newContent: content }], `Write ${relPath}`, undefined, execution.signal);
+        if (typeof context.autoApply === 'function' ? context.autoApply() : context.autoApply) {
+          execution.signal.throwIfAborted();
+          const res = await context.editEngine.applyProposal(proposal.id, undefined, execution.signal);
           return { success: res.success, path: relPath, applied: true, proposalId: proposal.id };
         }
         return { success: true, path: relPath, proposed: true, proposalId: proposal.id };
       }
 
       const uri = await resolveWorkspaceUri(relPath, true);
+      execution.signal.throwIfAborted();
       await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
       return { success: true, path: relPath, bytesWritten: content.length };
     },
@@ -165,18 +165,20 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
       const content = typeof args.content === 'string' ? args.content : '';
+      if (content.length > maximumWriteBytes) throw new Error('File content exceeds 512KB limit.');
       const uri = await resolveWorkspaceUri(relPath, true);
 
       try {
         await vscode.workspace.fs.stat(uri);
         throw new Error(`File ${relPath} already exists. Use write_file to overwrite.`);
       } catch (err: any) {
-        if (err.message?.includes('already exists')) throw err;
+        if (!['ENOENT', 'FileNotFound'].includes(err.code)) throw err;
       }
 
+      execution.signal.throwIfAborted();
       await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
       return { success: true, path: relPath, created: true, bytesWritten: content.length };
     },
@@ -203,7 +205,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
       const startLine = Number(args.start_line);
       const endLine = Number(args.end_line);
@@ -222,6 +224,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       const newLines = replacement ? replacement.split(/\r?\n/) : [];
       const updated = [...before, ...newLines, ...after].join('\n');
 
+      execution.signal.throwIfAborted();
       await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf8'));
       return { success: true, path: relPath, replacedLines: endLine - startLine + 1, newTotalLines: lines.length };
     },
@@ -245,9 +248,10 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
       const uri = await resolveWorkspaceUri(relPath);
+      execution.signal.throwIfAborted();
       await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: true });
       return { success: true, path: relPath, deleted: true };
     },
@@ -272,11 +276,12 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const srcPath = getString(args.source_path, 'source_path', 500);
       const dstPath = getString(args.destination_path, 'destination_path', 500);
       const srcUri = await resolveWorkspaceUri(srcPath);
       const dstUri = await resolveWorkspaceUri(dstPath, true);
+      execution.signal.throwIfAborted();
       await vscode.workspace.fs.rename(srcUri, dstUri, { overwrite: false });
       return { success: true, from: srcPath, to: dstPath };
     },
@@ -379,10 +384,10 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         parameters: { type: 'object', properties: {}, additionalProperties: false }
       }
     },
-    async () => {
+    async (_args, execution) => {
       const root = getWorkspaceRootUri().fsPath;
       return new Promise((resolve) => {
-        exec('git status --short --branch', { cwd: root, timeout: 15000 }, (err, stdout, stderr) => {
+        exec('git status --short --branch', { cwd: root, timeout: 15000, signal: execution.signal }, (err, stdout, stderr) => {
           resolve({ status: (stdout || stderr || '').trim(), error: err ? err.message : undefined });
         });
       });
@@ -406,11 +411,11 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const root = getWorkspaceRootUri().fsPath;
       const flag = args.staged ? '--staged' : '';
       return new Promise((resolve) => {
-        exec(`git diff ${flag}`, { cwd: root, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        exec(`git diff ${flag}`, { cwd: root, timeout: 20000, maxBuffer: 1024 * 1024, signal: execution.signal }, (err, stdout, stderr) => {
           resolve({ diff: (stdout || stderr || '').slice(0, 50000), error: err ? err.message : undefined });
         });
       });
@@ -434,11 +439,11 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const root = getWorkspaceRootUri().fsPath;
       const count = typeof args.count === 'number' ? Math.min(20, Math.max(1, args.count)) : 5;
       return new Promise((resolve) => {
-        exec(`git log -n ${count} --oneline`, { cwd: root, timeout: 15000 }, (err, stdout, stderr) => {
+        exec(`git log -n ${count} --oneline`, { cwd: root, timeout: 15000, signal: execution.signal }, (err, stdout, stderr) => {
           resolve({ log: (stdout || stderr || '').trim(), error: err ? err.message : undefined });
         });
       });
@@ -463,11 +468,11 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const root = getWorkspaceRootUri().fsPath;
       const message = getString(args.message, 'message', 300);
       return new Promise((resolve) => {
-        exec(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd: root, timeout: 15000 }, (err, stdout, stderr) => {
+        execFile('git', ['commit', '-m', message], { cwd: root, timeout: 15000, signal: execution.signal }, (err, stdout, stderr) => {
           resolve({
             success: !err,
             output: (stdout || stderr || '').trim(),
@@ -496,16 +501,17 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const command = getString(args.command, 'command', 1000);
       validateCommandSafety(command);
       const rootPath = getWorkspaceRootUri().fsPath;
 
       if (context.terminalManager) {
-        const proc = await context.terminalManager.runCommand(command, rootPath, false, 60000, context.signal);
+        const proc = await context.terminalManager.runCommand(command, rootPath, false, 60000, execution.signal);
         return {
           command: proc.command,
-          exitCode: proc.exitCode ?? 0,
+          status: proc.status,
+          exitCode: proc.exitCode ?? null,
           stdout: (proc.stdout || '').trim().slice(0, 10000),
           stderr: (proc.stderr || '').trim().slice(0, 5000),
           durationMs: proc.duration
@@ -513,7 +519,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       }
 
       return new Promise((resolve) => {
-        exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024 }, (error, stdout, stderr) => {
+        exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024, signal: execution.signal }, (error, stdout, stderr) => {
           resolve({
             command,
             exitCode: error && typeof error.code === 'number' ? error.code : error ? 1 : 0,
@@ -542,11 +548,22 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
     },
-    async (args) => {
+    async (args, execution) => {
       const rootPath = getWorkspaceRootUri().fsPath;
       const cmd = args.test_filter ? `npm test -- ${args.test_filter}` : 'npm test';
+      if (context.terminalManager) {
+        const process = await context.terminalManager.runCommand(cmd, rootPath, false, 60000, execution.signal);
+        return {
+          command: cmd,
+          passed: process.status === 'completed' && process.exitCode === 0,
+          status: process.status,
+          exitCode: process.exitCode ?? null,
+          stdout: process.stdout.trim().slice(-10000),
+          stderr: process.stderr.trim().slice(-5000)
+        };
+      }
       return new Promise((resolve) => {
-        exec(cmd, { cwd: rootPath, timeout: 60000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        exec(cmd, { cwd: rootPath, timeout: 60000, maxBuffer: 1024 * 1024, signal: execution.signal }, (err, stdout, stderr) => {
           resolve({
             command: cmd,
             passed: !err,
@@ -732,44 +749,15 @@ async function resolveWorkspaceUri(inputPath: string, allowNew = false): Promise
     throw new Error('The requested path is outside the selected workspace folder.');
   }
 
-  if (!allowNew && uri.scheme === 'file') {
-    const realRoot = await realpath(root.uri.fsPath);
-    const realFile = await realpath(uri.fsPath);
-    const relativeFile = relative(realRoot, realFile);
-    if (relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
-      throw new Error('The requested file resolves outside the workspace folder.');
-    }
+  if (uri.scheme === 'file') {
+    await assertWorkspaceFilePath(root.uri.fsPath, uri.fsPath, allowNew);
   }
 
   return uri;
 }
 
 export function validateRelativeWorkspacePath(inputPath: string): string[] {
-  const normalized = inputPath.replace(/\\/g, '/').trim();
-
-  // Reject UNC paths and protocol escapes
-  if (normalized.startsWith('//') || normalized.startsWith('\\\\')) {
-    throw new Error('Provide a normalized relative path inside the workspace (UNC paths are not permitted).');
-  }
-
-  // Reject absolute paths and empty inputs
-  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) {
-    throw new Error('Provide a normalized relative path inside the workspace.');
-  }
-
-  const segments = normalized.split('/');
-  const reservedDevices = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-
-  for (const seg of segments) {
-    if (!seg || seg === '.' || seg === '..') {
-      throw new Error('Provide a normalized relative path inside the workspace.');
-    }
-    if (reservedDevices.test(seg)) {
-      throw new Error(`Provide a normalized relative path inside the workspace (Windows reserved device name "${seg}" is not allowed).`);
-    }
-  }
-
-  return segments;
+  return validateWorkspaceRelativePath(inputPath);
 }
 
 function validateCommandSafety(cmd: string): void {

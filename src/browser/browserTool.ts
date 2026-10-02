@@ -66,8 +66,10 @@ export class BrowserTool {
     return this.available;
   }
 
-  public async open(url: string): Promise<BrowserActionResult> {
+  public async open(url: string, signal?: AbortSignal): Promise<BrowserActionResult> {
+    signal?.throwIfAborted();
     const isAvail = await this.isAvailable();
+    signal?.throwIfAborted();
     if (!isAvail) {
       return {
         action: 'open',
@@ -77,14 +79,18 @@ export class BrowserTool {
       };
     }
 
-    return this.navigate(url);
+    return this.navigate(url, signal);
   }
 
-  public async navigate(url: string): Promise<BrowserActionResult> {
+  public async navigate(url: string, signal?: AbortSignal): Promise<BrowserActionResult> {
+    signal?.throwIfAborted();
     const safeUrl = validateLocalBrowserUrl(url);
     this.activeUrl = safeUrl;
     this.consoleErrors = [];
     const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     const timeout = setTimeout(() => controller.abort(), 6000);
 
     try {
@@ -96,6 +102,7 @@ export class BrowserTool {
       const contentLength = Number(response.headers.get('content-length') || 0);
       if (contentLength > 1024 * 1024) throw new Error('Local page response exceeds the 1 MiB inspection limit.');
       const html = await readBoundedResponse(response, 1024 * 1024);
+      controller.signal.throwIfAborted();
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
       const pageTitle = titleMatch ? titleMatch[1].trim() : `Web page at ${url}`;
       const textSnippet = html
@@ -121,7 +128,7 @@ export class BrowserTool {
       };
     } catch (err: any) {
       this.activeUrl = undefined;
-      const errorMsg = err.name === 'AbortError' ? 'Connection timed out' : (err.message || 'Connection failed');
+      const errorMsg = signal?.aborted ? 'Page inspection cancelled.' : err.name === 'AbortError' ? 'Connection timed out' : (err.message || 'Connection failed');
       this.consoleErrors.push(errorMsg);
       return {
         action: 'navigate',
@@ -132,29 +139,32 @@ export class BrowserTool {
       };
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
     }
   }
 
-  public async readPage(): Promise<BrowserActionResult> {
+  public async readPage(signal?: AbortSignal): Promise<BrowserActionResult> {
+    signal?.throwIfAborted();
     if (!this.activeUrl) {
       return { action: 'read', success: false, error: 'No active browser page open.' };
     }
-    return this.navigate(this.activeUrl);
+    return this.navigate(this.activeUrl, signal);
   }
 
   public getConsoleErrors(): string[] {
     return [...this.consoleErrors];
   }
 
-  public async execute(args: { action: string; url?: string }): Promise<BrowserActionResult> {
+  public async execute(args: { action: string; url?: string }, signal?: AbortSignal): Promise<BrowserActionResult> {
+    signal?.throwIfAborted();
     if (args.action === 'open') {
-      return this.open(args.url || 'http://localhost:3000');
+      return this.open(args.url || 'http://localhost:3000', signal);
     }
     if (args.action === 'navigate') {
-      return this.navigate(args.url || 'http://localhost:3000');
+      return this.navigate(args.url || 'http://localhost:3000', signal);
     }
     if (args.action === 'read') {
-      return this.readPage();
+      return this.readPage(signal);
     }
     return {
       action: args.action,

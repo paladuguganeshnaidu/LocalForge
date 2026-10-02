@@ -99,7 +99,8 @@ export class LocalForgeEngine {
     this.toolRegistry = new ToolRegistry();
 
     this.editEngine = new EditEngine();
-    this.agentEngine = new AgentEngine(this.toolRegistry, this.permissionManager, this.editEngine);
+    this.terminalManager = new TerminalManager();
+    this.agentEngine = new AgentEngine(this.toolRegistry, this.permissionManager, this.editEngine, this.terminalManager);
     this.remoteManager = new RemoteManager(context, this.compositeProvider, this.modelRegistry);
     this.sessionManager = new SessionManager(context.workspaceState);
     this.taskManager = new TaskManager(context.workspaceState);
@@ -108,7 +109,6 @@ export class LocalForgeEngine {
     this.artifactManager = new ArtifactManager();
     this.turnManager = new TurnManager(() => this.scheduleTraceSave());
     this.turnManager.restorePersistedHistory(context.workspaceState.get<unknown>('localforge.activityTraceHistory'));
-    this.terminalManager = new TerminalManager();
     this.browserTool = new BrowserTool();
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
 
@@ -135,12 +135,12 @@ export class LocalForgeEngine {
 
   private registerDefaultTools(): void {
     for (const toolDef of allWorkspaceTools) {
-      this.toolRegistry.registerTool(toolDef, (args) =>
+      this.toolRegistry.registerTool(toolDef, (args, execution) =>
         executeWorkspaceTool(toolDef.function.name, args, {
           editEngine: this.editEngine,
           terminalManager: this.terminalManager,
           autoApply: this.permissionManager.shouldAutoApplyEdits(),
-          signal: this.currentAbortController?.signal
+          signal: execution.signal
         })
       );
     }
@@ -149,8 +149,7 @@ export class LocalForgeEngine {
       terminalManager: this.terminalManager,
       artifactManager: this.artifactManager,
       browserTool: this.browserTool,
-      autoApply: this.permissionManager.shouldAutoApplyEdits(),
-      signal: this.currentAbortController?.signal
+      autoApply: () => this.permissionManager.shouldAutoApplyEdits()
     });
   }
 
@@ -169,7 +168,7 @@ export class LocalForgeEngine {
     await this.modelRegistry.refresh();
     try {
       if (await this.browserTool.isAvailable()) {
-        this.toolRegistry.registerTool(BROWSER_TOOL_DEFINITION, (args) => this.browserTool.execute(args as any));
+        this.toolRegistry.registerTool(BROWSER_TOOL_DEFINITION, (args, execution) => this.browserTool.execute(args as any, execution.signal));
       }
     } catch {}
   }
@@ -213,8 +212,23 @@ export class LocalForgeEngine {
     legacyOnToken?: (token: string) => void
   ): Promise<AgentRunSummary> {
     this.cancelCurrentTask();
-    this.currentAbortController = new AbortController();
-    const signal = this.currentAbortController.signal;
+    const controller = new AbortController();
+    this.currentAbortController = controller;
+    try {
+      return await this.executeTaskRun(controller.signal, userPrompt, mode, modelPreference, onProgressOrOptions, legacyOnToken);
+    } finally {
+      if (this.currentAbortController === controller) this.currentAbortController = undefined;
+    }
+  }
+
+  private async executeTaskRun(
+    signal: AbortSignal,
+    userPrompt: string,
+    mode: AgentMode,
+    modelPreference?: string,
+    onProgressOrOptions?: ((msg: string) => void) | ExecuteTaskOptions,
+    legacyOnToken?: (token: string) => void
+  ): Promise<AgentRunSummary> {
 
     // Normalizing options
     const options: ExecuteTaskOptions =
@@ -311,7 +325,7 @@ export class LocalForgeEngine {
               };
             }
 
-            const allowed = await this.permissionManager.checkPermission('run_command', { command: effectivePrompt });
+            const allowed = await this.permissionManager.checkPermission('run_command', { command: effectivePrompt }, false, signal);
             if (!allowed) {
               return {
                 runId: `run-${Date.now()}`,
@@ -529,7 +543,7 @@ export class LocalForgeEngine {
             const existing = callId ? activeActivities.get(callId) : undefined;
             if (existing) {
               const updated = this.turnManager.updateActivity(turn.turnId, existing.id, {
-                status: error ? 'error' : 'success',
+                status: signal.aborted ? 'cancelled' : error ? 'error' : 'success',
                 durationMs: Date.now() - existing.timestamp,
                 error: error || undefined,
                 outputSummary: formatToolOutput(res, error),
@@ -564,9 +578,9 @@ export class LocalForgeEngine {
         const walkthrough = this.artifactManager.createWalkthrough({
           summary: `Completed changes for: ${effectivePrompt.slice(0, 80)}`,
           filesChanged: result.filesModified,
-          behaviorChanges: 'Implemented requested code changes and verified against project structure.',
+          behaviorChanges: 'Applied the file changes recorded in this run.',
           testsRun: result.validationAttempts.length ? `${result.validationAttempts.length} test run(s)` : 'None configured',
-          validationResult: result.validationAttempts.every((v) => v.result.passed) ? 'All validation checks passed' : 'Validation check failed',
+          validationResult: result.validationAttempts.length === 0 ? 'No automated validation was run' : result.validationAttempts.every((v) => v.result.passed) ? 'All validation checks passed' : 'Validation check failed',
           verificationSteps: 'Inspect changes in diff view and verify project operation.',
           conversationId: session.id,
           turnId: turn.turnId
@@ -578,8 +592,8 @@ export class LocalForgeEngine {
       const awaitingReview = pending.length > 0 || effectiveMode === 'plan';
       const resultErrors = result.errors ?? [];
       const hasToolWarnings = resultErrors.length > 0;
-      this.turnManager.completeTurn(turn.turnId, awaitingReview ? 'waiting_for_approval' : result.status === 'failed' ? 'failed' : 'completed', result.filesModified);
-      if (awaitingReview) {
+      this.turnManager.completeTurn(turn.turnId, result.status === 'cancelled' ? 'cancelled' : result.status === 'failed' ? 'failed' : awaitingReview ? 'waiting_for_approval' : 'completed', result.filesModified);
+      if (awaitingReview && !['cancelled', 'failed'].includes(result.status)) {
         emitActivity('Waiting for approval', effectiveMode === 'plan' && pending.length === 0 ? 'Plan ready for review' : `Changes ready for review (${pending[0]?.files.length ?? 0} file(s))`, 'waiting_for_approval', resultErrors.length ? resultErrors.join('\n') : undefined);
       } else if (result.status === 'failed') {
         emitActivity('Failed', 'Task did not complete', 'error', resultErrors.join('\n') || result.response);
@@ -598,7 +612,7 @@ export class LocalForgeEngine {
 
       await this.taskManager.recordTaskCompletion(
         taskRecord.id,
-        awaitingReview ? 'waiting_for_approval' : result.status,
+        result.status === 'failed' || result.status === 'cancelled' ? result.status : awaitingReview ? 'waiting_for_approval' : result.status,
         result.filesModified,
         result.response.slice(0, 500)
       );
@@ -614,12 +628,28 @@ export class LocalForgeEngine {
         errDetail
       );
       throw err;
-    } finally {
-      this.currentAbortController = undefined;
     }
   }
 
   public async applyProposalAndValidate(
+    proposalId: string,
+    files?: string[],
+    onActivity?: (act: TurnActivity) => void,
+    onProgress?: (msg: string) => void,
+    onArtifact?: (art: Artifact) => void
+  ): Promise<any> {
+    if (this.isBusy()) throw new Error('A task is already running. Wait or cancel it before applying a proposal.');
+    const controller = new AbortController();
+    this.currentAbortController = controller;
+    try {
+      return await this.applyProposalRun(controller.signal, proposalId, files, onActivity, onProgress, onArtifact);
+    } finally {
+      if (this.currentAbortController === controller) this.currentAbortController = undefined;
+    }
+  }
+
+  private async applyProposalRun(
+    signal: AbortSignal,
     proposalId: string,
     files?: string[],
     onActivity?: (act: TurnActivity) => void,
@@ -647,65 +677,69 @@ export class LocalForgeEngine {
       return act;
     };
 
-    const editResult = await this.editEngine.applyProposal(proposalId, files);
-    if (!editResult.success) {
-      emitAct('Editing', 'Failed to apply proposal changes', 'error', editResult.errors.map((e) => e.error).join(', '));
-      this.turnManager.completeTurn(turn.turnId, 'failed');
-      return editResult;
-    }
+    try {
+      const editResult = await this.editEngine.applyProposal(proposalId, files, signal);
+      if (!editResult.success) {
+        emitAct('Editing', 'Failed to apply proposal changes', 'error', editResult.errors.map((error) => error.error).join(', '));
+        this.turnManager.completeTurn(turn.turnId, 'failed');
+        return editResult;
+      }
 
-    emitAct('Editing', `Applied changes to ${editResult.appliedCount} file(s) safely`, 'success');
+      emitAct('Editing', `Applied changes to ${editResult.appliedCount} file(s)`, 'success');
 
-    let validationPassed: boolean | undefined;
-    if (workspaceRoot && editResult.appliedFiles.length > 0) {
-      emitAct('Validating', 'Running project validation tests...', 'running');
-      const attempts = await this.agentEngine.validateAndRepair(
-        this.compositeProvider,
-        session.model || '',
-        session.messages,
-        'Applied proposed edits.',
-        editResult.appliedFiles,
-        workspaceRoot,
-        {
-          onProgress: (p) => {
-            onProgress?.(p);
-            if (p.includes('Repair')) {
-              emitAct('Repairing', p, 'running');
+      let validationPassed: boolean | undefined;
+      if (workspaceRoot && editResult.appliedFiles.length > 0) {
+        emitAct('Validating', 'Running project validation tests...', 'running');
+        const attempts = await this.agentEngine.validateAndRepair(
+          this.compositeProvider,
+          session.model || '',
+          session.messages,
+          'Applied proposed edits.',
+          editResult.appliedFiles,
+          workspaceRoot,
+          {
+            signal,
+            onProgress: (progress) => {
+              onProgress?.(progress);
+              if (progress.includes('Repair')) {
+                emitAct('Repairing', progress, 'running');
+              }
             }
           }
-        }
+        );
+
+        validationPassed = attempts.length ? attempts.at(-1)!.result.passed : undefined;
+        emitAct('Validating', validationPassed === true ? 'Validation passed' : validationPassed === false ? 'Validation failed' : 'No automated validation was run', validationPassed === true ? 'success' : validationPassed === false ? 'error' : 'warning');
+
+        const walkthrough = this.artifactManager.createWalkthrough({
+          summary: `Applied ${editResult.appliedFiles.length} file(s)`,
+          filesChanged: editResult.appliedFiles,
+          behaviorChanges: 'Applied the selected proposed changes.',
+          testsRun: attempts.length ? `${attempts.length} test run(s)` : 'No automated validation was run',
+          validationResult: validationPassed === true ? 'The final validation command passed' : validationPassed === false ? 'Validation check failed' : 'Not verified automatically',
+          verificationSteps: 'Inspect modified files and run test suite.',
+          conversationId: session.id,
+          turnId: turn.turnId
+        });
+        this.turnManager.addArtifact(turn.turnId, walkthrough);
+        onArtifact?.(walkthrough);
+      }
+
+      this.turnManager.completeTurn(turn.turnId, validationPassed === false ? 'failed' : 'completed', editResult.appliedFiles);
+      emitAct(
+        validationPassed === false ? 'Failed' : 'Completed',
+        validationPassed === false ? 'Changes applied; validation needs attention' : validationPassed === true ? 'Changes applied and verified' : 'Changes applied',
+        validationPassed === false ? 'error' : 'success'
       );
 
-      const allPassed = attempts.length === 0 || attempts.every((a) => a.result.passed);
-      validationPassed = allPassed;
-      emitAct('Validating', allPassed ? 'Validation passed' : 'Validation completed with warnings', allPassed ? 'success' : 'error');
-
-      // Generate Walkthrough
-      const walkthrough = this.artifactManager.createWalkthrough({
-        summary: `Applied and validated ${editResult.appliedFiles.length} file(s)`,
-        filesChanged: editResult.appliedFiles,
-        behaviorChanges: 'Implemented and reviewed code changes.',
-        testsRun: attempts.length ? `${attempts.length} test run(s)` : 'Project default test suite',
-        validationResult: allPassed ? 'All validation checks passed' : 'Validation check failed',
-        verificationSteps: 'Inspect modified files and run test suite.',
-        conversationId: session.id,
-        turnId: turn.turnId
-      });
-      this.turnManager.addArtifact(turn.turnId, walkthrough);
-      onArtifact?.(walkthrough);
+      session.filesModified = Array.from(new Set([...session.filesModified, ...editResult.appliedFiles]));
+      await this.sessionManager.saveSession(session);
+      return { ...editResult, validationPassed };
+    } catch (error) {
+      this.turnManager.completeTurn(turn.turnId, signal.aborted ? 'cancelled' : 'failed');
+      emitAct(signal.aborted ? 'Cancelled' : 'Failed', signal.aborted ? 'Review validation cancelled; inspect any already applied changes' : 'Review application or validation failed', signal.aborted ? 'cancelled' : 'error', error instanceof Error ? error.message : String(error));
+      throw error;
     }
-
-    this.turnManager.completeTurn(turn.turnId, 'completed', editResult.appliedFiles);
-    emitAct(
-      'Completed',
-      validationPassed === false ? 'Changes applied; validation needs attention' : validationPassed === true ? 'Changes applied and verified' : 'Changes applied',
-      validationPassed === false ? 'warning' : 'success'
-    );
-
-    session.filesModified = Array.from(new Set([...session.filesModified, ...editResult.appliedFiles]));
-    await this.sessionManager.saveSession(session);
-
-    return { ...editResult, validationPassed };
   }
 
   public async executeMultiAgentTask(

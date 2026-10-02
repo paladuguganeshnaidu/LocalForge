@@ -36,7 +36,7 @@ export async function runToolAgent(
 ): Promise<string> {
   const registry = new ToolRegistry();
   for (const def of tools) {
-    registry.registerTool(def, (args) => executeTool(def.function.name, args));
+    registry.registerTool(def, (args, execution) => executeTool(def.function.name, args, execution));
   }
 
   // Permission manager in allow_safe_auto mode for toolAgent adapter

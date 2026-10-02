@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
+import { assertWorkspaceFilePath, validateWorkspaceRelativePath } from '../core/workspacePaths';
 import { createUnifiedDiff } from './diffService';
 import {
-  computeFileHash,
+  computeContentHash,
   validateFileState,
   FileOriginalState,
   StaleEditError
@@ -51,6 +52,8 @@ export interface EditApplyResult {
 
 export class EditEngine {
   private proposals = new Map<string, EditProposal>();
+  private proposalRoots = new Map<string, vscode.Uri>();
+  private applyingProposals = new Set<string>();
 
   /**
    * Propose a set of edits across one or more files in the workspace.
@@ -59,30 +62,43 @@ export class EditEngine {
     workspaceRoot: vscode.Uri,
     edits: Array<{ path: string; newContent: string }>,
     summary: string = 'Multi-file code changes',
-    metadata?: { conversationId?: string; turnId?: string }
+    metadata?: { conversationId?: string; turnId?: string },
+    signal?: AbortSignal
   ): Promise<EditProposal> {
+    if (!edits.length) throw new Error('An edit proposal must contain at least one file.');
     const proposalId = `prop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const filePlans: FileEditPlan[] = [];
     const originalHashes: Record<string, string> = {};
     const patches: Record<string, string> = {};
     let totalAdditions = 0;
     let totalDeletions = 0;
+    const targetPaths = new Set<string>();
 
     for (const edit of edits) {
-      const uri = vscode.Uri.joinPath(workspaceRoot, edit.path);
+      signal?.throwIfAborted();
+      const segments = validateWorkspaceRelativePath(edit.path);
+      const normalizedPath = segments.join('/');
+      if (targetPaths.has(normalizedPath)) throw new Error('An edit proposal cannot contain duplicate file paths.');
+      targetPaths.add(normalizedPath);
+      const uri = vscode.Uri.joinPath(workspaceRoot, ...segments);
+      if (uri.scheme === 'file') await assertWorkspaceFilePath(workspaceRoot.fsPath, uri.fsPath, true);
+      this.assertNoUnsavedChanges(uri);
       let originalContent = '';
       let originalState: FileOriginalState = 'missing';
+      let hash = '';
 
       try {
         const bytes = await vscode.workspace.fs.readFile(uri);
         originalContent = new TextDecoder().decode(bytes);
         originalState = 'present';
-      } catch {
+        hash = computeContentHash(bytes);
+      } catch (error) {
+        if (!['ENOENT', 'FileNotFound'].includes((error as { code?: string }).code || '')) throw error;
         originalContent = '';
         originalState = 'missing';
       }
 
-      const hash = await computeFileHash(uri);
+      signal?.throwIfAborted();
       const diff = createUnifiedDiff(edit.path, originalContent, edit.newContent);
 
       originalHashes[edit.path] = hash;
@@ -120,6 +136,7 @@ export class EditEngine {
     };
 
     this.proposals.set(proposalId, proposal);
+    this.proposalRoots.set(proposalId, workspaceRoot);
     return proposal;
   }
 
@@ -156,20 +173,40 @@ export class EditEngine {
   }
 
   /**
-   * Atomic two-phase multi-file application:
-   * Phase 1: validate all file hashes against expected originalHash and originalState.
-   * If ANY file is stale, apply none.
-   * Phase 2: apply all changes atomically via WorkspaceEdit.
+   * Validate every target before submitting one native WorkspaceEdit.
    */
   public async applyProposal(
     proposalId: string,
-    selectedPaths?: string[]
+    selectedPaths?: string[],
+    signal?: AbortSignal
+  ): Promise<EditApplyResult> {
+    if (this.applyingProposals.has(proposalId)) throw new Error('This proposal is already being applied.');
+    this.applyingProposals.add(proposalId);
+    try {
+      return await this.applyValidatedProposal(proposalId, selectedPaths, signal);
+    } finally {
+      this.applyingProposals.delete(proposalId);
+    }
+  }
+
+  private async applyValidatedProposal(
+    proposalId: string,
+    selectedPaths?: string[],
+    signal?: AbortSignal
   ): Promise<EditApplyResult> {
     const proposal = this.proposals.get(proposalId);
     if (!proposal) throw new Error(`Proposal ${proposalId} not found.`);
+    signal?.throwIfAborted();
+    if (proposal.status !== 'pending' && proposal.status !== 'approved') {
+      throw new Error(`Proposal ${proposalId} is ${proposal.status} and cannot be applied.`);
+    }
+    const root = this.proposalRoots.get(proposalId);
+    if (!root) throw new Error('The proposal workspace root is unavailable. Generate a new proposal.');
 
     const targetPaths = selectedPaths ? new Set(selectedPaths) : null;
-    const filesToApply = proposal.files.filter((f) => !targetPaths || targetPaths.has(f.path));
+    const filesToApply = proposal.files.filter((file) =>
+      (file.status === 'pending' || file.status === 'approved') && (!targetPaths || targetPaths.has(file.path)));
+    if (!filesToApply.length) throw new Error('No pending proposal files were selected.');
 
     const result: EditApplyResult = {
       proposalId,
@@ -185,6 +222,9 @@ export class EditEngine {
     // Phase 1: Validate all target files
     let hasStale = false;
     for (const file of filesToApply) {
+      signal?.throwIfAborted();
+      if (file.uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, file.uri.fsPath, file.originalState === 'missing');
+      this.assertNoUnsavedChanges(file.uri);
       const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
       file.currentHash = validation.currentHash;
 
@@ -204,12 +244,17 @@ export class EditEngine {
       return result;
     }
 
-    // Phase 2: Apply all changes atomically
+    let nativeApplied = false;
     try {
+      signal?.throwIfAborted();
       const workspaceEdit = new vscode.WorkspaceEdit();
       for (const file of filesToApply) {
         if (file.originalState === 'missing') {
-          workspaceEdit.createFile(file.uri, { ignoreIfExists: false, overwrite: false });
+          workspaceEdit.createFile(file.uri, {
+            ignoreIfExists: false,
+            overwrite: false,
+            contents: Buffer.from(file.newContent, 'utf8')
+          });
         } else {
           workspaceEdit.replace(
             file.uri,
@@ -219,25 +264,17 @@ export class EditEngine {
         }
       }
 
-      // If workspaceEdit execution is supported (inside VS Code host)
-      let applied = false;
-      try {
-        applied = await vscode.workspace.applyEdit(workspaceEdit);
-      } catch {
-        // Fallback to direct writes if headless testing
-        applied = false;
-      }
+      signal?.throwIfAborted();
+      for (const file of filesToApply) this.assertNoUnsavedChanges(file.uri);
+      const applied = await vscode.workspace.applyEdit(workspaceEdit);
+      if (!applied) throw new Error('VS Code declined the edit transaction. No direct file-write fallback was attempted.');
+      nativeApplied = true;
 
-      if (!applied) {
-        // Fallback file system write
-        for (const file of filesToApply) {
-          const encoded = Buffer.from(file.newContent, 'utf8');
-          await vscode.workspace.fs.writeFile(file.uri, encoded);
-        }
-      } else {
-        for (const file of filesToApply) {
-          if (file.originalState === 'missing') {
-            await vscode.workspace.fs.writeFile(file.uri, Buffer.from(file.newContent, 'utf8'));
+      for (const file of filesToApply) {
+        if (file.originalState === 'present') {
+          const document = await vscode.workspace.openTextDocument(file.uri);
+          if (document.isDirty && !await document.save()) {
+            throw new Error(`Changes were applied in the editor, but ${file.path} could not be saved. Inspect the modified documents before continuing.`);
           }
         }
       }
@@ -248,16 +285,25 @@ export class EditEngine {
         result.appliedFiles.push(file.path);
       }
 
-      proposal.status = 'applied';
+      proposal.status = proposal.files.some((file) => file.status === 'pending' || file.status === 'approved') ? 'pending' : 'applied';
       result.success = true;
     } catch (error: any) {
       proposal.status = 'failed';
+      if (nativeApplied) {
+        result.appliedCount = filesToApply.length;
+        result.appliedFiles = filesToApply.map((file) => file.path);
+      }
       result.failedCount = filesToApply.length;
       result.errors.push({ path: 'transaction', error: error.message || String(error) });
       result.success = false;
     }
 
     return result;
+  }
+
+  private assertNoUnsavedChanges(uri: vscode.Uri): void {
+    const document = vscode.workspace.textDocuments?.find((candidate) => candidate.uri.toString() === uri.toString());
+    if (document?.isDirty) throw new Error('Save or discard your unsaved changes to this file before generating or applying an edit proposal.');
   }
 
   public rejectProposal(proposalId: string): void {

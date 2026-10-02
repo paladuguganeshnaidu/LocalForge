@@ -3,6 +3,7 @@ import { ToolRegistry } from './toolRegistry';
 import { PermissionManager } from './permissionManager';
 import { ToolCallParser } from './toolCallParser';
 import { VisibleTextStream } from './visibleTextStream';
+import { withCancellation } from '../core/cancellation';
 
 export type AgentMode = 'ask' | 'plan' | 'agent';
 
@@ -20,7 +21,7 @@ export interface AgentToolCallRecord {
   args: Record<string, unknown>;
   result?: unknown;
   error?: string;
-  status: 'running' | 'success' | 'error' | 'blocked';
+  status: 'running' | 'success' | 'error' | 'blocked' | 'cancelled';
   startedAt: number;
   completedAt?: number;
 }
@@ -56,6 +57,7 @@ export interface AgentLoopOptions {
   maxRounds?: number;
   maxCallsPerRound?: number;
   timeoutMs?: number;
+  toolTimeoutMs?: number;
   onStateUpdate?: (state: AgentState) => void;
   onToolStart?: (name: string, args: Record<string, unknown>, id: string) => void;
   onToolEnd?: (name: string, result: unknown, error?: string, id?: string) => void;
@@ -130,15 +132,16 @@ export class AgentLoop {
 
     // Overall task timeout controller
     const loopController = new AbortController();
+    const abortFromParent = () => loopController.abort(options.signal?.reason);
     let timeoutTimer: NodeJS.Timeout | undefined;
     if (options.timeoutMs && options.timeoutMs > 0) {
       timeoutTimer = setTimeout(() => loopController.abort(), options.timeoutMs);
     }
     if (options.signal) {
       if (options.signal.aborted) {
-        loopController.abort();
+        abortFromParent();
       } else {
-        options.signal.addEventListener('abort', () => loopController.abort());
+        options.signal.addEventListener('abort', abortFromParent, { once: true });
       }
     }
     const signal = loopController.signal;
@@ -154,14 +157,17 @@ export class AgentLoop {
 
         options.onProgress?.(`Model working · step ${round + 1} / ${maxRounds}`);
 
-        const visibleStream = new VisibleTextStream((text) => options.onModelText?.(text, round + 1));
-        const response = await this.provider.chatWithTools(
+        const visibleStream = new VisibleTextStream((text) => {
+          if (!signal.aborted) options.onModelText?.(text, round + 1);
+        });
+        const response = await withCancellation(this.provider.chatWithTools(
           model,
           history,
           tools,
           signal,
           (chunk) => visibleStream.push(chunk)
-        );
+        ), signal);
+        signal.throwIfAborted();
         const parsed = ToolCallParser.parse(response.content, response.tool_calls, allowList);
         visibleStream.finish(parsed.userVisibleText);
         const calls = parsed.toolCalls;
@@ -283,18 +289,10 @@ export class AgentLoop {
           }
 
           try {
-            // Per-tool timeout of 60 seconds
-            let timer: NodeJS.Timeout | undefined;
-            const timeoutPromise = new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error(`Tool "${name}" execution timed out after 60s.`)), 60000);
+            const result = await this.toolRegistry.executeTool(name, args, this.permissionManager, {
+              signal,
+              timeoutMs: options.toolTimeoutMs ?? 60000
             });
-            const toolPromise = this.toolRegistry.executeTool(name, args, this.permissionManager);
-            let result: unknown;
-            try {
-              result = await Promise.race([toolPromise, timeoutPromise]);
-            } finally {
-              if (timer) clearTimeout(timer);
-            }
 
             const resultError = this.describeToolResultError(result);
             callRecord.status = resultError ? 'error' : 'success';
@@ -312,6 +310,14 @@ export class AgentLoop {
             this.appendToolResult(history, call, name, result);
           } catch (error) {
             const errMsg = error instanceof Error ? error.message : 'Workspace tool execution failed.';
+            if (signal.aborted) {
+              callRecord.status = 'cancelled';
+              callRecord.error = errMsg;
+              callRecord.completedAt = Date.now();
+              options.onToolEnd?.(name, undefined, errMsg, callId);
+              state.steps.push(currentStep);
+              throw error;
+            }
             callRecord.status = 'error';
             callRecord.error = errMsg;
             callRecord.completedAt = Date.now();
@@ -346,6 +352,7 @@ export class AgentLoop {
       throw error;
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      options.signal?.removeEventListener('abort', abortFromParent);
       state.timestamps.finishedAt = Date.now();
       updateState();
     }
@@ -445,9 +452,9 @@ You may also invoke tools using native provider function calls or <tool_call>{"n
       const stderr = typeof value.stderr === 'string' ? value.stderr.trim() : '';
       return stderr ? `Command exited with code ${value.exitCode}: ${stderr.slice(0, 500)}` : `Command exited with code ${value.exitCode}.`;
     }
-    if (value.status === 'failed' || value.status === 'timed_out' || value.status === 'stopped') {
+    if (value.status === 'failed' || value.status === 'timed_out' || value.status === 'stopped' || value.status === 'stopping') {
       const stderr = typeof value.stderr === 'string' ? value.stderr.trim() : '';
-      const state = value.status === 'timed_out' ? 'timed out' : value.status === 'stopped' ? 'was stopped' : 'failed';
+      const state = value.status === 'timed_out' ? 'timed out' : value.status === 'stopped' ? 'was stopped' : value.status === 'stopping' ? 'is stopping' : 'failed';
       return stderr ? `Command ${state}: ${stderr.slice(0, 500)}` : `Command ${state}.`;
     }
     return undefined;
