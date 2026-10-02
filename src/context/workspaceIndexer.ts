@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { IndexedDocument } from './retrieval';
+import { canAttachWorkspaceContext } from './accessBoundary';
 
 const maxFileSizeBytes = 256 * 1024;
 const maxIndexedFiles = 500;
@@ -52,6 +53,10 @@ export class WorkspaceIndexer implements vscode.Disposable {
 
   async indexFile(uri: vscode.Uri): Promise<void> {
     try {
+      if (!await canAttachWorkspaceContext(uri)) {
+        this.indexed.delete(uri.toString());
+        return;
+      }
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.type !== vscode.FileType.File || stat.size > maxFileSizeBytes) return;
 
@@ -101,4 +106,3 @@ export class WorkspaceIndexer implements vscode.Disposable {
     this.indexed.clear();
   }
 }
-

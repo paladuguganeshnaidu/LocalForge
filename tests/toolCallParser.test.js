@@ -3,6 +3,19 @@ const assert = require('node:assert/strict');
 const { ToolCallParser } = require('../dist/agent/toolCallParser');
 const { VisibleTextStream } = require('../dist/agent/visibleTextStream');
 
+test('package manifests and named JSON data in answers are not mistaken for tool calls', () => {
+  const text = 'Example:\n```json\n{"name":"my-node-app","scripts":{"test":"node test.js"}}\n```\n{"name":"Alice","age":30}';
+  const parsed = ToolCallParser.parse(text, undefined, new Set(['read_file']));
+  assert.deepEqual(parsed.toolCalls, []);
+  assert.match(parsed.userVisibleText, /my-node-app/);
+  assert.match(parsed.userVisibleText, /Alice/);
+});
+
+test('directory aliases retain the exact requested path rather than becoming workspace root', () => {
+  const parsed = ToolCallParser.parse('', [{ id: 'directory', function: { name: 'list_directory', arguments: { directory: 'premium-genai/books/html/phase_03.html' } } }], new Set(['list_directory']));
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { path: 'premium-genai/books/html/phase_03.html' });
+});
+
 test('ToolCallParser parses native tool calls and strips hidden reasoning', () => {
   const rawText = '<think>I need to read the file first</think>I will read the file.';
   const nativeCalls = [

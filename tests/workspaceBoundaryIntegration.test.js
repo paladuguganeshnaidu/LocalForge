@@ -21,6 +21,7 @@ class WorkspaceEdit {
 const uri = (filePath) => ({ fsPath: filePath, path: filePath, scheme: 'file', toString: () => pathToFileURL(filePath).href });
 const vscode = {
   FileSystemError, WorkspaceEdit,
+  FileType: { File: 1, Directory: 2, SymbolicLink: 64 },
   Position: class { constructor(line, character) { this.line = line; this.character = character; } },
   Range: class {},
   Uri: { joinPath: (root, ...segments) => uri(path.join(root.fsPath, ...segments)) },
@@ -36,7 +37,12 @@ const vscode = {
     fs: {
       readFile: (target) => fs.readFile(target.fsPath),
       writeFile: async (target, content) => { writes += 1; await fs.writeFile(target.fsPath, content); },
-      stat: (target) => statHook ? statHook(target) : fs.stat(target.fsPath)
+      stat: async (target) => {
+        if (statHook) return statHook(target);
+        const stat = await fs.stat(target.fsPath);
+        return { ...stat, type: stat.isDirectory() ? 2 : 1 };
+      },
+      readDirectory: async (target) => (await fs.readdir(target.fsPath, { withFileTypes: true })).map((entry) => [entry.name, entry.isDirectory() ? 2 : 1])
     },
     applyEdit: async (edit) => {
       if (declineEdits) return false;
@@ -60,6 +66,8 @@ const { AgentLoop } = require('../dist/agent/agentLoop.js');
 const { registerAllCoreTools } = require('../dist/agent/coreTools.js');
 const { executeWorkspaceTool } = require('../dist/agent/workspaceTools.js');
 const { applyReviewedSelection } = require('../dist/editing/selectionEdits.js');
+const { WorkspaceIndexer } = require('../dist/context/workspaceIndexer');
+const { ContextReferenceResolver } = require('../dist/context/referenceResolver');
 Module._load = originalLoad;
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 const { PermissionManager } = require('../dist/agent/permissionManager.js');
@@ -96,12 +104,98 @@ async function fixture(run) {
   }
 }
 
+test('terminal and test tools refuse untrusted workspaces and shell syntax in test filters', async () => {
+  await fixture(async () => {
+    const registry = new ToolRegistry();
+    let executions = 0;
+    registerAllCoreTools(registry, { terminalManager: { runCommand: async () => { executions += 1; } } });
+    try {
+      vscode.workspace.isTrusted = false;
+      await assert.rejects(registry.executeTool('run_command', { command: 'echo hello' }), /not trusted/);
+      await assert.rejects(registry.executeTool('run_test', {}), /not trusted/);
+      vscode.workspace.isTrusted = true;
+      await assert.rejects(registry.executeTool('run_test', { test_filter: 'safe & curl https://example.com' }), /not shell syntax/);
+      assert.equal(executions, 0);
+    } finally { vscode.workspace.isTrusted = true; }
+  });
+});
+
 test('workspace paths reject traversal, alternate streams, invalid names and protocol escapes', () => {
   for (const unsafe of ['../outside', '/absolute', 'C:/outside', '//host/share', 'file:target', 'safe.txt:secret', 'sub/NUL.txt', 'sub/trailing.', 'sub/bad\0name']) {
     assert.throws(() => validateWorkspaceRelativePath(unsafe), /normalized relative path/);
   }
   assert.deepEqual(validateWorkspaceRelativePath('src/code.ts'), ['src', 'code.ts']);
 });
+
+test('automatic indexing and explicit references cannot attach secrets or outside-workspace links', async () => fixture(async ({ root, external }) => {
+  await fs.writeFile(path.join(root, '.env'), 'PRIVATE_FIXTURE_TOKEN=not-real');
+  await fs.writeFile(path.join(root, 'normal.ts'), 'export const normal = true;');
+  await fs.writeFile(path.join(external, 'secret.txt'), 'OUTSIDE_FIXTURE_SECRET');
+  await fs.symlink(external, path.join(root, 'linked'), 'junction');
+  const indexer = new WorkspaceIndexer();
+  for (const target of [path.join(root, '.env'), path.join(root, 'normal.ts'), path.join(root, 'linked', 'secret.txt'), path.join(external, 'secret.txt')]) await indexer.indexFile(uri(target));
+  assert.deepEqual(indexer.getDocuments().map((document) => document.path), ['normal.ts']);
+  const resolver = new ContextReferenceResolver();
+  const result = await resolver.resolveReferences('@linked/secret.txt @../external/secret.txt @normal.ts', uri(root));
+  assert.match(JSON.stringify(result.references), /Not attached/);
+  assert.doesNotMatch(JSON.stringify(result.references), /OUTSIDE_FIXTURE_SECRET|PRIVATE_FIXTURE_TOKEN/);
+  assert.match(JSON.stringify(result.references), /export const normal/);
+  indexer.dispose();
+}));
+
+test('agent creates a multi-file portfolio and verifies its real files with an approved command', async () => fixture(async ({ root }) => {
+  const registry = new ToolRegistry();
+  const editEngine = new EditEngine();
+  const terminalManager = new TerminalManager();
+  registerAllCoreTools(registry, { editEngine, terminalManager, autoApply: true });
+  const approvals = [];
+  const permissions = new PermissionManager('always_ask', async (request) => { approvals.push(request.toolName); return true; });
+  const actions = [
+    ['create_file', { path: 'index.html', content: '<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="styles.css"><title>Portfolio</title></head><body><main><h1>My portfolio</h1><section id="projects">Projects</section><button id="contact">Contact</button></main><script src="app.js"></script></body></html>' }],
+    ['create_file', { path: 'styles.css', content: 'body{font-family:system-ui;margin:0}main{max-width:70rem;margin:auto;padding:2rem}#projects{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}' }],
+    ['create_file', { path: 'app.js', content: "document.getElementById('contact').addEventListener('click', () => { location.href = 'mailto:hello@example.com'; });" }],
+    ['run_command', { command: 'node --check app.js' }]
+  ];
+  let round = 0;
+  let verification;
+  const provider = { id: 'portfolio-runtime-fixture', chatWithTools: async () => {
+    const action = actions[round++];
+    return action ? { role: 'assistant', content: '', tool_calls: [{ id: 'portfolio-' + round, function: { name: action[0], arguments: action[1] } }] } : { role: 'assistant', content: '## Changes\n- Created HTML, responsive CSS and browser interactions.\n\n## Verification\n- JavaScript syntax check passed. Browser behavior and deployment were not tested by this fixture.' };
+  } };
+  try {
+    const result = await new AgentLoop(provider, registry, permissions).run('fixture', [{ role: 'user', content: 'Create a portfolio website and check it.' }], { onToolEnd: (name, output) => { if (name === 'run_command') verification = output; } });
+    assert.equal(result.state.status, 'completed', result.response);
+    assert.deepEqual(approvals, actions.map((action) => action[0]));
+    assert.match(await fs.readFile(path.join(root, 'index.html'), 'utf8'), /<main>.*<h1>My portfolio/);
+    assert.match(await fs.readFile(path.join(root, 'styles.css'), 'utf8'), /repeat\(auto-fit/);
+    assert.match(await fs.readFile(path.join(root, 'app.js'), 'utf8'), /addEventListener/);
+    assert.equal(verification.exitCode, 0);
+    assert.equal(editEngine.getRecoveryHistory().length, 3);
+  } finally { for (const process of terminalManager.getRunningProcesses()) terminalManager.stopProcess(process.id); }
+}));
+
+test('the reported directory-as-file request never reads workspace root and recovers with read_file', async () => fixture(async ({ root }) => {
+  await fs.mkdir(path.join(root, 'premium-genai', 'books', 'html'), { recursive: true });
+  const requested = 'premium-genai/books/html/phase_03.html';
+  await fs.writeFile(path.join(root, requested), '<h1>Course phase three</h1>');
+  const registry = new ToolRegistry();
+  registerAllCoreTools(registry, {});
+  await assert.rejects(registry.executeTool('list_directory', { directory: requested }), /not a directory.*read_file/);
+  await assert.rejects(registry.executeTool('list_directory', { nonsense: requested }), /requires a path/);
+  const entries = await registry.executeTool('list_directory', { path: 'premium-genai/books/html' });
+  assert.deepEqual(entries, [{ name: 'phase_03.html', type: 'file' }]);
+  let rounds = 0;
+  const provider = { id: 'summary-fixture', chatWithTools: async () => {
+    rounds += 1;
+    if (rounds === 1) return { role: 'assistant', content: '', tool_calls: [{ id: 'dir', function: { name: 'list_directory', arguments: { directory: requested } } }] };
+    if (rounds === 2) return { role: 'assistant', content: '', tool_calls: [{ id: 'file', function: { name: 'read_file', arguments: { path: requested } } }] };
+    return { role: 'assistant', content: '## Summary\n- Course phase three is an HTML lesson.\n- Only this lesson was inspected.' };
+  } };
+  const result = await new AgentLoop(provider, registry).run('fixture', [{ role: 'user', content: 'Read the lesson and summarize it.' }], { mode: 'ask' });
+  assert.equal(result.state.status, 'completed');
+  assert.match(result.response, /Course phase three/);
+  assert.doesNotMatch(result.response, /Incomplete actions/);
+}));
 
 test('new files beneath an external junction are refused by both workspace tool runtimes', async () => fixture(async ({ root, external }) => {
   await fs.symlink(external, path.join(root, 'linked'), 'junction');

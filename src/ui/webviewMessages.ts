@@ -1,5 +1,6 @@
 import { AgentMode } from '../agent/agentLoop';
 import { PermissionMode, isPermissionMode } from '../agent/permissionManager';
+import { AccessScope, isAccessScope } from '../agent/accessPolicy';
 
 export type WebviewMessage =
   | { type: 'ready' }
@@ -17,6 +18,7 @@ export type WebviewMessage =
   | { type: 'deleteModel'; modelId: string }
   | { type: 'setDefaultModel'; modelId: string }
   | { type: 'setMode'; mode: AgentMode }
+  | { type: 'setAccessScope'; scope: AccessScope }
   | {
       type: 'chat';
       model: string;
@@ -91,6 +93,9 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
     case 'setMode':
       return msg.mode === 'ask' || msg.mode === 'plan' || msg.mode === 'agent';
 
+    case 'setAccessScope':
+      return isAccessScope(msg.scope);
+
     case 'setStrategy':
       return msg.strategy === 'fast' || msg.strategy === 'planning';
 
@@ -154,7 +159,10 @@ export const WEBVIEW_WRITABLE_SETTINGS: ReadonlySet<string> = new Set([
   'routing.chatModel',
   'routing.editModel',
   'routing.agentModel',
-  'routing.completionModel'
+  'routing.completionModel',
+  'agent.maxRounds',
+  'ollama.contextWindow',
+  'ollama.maxOutputTokens'
 ]);
 
 function isAllowedSettingsPayload(settings: unknown): boolean {
@@ -167,7 +175,10 @@ function isAllowedSettingsPayload(settings: unknown): boolean {
   }
   return entries.every(([key, value]) =>
     WEBVIEW_WRITABLE_SETTINGS.has(key) &&
-    (typeof value === 'boolean' || (typeof value === 'string' && value.length <= 200))
+    (key === 'agent.maxRounds' ? Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 10000 :
+      key === 'ollama.contextWindow' ? Number.isInteger(value) && Number(value) >= 2048 && Number(value) <= 1048576 :
+      key === 'ollama.maxOutputTokens' ? Number.isInteger(value) && Number(value) >= -1 && Number(value) <= 1048576 :
+        typeof value === 'boolean' || (typeof value === 'string' && value.length <= 200))
   );
 }
 

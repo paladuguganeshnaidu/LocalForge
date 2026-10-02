@@ -9,6 +9,7 @@ import { TerminalManager } from '../terminal/terminalManager';
 import { ArtifactManager } from '../core/artifactManager';
 import { BrowserTool } from '../browser/browserTool';
 import { findRelevantSnippets } from '../context/workspaceContext';
+import { canAttachWorkspaceContext } from '../context/accessBoundary';
 
 const maximumReadBytes = 256 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -118,7 +119,10 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       for (const p of paths) {
         try {
           const uri = await resolveWorkspaceUri(p);
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.type !== vscode.FileType.File || stat.size > maximumReadBytes) throw new Error('Read requires a regular workspace file up to 256 KiB.');
           const bytes = await vscode.workspace.fs.readFile(uri);
+          if (bytes.includes(0) || bytes.byteLength > maximumReadBytes) throw new Error('The file is binary or exceeds the read limit.');
           results.push({ path: p, content: new TextDecoder().decode(bytes).slice(0, 10000) });
         } catch (err: any) {
           results.push({ path: p, error: err.message || String(err) });
@@ -318,8 +322,12 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       }
     },
     async (args) => {
-      const rel = typeof args.path === 'string' ? args.path.trim() : '';
+      const supplied = args.path ?? args.directory ?? args.dir ?? args.directory_path;
+      if (typeof supplied !== 'string') throw new Error('list_directory requires a path string. Use path: "" for the workspace root, or read_file for a file.');
+      const rel = supplied.trim();
       const uri = rel ? await resolveWorkspaceUri(rel) : getWorkspaceRootUri();
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.type !== vscode.FileType.Directory) throw new Error(`"${rel || '(workspace root)'}" is not a directory. Use read_file with this path to read a file, or list_directory with its parent directory.`);
       const entries = await vscode.workspace.fs.readDirectory(uri);
       return entries
         .map(([name, type]) => ({
@@ -515,6 +523,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args, execution) => {
       const command = getString(args.command, 'command', 1000);
+      if (!vscode.workspace.isTrusted) throw new Error('Terminal execution is blocked because the workspace is not trusted.');
       validateCommandSafety(command);
       const rootPath = getWorkspaceRootUri().fsPath;
 
@@ -522,6 +531,10 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         const proc = await context.terminalManager.runCommand(command, rootPath, false, 60000, execution.signal);
         return {
           command: proc.command,
+          cwd: proc.cwd,
+          shell: proc.shell,
+          startedAt: proc.startTime,
+          processId: proc.processId,
           status: proc.status,
           exitCode: proc.exitCode ?? null,
           stdout: (proc.stdout || '').trim().slice(0, 10000),
@@ -561,12 +574,20 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       }
     },
     async (args, execution) => {
+      if (!vscode.workspace.isTrusted) throw new Error('Terminal execution is blocked because the workspace is not trusted.');
       const rootPath = getWorkspaceRootUri().fsPath;
-      const cmd = args.test_filter ? `npm test -- ${args.test_filter}` : 'npm test';
+      const filter = args.test_filter === undefined ? '' : getString(args.test_filter, 'test_filter', 300);
+      if (filter && !/^[\w./:@ -]+$/.test(filter)) throw new Error('test_filter must be a plain test name or path, not shell syntax.');
+      const cmd = filter ? `npm test -- "${filter}"` : 'npm test';
       if (context.terminalManager) {
         const process = await context.terminalManager.runCommand(cmd, rootPath, false, 60000, execution.signal);
         return {
           command: cmd,
+          cwd: process.cwd,
+          shell: process.shell,
+          startedAt: process.startTime,
+          durationMs: process.duration,
+          processId: process.processId,
           passed: process.status === 'completed' && process.exitCode === 0,
           status: process.status,
           exitCode: process.exitCode ?? null,
@@ -640,6 +661,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) return { hasActiveEditor: false };
+      if (!await canAttachWorkspaceContext(editor.document.uri)) throw new Error('The active editor is outside the authorized workspace context or contains a sensitive file. Use an explicitly approved file read instead.');
       return {
         hasActiveEditor: true,
         path: vscode.workspace.asRelativePath(editor.document.uri),

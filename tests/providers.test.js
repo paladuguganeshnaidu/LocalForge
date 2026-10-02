@@ -57,7 +57,7 @@ after(async () => {
 test('discovers and streams from an OpenAI-compatible server', async () => {
   const provider = new OpenAiCompatibleProvider('test-compatible', baseUrl);
   assert.equal(await provider.detect(), true);
-  assert.deepEqual(await provider.listModels(), [{ name: 'local-model' }]);
+  assert.deepEqual(await provider.listModels(), [{ name: 'local-model', source: 'local' }]);
   let output = '';
   await provider.streamChat('local-model', [{ role: 'user', content: 'hello' }], (token) => { output += token; });
   assert.equal(output, 'Local answer');

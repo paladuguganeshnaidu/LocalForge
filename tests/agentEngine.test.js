@@ -34,7 +34,8 @@ test('AgentLoop honors maxRounds step limits without infinite loops', async () =
   assert.match(result.response, /did not provide a written summary/i);
   assert.match(result.response, /Completed search_workspace/);
   assert.equal(result.state.steps.length, 3);
-  assert.equal(result.state.status, 'completed');
+  assert.equal(result.state.status, 'failed');
+  assert.match(result.response, /task-round budget/);
 });
 
 test('AgentLoop halts immediately when AbortSignal is cancelled', async () => {

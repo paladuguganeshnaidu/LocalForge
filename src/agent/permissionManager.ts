@@ -1,4 +1,6 @@
 import { withCancellation } from '../core/cancellation';
+import { AgentAccessPolicy } from './accessPolicy';
+import { isSensitivePath } from '../core/sensitivePaths';
 
 export type ToolCategory = 'read' | 'edit' | 'execute';
 export type PermissionMode =
@@ -120,6 +122,11 @@ export class PermissionManager {
   private mode: PermissionMode = 'allow_safe_auto';
   private sessionApprovedTools = new Set<string>();
   private approvalHandler?: ApprovalHandler;
+  private accessPolicy?: AgentAccessPolicy;
+
+  public setAccessPolicy(policy: AgentAccessPolicy): void {
+    this.accessPolicy = policy;
+  }
 
   constructor(mode: PermissionMode = 'allow_safe_auto', approvalHandler?: ApprovalHandler) {
     this.mode = mode;
@@ -265,6 +272,11 @@ export class PermissionManager {
     requireExplicitApproval = false
   ): Promise<boolean> {
     signal?.throwIfAborted();
+    this.accessPolicy?.assertTool(toolName, args);
+    const networkAction = toolName === 'read_web_page' || typeof args.command === 'string' && /https?:\/\/|\b(?:curl|wget|ssh|scp|sftp|Invoke-WebRequest|Invoke-RestMethod|npm\s+(?:i\b|install|ci|update)|pip\s+install|git\s+(?:fetch|pull|push|clone)|yarn\s+(?:add|install)|pnpm\s+(?:add|install))\b/i.test(args.command);
+    const paths = typeof args.path === 'string' ? [args.path] : Array.isArray(args.paths) ? args.paths.filter((path): path is string => typeof path === 'string') : [];
+    const sensitiveRead = toolName.startsWith('read_') && paths.some(isSensitivePath);
+    if (networkAction || sensitiveRead) requireExplicitApproval = true;
     const category = trustedBuiltinReadOnly ? 'read' : this.classifyTool(toolName);
 
     // 0. Always proceed mode: auto allow after validating safety
@@ -311,10 +323,10 @@ export class PermissionManager {
         id: `perm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         toolName,
         category,
-        description: `Permission requested to execute ${toolName}`,
+        description: networkAction ? `Allow internet/network access${typeof args.url === 'string' ? ' to ' + args.url : ' for this command'}?` : sensitiveRead ? 'Allow reading a sensitive file? Its contents may be sent to the selected model endpoint.' : `Permission requested to execute ${toolName}`,
         command: cmd,
         commandCategory: cmd ? this.categorizeCommand(cmd) : undefined,
-        path: typeof args.path === 'string' ? args.path : undefined,
+        path: paths.length ? paths.join(', ') : undefined,
         args,
         signal
       };

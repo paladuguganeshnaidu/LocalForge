@@ -106,7 +106,7 @@ export class ToolCallParser {
       hadToolCallSyntax = true;
       for (const match of tagMatches) {
         text = text.replace(match.rawMatch, '');
-        const extracted = this.parseJsonPayload(match.payload, allowList, parseWarnings);
+        const extracted = this.parseJsonPayload(match.payload, allowList, parseWarnings, true);
         if (extracted) {
           toolCalls.push(...extracted);
         }
@@ -119,7 +119,7 @@ export class ToolCallParser {
       hadToolCallSyntax = true;
       for (const match of protocolMatches) {
         text = text.replace(match.rawMatch, '');
-        const extracted = this.parseJsonPayload(match.payload, allowList, parseWarnings);
+        const extracted = this.parseJsonPayload(match.payload, allowList, parseWarnings, true);
         if (extracted) {
           toolCalls.push(...extracted);
         }
@@ -222,6 +222,13 @@ export class ToolCallParser {
   private static normalizeArguments(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
     const copy = { ...args };
 
+    if (toolName === 'list_directory') {
+      for (const alias of ['directory', 'dir', 'directory_path']) {
+        if (copy.path === undefined && typeof copy[alias] === 'string') copy.path = copy[alias];
+        delete copy[alias];
+      }
+    }
+
     for (const key of Object.keys(copy)) {
       const val = copy[key];
       if (val && typeof val === 'object' && !Array.isArray(val)) {
@@ -269,7 +276,8 @@ export class ToolCallParser {
   private static parseJsonPayload(
     rawJson: string,
     allowList?: Set<string>,
-    warnings?: string[]
+    warnings?: string[],
+    explicit = false
   ): ModelToolCall[] | null {
     const trimmed = rawJson.trim();
     if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
@@ -292,6 +300,8 @@ export class ToolCallParser {
 
       const rawName = item.name || item.tool || item.function || item.action || item.call;
       if (typeof rawName !== 'string') continue;
+      const hasArguments = ['arguments', 'args', 'parameters', 'action_input', 'input', 'params'].some((key) => Object.prototype.hasOwnProperty.call(item, key));
+      if (!explicit && !hasArguments && typeof item.tool !== 'string') continue;
 
       const rawArgs =
         item.arguments ??

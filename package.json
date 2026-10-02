@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LOMVREN",
   "description": "Use local Ollama and SSH-tunneled Ollama models for AI-assisted coding in VS Code.",
-  "version": "0.2.23",
+  "version": "0.2.24",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/lomvren-icon.png",
   "repository": {
@@ -180,10 +180,34 @@
     "configuration": {
       "title": "LOMVREN",
       "properties": {
+        "localforge.agent.maxRounds": {
+          "type": "integer", "default": 80, "minimum": 0, "maximum": 10000,
+          "description": "Maximum model/tool rounds per task. 0 continues until completion or cancellation, with repeated-action protection. Local model context and memory are still finite."
+        },
+        "localforge.agent.contextTokens": {
+          "type": "integer", "default": 4000, "minimum": 500, "maximum": 100000,
+          "description": "Estimated token budget for automatically retrieved project context. Increase only when your model and hardware support it."
+        },
+        "localforge.agent.historyCharacters": {
+          "type": "integer", "default": 48000, "minimum": 16000, "maximum": 1000000,
+          "description": "Conversation character budget before old tool results are compacted. This is not an exact model token or context-window measurement."
+        },
+        "localforge.ollama.contextWindow": {
+          "type": "integer", "default": 8192, "minimum": 2048, "maximum": 1048576,
+          "description": "Ollama num_ctx for local chat. Larger context needs more RAM/VRAM and must be supported by the selected model."
+        },
+        "localforge.ollama.maxOutputTokens": {
+          "type": "integer", "default": -1, "minimum": -1, "maximum": 1048576,
+          "description": "Ollama num_predict. -1 leaves generation uncapped by this extension; finite model context and hardware still apply. Cancel stops generation."
+        },
         "localforge.ollama.baseUrl": {
           "type": "string",
           "default": "http://127.0.0.1:11434",
           "description": "Base URL for the local Ollama server."
+        },
+        "localforge.ollama.temperature": {
+          "type": "number", "default": 0.1, "minimum": 0, "maximum": 2,
+          "description": "Local generation sampling temperature. A low value makes coding/tool use less variable; model accuracy is not guaranteed."
         },
         "localforge.providers.openAICompatibleUrls": {
           "type": "string",
@@ -229,6 +253,7 @@
     "test:recovery-restart": "npm run build && node tests/runRecoveryRestartTests.js",
     "test:ollama-smoke": "node scripts/smoke-ollama.cjs",
     "test:ollama-agent": "npm run compile && node scripts/smoke-ollama-agent.cjs",
+    "test:ollama-summary": "npm run compile && node scripts/smoke-project-summary.cjs",
     "package": "npm run build && vsce package && node scripts/verify-marketplace-package.cjs"
   },
   "devDependencies": {

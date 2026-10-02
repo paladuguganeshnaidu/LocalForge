@@ -2,6 +2,13 @@ const maximumInputLength = 4000;
 const maximumOutputLength = 8000;
 const sensitiveKey = /(?:password|secret|token|api[-_]?key|private[-_]?key|authorization|credential)/i;
 
+export function formatCommandLabel(name: string, args: Record<string, unknown>): string {
+  const command = typeof args.command === 'string' ? args.command : name === 'run_test'
+    ? args.test_filter ? `npm test -- "${String(args.test_filter)}"` : 'npm test'
+    : name === 'run_build' ? 'npm run build' : name;
+  return redactText(command);
+}
+
 export function formatToolInput(name: string, args: Record<string, unknown>): string {
   const safeArgs = sanitizeValue(args) as Record<string, unknown>;
   const body = JSON.stringify(safeArgs, null, 2) ?? '{}';

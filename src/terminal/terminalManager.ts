@@ -6,6 +6,7 @@ export interface ManagedProcess {
   id: string;
   command: string;
   cwd: string;
+  shell: string;
   isBackground: boolean;
   status: ProcessStatus;
   startTime: number;
@@ -72,6 +73,7 @@ export class TerminalManager {
       id,
       command,
       cwd,
+      shell: process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh',
       isBackground,
       status: 'queued',
       startTime: Date.now(),

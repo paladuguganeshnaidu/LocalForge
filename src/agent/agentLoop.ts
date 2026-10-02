@@ -4,6 +4,7 @@ import { PermissionManager } from './permissionManager';
 import { ToolCallParser } from './toolCallParser';
 import { VisibleTextStream } from './visibleTextStream';
 import { withCancellation } from '../core/cancellation';
+import { normalizeAssistantMarkdown } from '../core/responseFormatting';
 
 export type AgentMode = 'ask' | 'plan' | 'agent';
 
@@ -56,6 +57,11 @@ export interface AgentLoopOptions {
   strategy?: ExecutionStrategy;
   maxRounds?: number;
   maxCallsPerRound?: number;
+  maxHistoryCharacters?: number;
+  requireToolUse?: boolean;
+  readOnlyInspection?: boolean;
+  validateFinalResponse?: (response: string, state: AgentState) => string | undefined;
+  formatFinalResponse?: (response: string, state: AgentState) => string;
   timeoutMs?: number;
   toolTimeoutMs?: number;
   onStateUpdate?: (state: AgentState) => void;
@@ -105,21 +111,26 @@ export class AgentLoop {
       options.onStateUpdate?.(state);
     };
 
-    const tools = this.toolRegistry.getDefinitions(mode === 'ask' || mode === 'plan' ? 'read' : undefined);
+    const tools = this.toolRegistry.getDefinitions(mode === 'ask' || mode === 'plan' || options.readOnlyInspection ? 'read' : undefined);
     const allowList = new Set(tools.map((t) => t.function.name));
-    const systemPrompt = this.getSystemPrompt(mode, tools, strategy);
+    const systemPrompt = this.getSystemPrompt(options.readOnlyInspection ? 'ask' : mode, tools, strategy) + (options.requireToolUse ? '\n\nThis task requires actual inspection or execution. Your FIRST response must contain only an offered tool call, not a summary, sample application, or explanation. Use the schema above and the relevant path from the request. After the tool result arrives, finish the requested answer using only that evidence.' : '');
 
     const history: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...messages
     ];
 
-    const maxRounds = options.maxRounds ?? (mode === 'agent' ? (strategy === 'planning' ? 10 : 6) : 4);
+    const configuredRounds = options.maxRounds ?? (mode === 'agent' ? 80 : 24);
+    const maxRounds = configuredRounds === 0 ? Infinity : Math.max(1, configuredRounds);
     const maxCalls = options.maxCallsPerRound ?? 4;
+    const maxHistoryCharacters = Math.max(16000, options.maxHistoryCharacters ?? 48000);
+    let repeatedCalls = 0;
 
     let finalResponse = '';
     const unresolvedToolErrors = new Map<string, string>();
     let recoveryAttempts = 0;
+    let inspectionRetries = 0;
+    let answerRetries = 0;
     let lastSuccessfulToolCall: { fingerprint: string; result: unknown } | undefined;
     const toolFailureKey = (name: string, args: Record<string, unknown>, callId: string): string => {
       const target = typeof args.path === 'string' ? args.path : typeof args.command === 'string' ? args.command : '*';
@@ -149,16 +160,18 @@ export class AgentLoop {
     try {
       updateState('executing');
 
-      for (let round = 0; round < maxRounds; round += 1) {
+      agentRounds: for (let round = 0; round < maxRounds; round += 1) {
         if (signal.aborted) {
           state.status = 'cancelled';
           throw new Error('Agent task was cancelled.');
         }
 
-        options.onProgress?.(`Model working · step ${round + 1} / ${maxRounds}`);
+        options.onProgress?.('Thinking');
+        compactHistory(history, maxHistoryCharacters, messages.at(-1));
 
         const visibleStream = new VisibleTextStream((text) => {
-          if (!signal.aborted) options.onModelText?.(text, round + 1);
+          const hasEvidence = state.steps.some((step) => step.toolCalls.some((call) => call.status === 'success'));
+          if (!signal.aborted && (!options.requireToolUse || hasEvidence)) options.onModelText?.(text, round + 1);
         });
         const response = await withCancellation(this.provider.chatWithTools(
           model,
@@ -174,7 +187,29 @@ export class AgentLoop {
         options.onModelOutput?.(parsed.userVisibleText, round + 1, calls.map((call) => call.function.name));
 
         if (!calls.length) {
-          if (unresolvedToolErrors.size > 0 && mode === 'agent' && recoveryAttempts < 2 && round + 1 < maxRounds) {
+          if (options.requireToolUse && !state.steps.some((step) => step.toolCalls.some((call) => call.status === 'success'))) {
+            if (inspectionRetries < 2 && round + 1 < maxRounds) {
+              inspectionRetries += 1;
+              history.push({ role: 'user', content: 'You have not successfully inspected or executed the requested work yet. Do not answer from guesses or claim completion. Call the relevant offered tool now, using the exact argument names in its schema. For a file inspection, use LOCALFORGE_TOOL_CALL {"tool":"read_file","arguments":{"path":"package.json"}} with the actual path requested by the user; use list_directory with a directory path for directory inspection. Wait for a successful tool result before concluding.' });
+              options.onProgress?.('Checking the request before answering');
+              continue;
+            }
+            recordToolFailure('inspection', 'The model did not successfully inspect or execute the requested work. Its answer is unverified; try a more capable model or a more specific file/task request.');
+          }
+          const candidateAnswer = normalizeAssistantMarkdown(parsed.userVisibleText);
+          const groundedAnswer = options.formatFinalResponse?.(candidateAnswer, state) ?? candidateAnswer;
+          const answerIssue = options.validateFinalResponse?.(groundedAnswer, state);
+          if (answerIssue) {
+            if (answerRetries < 2 && round + 1 < maxRounds) {
+              answerRetries += 1;
+              history.push({ role: 'assistant', content: parsed.userVisibleText });
+              history.push({ role: 'user', content: `The final answer needs a correction based on the successfully inspected files: ${answerIssue}` });
+              options.onProgress?.('Checking the summary against inspected files');
+              continue;
+            }
+            recordToolFailure('answer', answerIssue);
+          }
+          if (unresolvedToolErrors.size > 0 && !answerIssue && recoveryAttempts < 2 && round + 1 < maxRounds) {
             const currentStep: AgentStep = {
               round: round + 1,
               thought: undefined,
@@ -188,12 +223,13 @@ export class AgentLoop {
               content: `A previous tool action failed and its result has not been recovered yet:\n${Array.from(unresolvedToolErrors.values()).join('\n').slice(0, 1200)}\n\nDo not claim completion. Inspect the relevant workspace file or command result, correct the tool arguments, and retry the requested work. If recovery is impossible, explain the blocker instead of claiming success.`
             });
             recoveryAttempts += 1;
-            options.onProgress?.(`Recovering from tool failure (${recoveryAttempts} / 2)...`);
+            options.onProgress?.('Checking the failed action and correcting its arguments');
             state.unresolvedErrors = Array.from(unresolvedToolErrors.values());
             updateState('executing');
             continue;
           }
-          finalResponse = parsed.userVisibleText || this.emptyResponseFor(state);
+          const missingInspection = options.requireToolUse && !state.steps.some((step) => step.toolCalls.some((call) => call.status === 'success'));
+          finalResponse = missingInspection ? '## Inspection needed\nI could not ground a project answer in a successful inspection. I have not verified the requested work.' : groundedAnswer || this.emptyResponseFor(state);
           state.unresolvedErrors = Array.from(unresolvedToolErrors.values());
           state.status = state.unresolvedErrors.length ? 'failed' : 'completed';
           break;
@@ -266,6 +302,18 @@ export class AgentLoop {
           options.onToolStart?.(name, args, callId);
 
           if (previousSuccessfulToolCall?.fingerprint === fingerprint) {
+            repeatedCalls += 1;
+            if (repeatedCalls >= 4) {
+              callRecord.status = 'blocked';
+              callRecord.error = 'The model repeated the same successful action without making progress. Choose a different path or tool, or explain what is blocking the task.';
+              callRecord.completedAt = Date.now();
+              recordToolFailure(`${name}:*`, `${name}: ${callRecord.error}`);
+              options.onToolEnd?.(name, undefined, callRecord.error, callId);
+              this.appendToolResult(history, call, name, { error: callRecord.error });
+              state.steps.push(currentStep);
+              state.status = 'failed';
+              break agentRounds;
+            }
             const cached = previousSuccessfulToolCall.result;
             const reusedResult = cached && typeof cached === 'object' && !Array.isArray(cached)
               ? {
@@ -289,6 +337,7 @@ export class AgentLoop {
           }
 
           try {
+            repeatedCalls = 0;
             const result = await this.toolRegistry.executeTool(name, args, this.permissionManager, {
               signal,
               timeoutMs: options.toolTimeoutMs ?? 60000
@@ -305,6 +354,7 @@ export class AgentLoop {
               lastSuccessfulToolCall = { fingerprint, result };
               unresolvedToolErrors.delete(failureKey);
               unresolvedToolErrors.delete(`${name}:*`);
+              if (name === 'read_file' || name === 'read_workspace_file') unresolvedToolErrors.delete(`list_directory:${String(args.path ?? '*')}`);
             }
             options.onToolEnd?.(name, result, resultError, callId);
             this.appendToolResult(history, call, name, result);
@@ -334,7 +384,16 @@ export class AgentLoop {
 
       if (state.status !== 'completed' && state.status !== 'cancelled') {
         state.unresolvedErrors = Array.from(unresolvedToolErrors.values());
-        state.status = state.unresolvedErrors.length ? 'failed' : 'completed';
+        const pendingReview = state.steps.some((step) => step.toolCalls.some((call) => {
+          const result = call.result as Record<string, unknown> | undefined;
+          return call.status === 'success' && (result?.proposed === true || result?.status === 'pending');
+        }));
+        if (!state.unresolvedErrors.length && !pendingReview) {
+          const message = 'The configured task-round budget was reached before the model supplied a final answer. Continue the task or increase Task rounds in Settings; 0 removes that cap.';
+          state.errors.push(message);
+          state.unresolvedErrors.push(message);
+        }
+        state.status = state.unresolvedErrors.length ? 'failed' : 'waiting_for_approval';
         if (!finalResponse) {
           const completedToolCall = state.steps.some((step) => step.toolCalls.some((call) => call.status === 'success'));
           finalResponse = state.unresolvedErrors.length || completedToolCall
@@ -357,21 +416,29 @@ export class AgentLoop {
       updateState();
     }
 
-    return { response: this.addToolFailureNotice(finalResponse, state), state };
+    return { response: normalizeAssistantMarkdown(this.addToolFailureNotice(finalResponse, state)), state };
   }
 
   private getSystemPrompt(mode: AgentMode, tools: ModelToolDefinition[], strategy: ExecutionStrategy = 'planning'): string {
-    const toolList = tools.map((t) => `- ${t.function.name}: ${t.function.description}`).join('\n');
+    const toolList = tools.map((tool) => {
+      const properties = tool.function.parameters.properties as Record<string, { type?: string }> | undefined;
+      const fields = Object.fromEntries(Object.entries(properties ?? {}).map(([name, schema]) => [name, schema.type ?? 'value']));
+      return `- ${tool.function.name}: ${tool.function.description}\n  Arguments: ${JSON.stringify(fields)}; required: ${JSON.stringify(tool.function.parameters.required ?? [])}`;
+    }).join('\n');
     if (mode === 'ask') {
-      return `You are LocalForge in Ask Mode. Answer questions clearly, accurately, and thoroughly about the workspace and code.
+      return `You are LOMVREN in Ask Mode. Answer questions clearly, accurately, and thoroughly about the workspace and code.
 You have access to read-only tools to inspect the workspace before answering:
 ${toolList}
 
-Inspect files when necessary to give accurate answers. Do NOT write or edit files. Always reference file names and line numbers.`;
+Inspect files when necessary to give accurate answers. Do NOT write or edit files. Always reference file names and line numbers.
+Use clear Markdown headings, grouped bullet points, and fenced code blocks. For repository summaries, explain purpose, architecture, entry points, how to run/tests, and any gaps in inspection. Copy script commands exactly from the inspected scripts object instead of guessing what build or test does. Do not confuse devDependencies with runtime dependencies. A directory listing is not proof that you read every file. list_directory takes a directory path; read_file takes a file path.
+When inspection is needed, invoke the offered read tool using a native function call or exactly this text protocol:
+LOCALFORGE_TOOL_CALL {"tool":"read_file","arguments":{"path":"package.json"}}
+Use the actual relevant path and tool arguments from the schema above. Wait for its tool result before describing what the file contains. Never invent an inspection result.`;
     }
 
     if (mode === 'plan') {
-      return `You are LocalForge in Plan Mode, acting as an expert software architect.
+      return `You are LOMVREN in Plan Mode, acting as an expert software architect.
 Your goal is to inspect the workspace and produce a comprehensive, structured implementation plan.
 Available read-only inspection tools:
 ${toolList}
@@ -393,7 +460,7 @@ Do not surround it with markdown. Do not explain the tool call.`;
       ? 'Execute the task directly and surgically with minimal overhead.'
       : 'First inspect the architecture and affected files, understand dependencies, and verify changes.';
 
-    return `You are LocalForge Copilot Agent, an autonomous software engineering assistant.
+    return `You are LOMVREN, an autonomous software engineering assistant.
 You can inspect code, write/edit files, and run commands to complete coding tasks end-to-end.
 Strategy: ${strategy} (${strategyInstructions})
 Available workspace tools:
@@ -405,9 +472,10 @@ Workflow:
    Use create_file for creation-only, replace_range for line replacements, delete_file for deletion, and move_file for renames/moves. These file tools prepare reviewable proposals unless explicitly configured to apply approved actions.
 3. Run tests or check status with run_command if needed.
 4. Conclude with a clear explanation of all changes made.
+5. Reply using concise Markdown headings and bullet points: findings or changes, verification, and remaining blockers. Communicate useful progress in plain language, not tool JSON. For a read-only question, inspect and answer without preparing edits. Do not invent features or claim you inspected files you have not read.
 
 Safety and accuracy:
-- File paths must be relative to the currently open workspace. Never target files under a user home directory or outside the workspace.
+- Workspace file tools take workspace-relative paths. Outside-workspace inspection is allowed only when Full Machine access explicitly grants the separate read_machine_file/list_machine_directory tools, and only after their approval. Never use a command to evade a denied permission.
 - For edit_workspace_file, provide the exact, non-empty target_content copied from the file and a replacement_content. If you cannot identify the exact text, read the file first; do not guess.
 - If an action fails, do not claim that it succeeded. Retry only after correcting the cause; otherwise stop and explain what failed.
 - Never show raw tool JSON or raw tool error payloads to the user.
@@ -441,12 +509,25 @@ You may also invoke tools using native provider function calls or <tool_call>{"n
     } catch {
       content = JSON.stringify({ error: 'Tool result could not be serialized.' });
     }
-    history.push({ role: 'tool', tool_call_id: call.id, name, content: content.slice(0, 8000) });
+    if (content.length > 8000) {
+      const value = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, unknown> : undefined;
+      const notice = 'Only the start and end of this tool output are shown. Use targeted paths, line windows or queries to inspect omitted content.';
+      content = typeof value?.content === 'string'
+        ? JSON.stringify({ ...value, content: value.content.slice(0, 2500) + '\n[Middle omitted]\n' + value.content.slice(-3500), truncated: true, notice })
+        : JSON.stringify({ truncated: true, excerpt: content.slice(0, 3500) + '\n[Middle omitted]\n' + content.slice(-3500), notice });
+    }
+    history.push({ role: 'tool', tool_call_id: call.id, name, content });
   }
 
   private describeToolResultError(result: unknown): string | undefined {
     if (!result || typeof result !== 'object') return undefined;
     const value = result as Record<string, unknown>;
+    if (typeof value.error === 'string' && value.error.trim()) return value.error;
+    if (value.isError === true) return 'The tool reported an unsuccessful execution.';
+    if (Array.isArray(value.files)) {
+      const failures = value.files.filter((file) => file && typeof file === 'object' && typeof file.error === 'string');
+      if (failures.length) return failures.map((file) => `${file.path ?? 'file'}: ${file.error}`).join('; ').slice(0, 1200);
+    }
     if (value.success === false) {
       return typeof value.error === 'string' ? value.error : 'The tool reported that it did not complete successfully.';
     }
@@ -463,9 +544,6 @@ You may also invoke tools using native provider function calls or <tool_call>{"n
   }
 
   private emptyResponseFor(state: AgentState): string {
-    if (state.unresolvedErrors.length > 0) {
-      return 'The model did not provide a final summary, and one or more tool actions reported errors. Review the failed steps above before treating this task as complete.';
-    }
     const successfulCalls = state.steps.flatMap((step) => step.toolCalls)
       .filter((call) => call.status === 'success');
     if (successfulCalls.length > 0) {
@@ -488,7 +566,7 @@ You may also invoke tools using native provider function calls or <tool_call>{"n
       return `The model did not provide a written summary. Verified tool results:\n${Array.from(outcomes).map((outcome) => `- ${outcome}`).join('\n')}`;
     }
     if (state.steps.some((step) => step.toolCalls.length > 0)) {
-      return 'The model did not provide a final summary. Review the activity above for tool outcomes.';
+      return '## Progress\nThe model did not provide a final summary. The incomplete actions below explain what blocked this task.';
     }
     return 'The model returned an empty response. Try rephrasing your request or selecting another model.';
   }
@@ -497,12 +575,35 @@ You may also invoke tools using native provider function calls or <tool_call>{"n
     const cleaned = response.trim();
     if (!state.unresolvedErrors.length) return cleaned;
 
-    const notice = 'Some tool actions failed during this turn, so I cannot confirm that all requested work completed. Review the failed activity steps above before accepting any changes.';
+    const failures = [...new Set(state.unresolvedErrors)].map((failure) => `- ${failure.replace(/[\r\n]+/g, ' ').slice(0, 700)}`).join('\n');
+    const failedTool = state.unresolvedErrors.some((error) => state.steps.some((step) => step.toolCalls.some((call) =>
+      ['error', 'blocked'].includes(call.status) && (error.startsWith(`${call.name}:`) || call.status === 'blocked' && error.includes(call.name))
+    )));
+    const notice = `## Incomplete actions\n${failedTool ? 'Some tool actions failed; the task is not fully verified.' : 'The requested work is not fully verified.'}\n${failures}\n\nOnly successful inspections and command results count as verification. Proposed edits remain unapplied until approved.`;
     if (/^(?:the )?task (?:is )?completed[.!]?$/i.test(cleaned)) {
       return `I could not verify successful completion. ${notice}`;
     }
     if (!cleaned) return notice;
-    return `${cleaned}\n\n> ${notice}`;
+    return `${cleaned}\n\n${notice}`;
+  }
+}
+
+function compactHistory(history: ChatMessage[], maximumCharacters: number, taskMessage?: ChatMessage): void {
+  const size = () => history.reduce((total, message) => total + message.content.length + JSON.stringify(message.tool_calls ?? []).length, 0);
+  if (size() <= maximumCharacters) return;
+  const removed: string[] = [];
+  while (history.length > 4 && size() > maximumCharacters) {
+    const start = history[1] === taskMessage ? 2 : 1;
+    let nextBoundary = start + 1;
+    while (nextBoundary < history.length && history[nextBoundary].role === 'tool') nextBoundary += 1;
+    if (nextBoundary >= history.length || history.slice(start, nextBoundary).includes(taskMessage!)) break;
+    const group = history.splice(start, nextBoundary - start);
+    for (const message of group) {
+      if (message.role === 'tool') removed.push(`${message.name ?? 'tool'}: ${message.content.slice(0, 240)}`);
+    }
+  }
+  if (removed.length) {
+    history[0] = { ...history[0], content: history[0].content.split('\nPrevious tool evidence (abridged):')[0] + '\nPrevious tool evidence (abridged):\n' + removed.slice(-12).join('\n') + '\nEarlier tool results were compacted. Re-read relevant files before relying on omitted details.' };
   }
 }
 

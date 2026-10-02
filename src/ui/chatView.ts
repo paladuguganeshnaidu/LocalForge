@@ -14,6 +14,8 @@ import { TurnActivity, ExecutionStrategy } from '../core/turnManager';
 import { validateRelativeWorkspacePath } from '../agent/workspaceTools';
 import { PermissionMode, PermissionRequest } from '../agent/permissionManager';
 import { formatToolInput } from '../core/activityDetails';
+import { renderChatMarkdown } from './chatMarkdown';
+import { normalizeAssistantMarkdown } from '../core/responseFormatting';
 
 export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -315,6 +317,31 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         this.postActivityHistory();
       }
 
+      if (message.type === 'setAccessScope' && this.engine) {
+        try {
+          if (this.busy || this.engine.isBusy()) throw new Error('Wait for the task or cancel it before changing access.');
+          let filePath: string | undefined;
+          if (message.scope === 'machine') {
+            const choice = await vscode.window.showWarningMessage('Full Machine enables explicitly approved outside-workspace reads and host commands under your existing OS account. It does not grant administrator rights or an OS sandbox. Secrets may be sent to your selected model if you approve reading them. Workspace diffs remain workspace-only.', { modal: true }, 'Enable Full Machine');
+            if (choice !== 'Enable Full Machine') return;
+          }
+          if (message.scope === 'file') {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+            if (!root) throw new Error('Open a project workspace before selecting a file.');
+            const chosen = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectFolders: false, canSelectMany: false, defaultUri: vscode.window.activeTextEditor?.document.uri ?? root, openLabel: 'Allow this file only' });
+            if (!chosen?.[0]) return;
+            if (vscode.workspace.getWorkspaceFolder(chosen[0])?.uri.toString() !== root.toString()) throw new Error('Choose a file within the current workspace. Use Full Machine for explicitly approved external inspection.');
+            filePath = relative(root.fsPath, chosen[0].fsPath).replace(/\\/g, '/');
+            validateRelativeWorkspacePath(filePath);
+          }
+          this.engine.setAccessScope(message.scope, filePath);
+        } catch (error) {
+          this.post({ type: 'error', message: error instanceof Error ? error.message : 'Could not change access.' });
+        } finally {
+          this.post({ type: 'accessScope', ...this.engine.accessPolicy.getState() });
+        }
+      }
+
       if (message.type === 'getRemoteStatus') {
         await this.postRemoteStatus();
       }
@@ -380,9 +407,10 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         if (message.settings && typeof message.settings === 'object') {
           const config = vscode.workspace.getConfiguration('localforge');
           for (const [key, val] of Object.entries(message.settings)) {
-            void config.update(key, val, vscode.ConfigurationTarget.Global);
+            await config.update(key, val, vscode.ConfigurationTarget.Global);
           }
         }
+        this.postAgentSettings();
       }
 
       if (message.type === 'cancel') {
@@ -576,6 +604,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         message: `${this.models.length} model(s) available`
       });
       this.post({ type: 'permissionMode', mode: this.engine?.permissionManager.getMode() ?? 'always_ask' });
+      this.post({ type: 'accessScope', ...(this.engine?.accessPolicy.getState() ?? { scope: 'workspace' }) });
+      this.postAgentSettings();
       for (const pending of this.pendingPermissionRequests.values()) {
         if (!pending.request.signal?.aborted) this.postPermissionRequest(pending.request);
       }
@@ -608,6 +638,11 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       status: 'cancelled',
       timestamp: Date.now()
     }});
+  }
+
+  private postAgentSettings(): void {
+    const configuration = vscode.workspace.getConfiguration('localforge');
+    this.post({ type: 'agentSettings', maxRounds: configuration.get<number>('agent.maxRounds', 80), contextWindow: configuration.get<number>('ollama.contextWindow', 8192), maxOutputTokens: configuration.get<number>('ollama.maxOutputTokens', -1) });
   }
 
   public async sendUserPrompt(prompt: string, options: { includeContext?: boolean; mode?: AgentMode; strategy?: ExecutionStrategy } = {}): Promise<void> {
@@ -688,8 +723,10 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         }
         if (pending.length > 0 || mode === 'plan') {
           finalStatusMessage = 'Waiting for your review';
-        } else if (summary.errors?.length) {
-          finalStatusMessage = 'Completed with tool warnings';
+        } else if (summary.status === 'failed') {
+          finalStatusMessage = 'Needs attention · see incomplete actions';
+        } else if (summary.status === 'cancelled') {
+          finalStatusMessage = 'Cancelled';
         }
 
         history.push({ role: 'user', content: message.prompt });
@@ -761,7 +798,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <style>
     :root {
       --bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
-      --editor-bg: var(--vscode-editor-background, #1e1e1e));
+      --editor-bg: var(--vscode-editor-background, #1e1e1e);
       --fg: var(--vscode-foreground, #cccccc);
       --border: var(--vscode-panel-border, var(--vscode-widget-border, rgba(128,128,128,0.2)));
       --accent: var(--vscode-button-background, #1a73e8);
@@ -993,8 +1030,15 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       gap: 6px;
       font-size: 11.5px;
       color: var(--subtle);
-      padding: 2px 0;
+      padding: 4px 0;
+      width: 100%;
+      overflow-wrap: anywhere;
     }
+    .timeline-row[data-status="running"] .activity-symbol { color: var(--accent); }
+    .timeline-row[data-status="error"] .activity-symbol { color: var(--error); }
+    .activity-symbol { width: 14px; flex-shrink: 0; color: var(--subtle); }
+    .activity-duration { color: var(--subtle); font-size: 10px; white-space: nowrap; }
+    .timeline-row details pre { font-family: var(--vscode-editor-font-family, monospace); }
     .timeline-cat {
       font-weight: 600;
       color: var(--fg);
@@ -1047,30 +1091,35 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     /* Message Cards */
     .msg-user {
       align-self: flex-end;
-      background: var(--accent);
-      color: var(--accent-fg);
+      background: var(--card-bg);
+      color: var(--fg);
       padding: 8px 12px;
-      border-radius: 16px 16px 4px 16px;
+      border-radius: 8px;
       max-width: 90%;
       word-break: break-word;
       font-size: 12.5px;
     }
     .msg-assistant {
       align-self: flex-start;
-      background: var(--card-bg);
+      background: transparent;
       color: var(--fg);
-      padding: 10px 12px;
-      border-radius: 14px;
-      border: 1px solid var(--border);
+      padding: 4px 0;
+      border-radius: 0;
+      border: 0;
       max-width: 100%;
+      min-width: 0;
+      width: 100%;
       word-break: break-word;
       font-size: 12px;
       line-height: 1.55;
     }
     .msg-assistant p { margin: 0 0 8px; }
     .msg-assistant p:last-child { margin-bottom: 0; }
-    .msg-assistant h1, .msg-assistant h2, .msg-assistant h3 { margin: 8px 0 4px; font-size: 1.05em; }
-    .msg-assistant ul { margin: 4px 0 8px 18px; }
+    .msg-assistant h1, .msg-assistant h2 { margin: 16px 0 8px; font-size: 15px; }
+    .msg-assistant h3, .msg-assistant h4, .msg-assistant h5, .msg-assistant h6 { margin: 12px 0 6px; font-size: 13px; }
+    .msg-assistant ul, .msg-assistant ol { margin: 8px 0; padding-left: 22px; }
+    .msg-assistant li { margin: 5px 0; line-height: 1.6; }
+    .msg-assistant blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--border); color: var(--subtle); }
     .msg-assistant pre { overflow-x: auto; padding: 8px; margin: 6px 0; background: var(--input-bg); border-radius: 8px; }
     .msg-assistant code { font-family: var(--vscode-editor-font-family, Consolas, monospace); }
     .msg-assistant p code { padding: 1px 3px; background: var(--input-bg); border-radius: 3px; }
@@ -1490,8 +1539,8 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
     /* Terminal Output Container */
     .terminal-box {
-      background: #000000;
-      color: #00ff66;
+      background: var(--editor-bg);
+      color: var(--fg);
       font-family: monospace;
       font-size: 11px;
       padding: 8px;
@@ -1561,6 +1610,14 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     <div class="timeline" id="timelineContainer" style="display:none;"></div>
     </div>
     <button class="jump-latest" id="jumpToLatest" type="button" hidden aria-label="Jump to latest activity">↓ Latest</button>
+  </div>
+  <div style="display:flex; align-items:center; gap:8px; padding:4px 12px 8px;">
+    <label for="accessScopeSelect" style="color:var(--subtle); font-size:11px;">Access</label>
+    <select id="accessScopeSelect" style="min-width:0; flex:1; background:transparent; color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:4px;" aria-label="Agent access scope">
+      <option value="workspace">Project workspace</option>
+      <option value="file">File</option>
+      <option value="machine">Full Machine</option>
+    </select>
   </div>
 
   <!-- Bottom Utility Toolbar -->
@@ -1679,6 +1736,14 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         <option value="always_proceed">Always proceed (higher risk)</option>
       </select>
       <div style="font-size:11px; color:var(--subtle);">Read-only inspection remains automatic. Critical system operations stay blocked.</div>
+      <label for="agentRoundsInput">Task rounds (0 = until done or cancelled)</label>
+      <input id="agentRoundsInput" type="number" min="0" max="10000" value="80" />
+      <label for="ollamaContextInput">Local model context window</label>
+      <input id="ollamaContextInput" type="number" min="2048" max="1048576" value="8192" />
+      <label for="ollamaOutputInput">Local output tokens (-1 = no extension cap)</label>
+      <input id="ollamaOutputInput" type="number" min="-1" max="1048576" value="-1" />
+      <button class="action-btn secondary" id="saveAgentSettings">Save limits</button>
+      <div style="font-size:11px; color:var(--subtle);">Local inference has no publisher token quota. Context, RAM/VRAM and model capability remain finite. Commands are not OS-sandboxed. Internet page reads and recognized network commands require approval.</div>
     </div>
   </div>
 
@@ -1732,6 +1797,15 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     const terminalDrawer = document.getElementById('terminalDrawer');
     const settingsDrawer = document.getElementById('settingsDrawer');
     const permissionModeSelect = document.getElementById('permissionModeSelect');
+    const accessScopeSelect = document.getElementById('accessScopeSelect');
+    const agentRoundsInput = document.getElementById('agentRoundsInput');
+    const ollamaContextInput = document.getElementById('ollamaContextInput');
+    const ollamaOutputInput = document.getElementById('ollamaOutputInput');
+    accessScopeSelect.addEventListener('change', () => vscode.postMessage({ type: 'setAccessScope', scope: accessScopeSelect.value }));
+    document.getElementById('saveAgentSettings').addEventListener('click', () => {
+      if (![agentRoundsInput, ollamaContextInput, ollamaOutputInput].every(input => input.value !== '' && input.reportValidity())) return;
+      vscode.postMessage({ type: 'updateSettings', settings: { 'agent.maxRounds': Number(agentRoundsInput.value), 'ollama.contextWindow': Number(ollamaContextInput.value), 'ollama.maxOutputTokens': Number(ollamaOutputInput.value) } });
+    });
     const diffFileList = document.getElementById('diffFileList');
     const proposalSummary = document.getElementById('proposalSummary');
     const terminalOutput = document.getElementById('terminalOutput');
@@ -1997,20 +2071,25 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     });
     jumpToLatest.addEventListener('click', () => scrollToLatest(true));
 
-    function renderActivity(act) {
+    function renderActivity(act, historical) {
       if (!act || typeof act !== 'object') return;
-      timelineContainer.style.display = 'flex';
+      if (!historical && typeof act.title === 'string' && act.title.startsWith('Visible model update')) return;
       let row = act.id ? document.getElementById('act-row-' + act.id) : null;
       if (!row) {
+        if (!historical && act.toolName && streamingBubble) {
+          streamingBubble.classList.remove('streaming');
+          streamingBubble = null;
+          streamingText = '';
+        }
         row = document.createElement('div');
         row.className = 'timeline-row';
         if (act.id) row.id = 'act-row-' + act.id;
-        timelineContainer.appendChild(row);
+        (historical ? timelineContainer : mainScroll).appendChild(row);
       }
+      row.setAttribute('data-status', act.status || 'success');
       const detailsOpen = !!row.querySelector('details')?.open;
-      const statusClass = act.status ? ' timeline-status ' + act.status : '';
-      const statusBadge = act.status ? '<span class="' + statusClass + '">' + escapeHtml(act.status) + '</span>' : '';
-      const durationText = act.durationMs ? ' (' + (act.durationMs / 1000).toFixed(1) + 's)' : '';
+      const symbol = act.status === 'running' || act.status === 'started' ? '◌' : act.status === 'error' ? '!' : act.status === 'waiting_for_approval' ? '?' : act.status === 'cancelled' ? '−' : '✓';
+      const durationText = typeof act.durationMs === 'number' ? (act.durationMs / 1000).toFixed(1) + 's' : '';
       const detailSections = [];
       if (act.details) {
         const isModelResponse = typeof act.title === 'string' && act.title.startsWith('Visible model update');
@@ -2021,8 +2100,8 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       const detailsMarkup = detailSections.length
         ? '<details class="timeline-details"' + (detailsOpen ? ' open' : '') + '><summary>Inspect run details</summary>' + detailSections.join('') + '</details>'
         : '';
-      row.innerHTML = '<span class="timeline-cat">' + escapeHtml(act.category) + '</span>' +
-        '<span class="timeline-text">' + escapeHtml(act.title) + durationText + detailsMarkup + '</span>' + statusBadge;
+      row.innerHTML = '<span class="activity-symbol" aria-label="' + escapeHtml(act.status || '') + '">' + symbol + '</span>' +
+        '<span class="timeline-text">' + escapeHtml(act.title) + detailsMarkup + '</span><span class="activity-duration">' + durationText + '</span>';
       scrollToLatest(false);
     }
 
@@ -2070,7 +2149,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       if (msg.type === 'history') {
         timelineContainer.innerHTML = '';
         timelineContainer.style.display = 'none';
-        const oldMessages = mainScroll.querySelectorAll('.msg-user, .msg-assistant:not(.welcome), .artifact-card, .permission-card');
+        const oldMessages = mainScroll.querySelectorAll('.msg-user, .msg-assistant:not(.welcome), .artifact-card, .permission-card, .timeline-row');
         oldMessages.forEach(el => el.remove());
         if (Array.isArray(msg.messages) && msg.messages.length > 0) {
           msg.messages.forEach(m => {
@@ -2121,9 +2200,29 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         permissionModeSelect.value = msg.mode;
       }
 
+      if (msg.type === 'accessScope') {
+        accessScopeSelect.value = msg.scope;
+        accessScopeSelect.title = msg.filePath ? 'Restricted to ' + msg.filePath : msg.scope === 'machine' ? 'Outside-workspace reads need approval; workspace diffs remain workspace-only' : 'Workspace file tools; commands require separate approval';
+      }
+      if (msg.type === 'agentSettings') {
+        agentRoundsInput.value = String(msg.maxRounds);
+        ollamaContextInput.value = String(msg.contextWindow);
+        ollamaOutputInput.value = String(msg.maxOutputTokens);
+      }
+
       if (msg.type === 'activityHistory') {
         timelineContainer.innerHTML = '';
-        (Array.isArray(msg.activities) ? msg.activities : []).forEach(renderActivity);
+        const activities = Array.isArray(msg.activities) ? msg.activities : [];
+        if (activities.length) {
+          timelineContainer.style.display = 'flex';
+          const archive = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = 'Previous run details';
+          archive.appendChild(summary);
+          timelineContainer.appendChild(archive);
+          activities.forEach(act => renderActivity(act, true));
+          timelineContainer.querySelectorAll('.timeline-row').forEach(row => archive.appendChild(row));
+        }
       }
 
       if (msg.type === 'activity') {
@@ -2256,7 +2355,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         const card = document.createElement('div');
         card.className = 'permission-card';
         card.id = 'perm-' + req.id;
-        card.innerHTML = '<div class="permission-title"><span>Permission Request: ' + escapeHtml(req.toolName) + '</span></div>' +
+        card.innerHTML = '<div class="permission-title"><span>' + escapeHtml(req.description || 'Allow this action?') + '</span></div>' +
           (req.command ? '<div class="permission-desc">' + escapeHtml(req.commandCategory || 'Command') + ' · runs in the current workspace</div><pre class="permission-command">' + escapeHtml(req.command) + '</pre>' :
             req.path ? '<div class="permission-desc">File: ' + escapeHtml(req.path) + '</div>' :
               '<div class="permission-desc">' + escapeHtml(req.description || req.category || 'Review this action before allowing it.') + '</div>') +
@@ -2392,57 +2491,11 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     });
 
     function escapeHtml(str) {
-      return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function renderMarkdown(value) {
-      const lines = String(value || '').replace(/\\r/g, '').split('\\n');
-      const blocks = [];
-      let paragraph = [];
-      let code = [];
-      let inCode = false;
-      const codeFence = String.fromCharCode(96, 96, 96);
-      const inline = (text) => escapeHtml(text)
-        .replace(new RegExp(String.fromCharCode(96) + '([^' + String.fromCharCode(96) + ']+)' + String.fromCharCode(96), 'g'), '<code>$1</code>')
-        .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
-      const flushParagraph = () => {
-        if (paragraph.length) {
-          blocks.push('<p>' + paragraph.map(inline).join('<br>') + '</p>');
-          paragraph = [];
-        }
-      };
-      for (const line of lines) {
-        if (line.startsWith(codeFence)) {
-          if (inCode) {
-            blocks.push('<pre><code>' + escapeHtml(code.join('\\n')) + '</code></pre>');
-            code = [];
-            inCode = false;
-          } else {
-            flushParagraph();
-            inCode = true;
-          }
-          continue;
-        }
-        if (inCode) { code.push(line); continue; }
-        if (!line.trim()) { flushParagraph(); continue; }
-        const heading = /^(#{1,3})\\s+(.+)$/.exec(line);
-        if (heading) {
-          flushParagraph();
-          const level = heading[1].length;
-          blocks.push('<h' + level + '>' + inline(heading[2]) + '</h' + level + '>');
-          continue;
-        }
-        if (/^[-*]\\s+/.test(line)) {
-          flushParagraph();
-          blocks.push('<ul><li>' + inline(line.replace(/^[-*]\\s+/, '')) + '</li></ul>');
-          continue;
-        }
-        paragraph.push(line);
-      }
-      if (inCode) blocks.push('<pre><code>' + escapeHtml(code.join('\\n')) + '</code></pre>');
-      flushParagraph();
-      return blocks.join('');
+      return (${renderChatMarkdown.toString()})((${normalizeAssistantMarkdown.toString()})(value));
     }
 
     vscode.postMessage({ type: 'ready' });

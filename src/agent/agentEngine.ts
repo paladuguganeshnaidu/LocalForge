@@ -62,7 +62,7 @@ export class AgentEngine {
     options.signal?.throwIfAborted();
 
     // If agent mode made file modifications that were auto-applied, run validation/repair loop
-    if ((options.mode ?? 'agent') === 'agent' && state.status === 'completed' && filesModified.length > 0 && workspaceRoot) {
+    if ((options.mode ?? 'agent') === 'agent' && state.status === 'completed' && filesModified.length > 0 && workspaceRoot && this.toolRegistry.isToolAllowed('run_command')) {
       const attempts = await this.validateAndRepair(
         provider,
         model,

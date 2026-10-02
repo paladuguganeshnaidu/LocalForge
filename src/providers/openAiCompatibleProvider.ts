@@ -24,11 +24,18 @@ interface ToolResponse {
 
 export class OpenAiCompatibleProvider implements ModelProvider {
   readonly id: string;
+  readonly source: 'local' | 'remote';
   private readonly baseUrl: string;
 
   constructor(id: string, baseUrl: string) {
     this.id = id;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    let loopback = false;
+    try {
+      const url = new URL(this.baseUrl);
+      loopback = ['http:', 'https:'].includes(url.protocol) && (['localhost', '[::1]'].includes(url.hostname) || /^127\./.test(url.hostname));
+    } catch {}
+    this.source = loopback ? 'local' : 'remote';
   }
 
   async detect(): Promise<boolean> {
@@ -44,7 +51,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
     const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(2500) });
     if (!response.ok) throw new Error(`${this.id} returned HTTP ${response.status} while listing models.`);
     const data = await response.json() as ModelsResponse;
-    return (data.data ?? []).flatMap((model) => model.id ? [{ name: model.id }] : []);
+    return (data.data ?? []).flatMap((model) => model.id ? [{ name: model.id, source: this.source }] : []);
   }
 
   async streamChat(model: string, messages: ChatMessage[], onToken: (token: string) => void, signal?: AbortSignal): Promise<void> {

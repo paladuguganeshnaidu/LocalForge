@@ -438,6 +438,55 @@ async function run() {
     });
   }
 
+  await runStage('Directory argument regression and real File scope enforcement', async () => {
+    const api = ext.exports;
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, 'A real workspace must be open');
+    await assert.rejects(api.engine.toolRegistry.executeTool('list_directory', { directory: 'package.json' }, api.engine.permissionManager), /not a directory.*read_file/);
+    await assert.rejects(api.engine.toolRegistry.executeTool('list_directory', { invalid: 'package.json' }, api.engine.permissionManager), /requires a path/);
+    const listing = await api.engine.toolRegistry.executeTool('list_directory', { path: '' }, api.engine.permissionManager);
+    assert.ok(listing.some((entry) => entry.name === 'package.json'));
+    api.engine.setAccessScope('file', 'package.json');
+    try {
+      const file = await api.engine.toolRegistry.executeTool('read_file', { path: 'package.json' }, api.engine.permissionManager);
+      assert.match(file.content, /localforge-vscode/);
+      await assert.rejects(api.engine.toolRegistry.executeTool('read_file', { path: 'README.md' }, api.engine.permissionManager), /restricted/);
+      await assert.rejects(api.engine.toolRegistry.executeTool('run_command', { command: 'npm test' }, api.engine.permissionManager), /unavailable/);
+      await assert.rejects(api.engine.executeTask('/terminal npm test', 'agent'), /unavailable/);
+      assert.ok(!api.engine.toolRegistry.getDefinitions().some((tool) => tool.function.name === 'search_workspace'));
+    } finally { api.engine.setAccessScope('workspace'); }
+  });
+
+  if (process.env.LOCALFORGE_REAL_OLLAMA_EDIT === '1') {
+    await runStage('Live Ollama read-only Markdown repository summary', async () => {
+      const { AgentLoop } = require('../../dist/agent/agentLoop');
+      const { ToolRegistry } = require('../../dist/agent/toolRegistry');
+      const { OllamaProvider } = require('../../dist/providers/ollamaProvider');
+      const { createRepositorySummaryFormatter, createRepositorySummaryValidator } = require('../../dist/agent/summaryEvidence');
+      const api = ext.exports;
+      const registry = new ToolRegistry();
+      const definition = api.engine.toolRegistry.getTool('read_file').definition;
+      let reads = 0;
+      registry.registerTool(definition, async (args) => {
+        console.log('[LiveSummary] Reading', JSON.stringify(args));
+        assert.equal(args.path, 'package.json');
+        reads += 1;
+        return api.engine.toolRegistry.executeTool('read_file', args, api.engine.permissionManager);
+      }, { category: 'read', riskLevel: 'read_only' });
+      const provider = new OllamaProvider('http://127.0.0.1:11434', 'ollama', () => ({ num_ctx: 8192, num_predict: 512, temperature: 0.1, seed: 7 }));
+      const result = await new AgentLoop(provider, registry, api.engine.permissionManager).run(process.env.LOCALFORGE_OLLAMA_MODEL || 'qwen2.5-coder:1.5b', [{ role: 'user', content: 'Read package.json using read_file. Answer briefly with only ## Purpose (actual name and purpose), and ## Commands (copy the exact JSON values of scripts.build and scripts.test into code spans). No other commands. Do not write files.' }], { mode: 'ask', requireToolUse: true, formatFinalResponse: createRepositorySummaryFormatter('Summary with actual name. Copy exact scripts.build and scripts.test.'), validateFinalResponse: createRepositorySummaryValidator('Summary with actual name. Copy exact scripts.build and scripts.test.'), maxRounds: 6, timeoutMs: 300000, onModelOutput: (text, round, tools) => console.log('[LiveSummary]', JSON.stringify({ round, tools, text })), onToolEnd: (name, _result, error) => console.log('[LiveSummary] Tool result', name, error || 'success') });
+      assert.ok(reads > 0, `The model must actually inspect the project before answering: ${result.response}`);
+      assert.equal(result.state.status, 'completed', result.response);
+      assert.match(result.response, /#{1,6}\s+\w/);
+      const manifest = require('../../package.json');
+      assert.ok(result.response.includes(manifest.name));
+      assert.ok(result.response.includes(manifest.scripts.build), 'The summary must copy the actual build script');
+      assert.ok(result.response.includes(manifest.scripts.test), 'The summary must copy the actual test script');
+      assert.doesNotMatch(result.response, /LOCALFORGE_TOOL_CALL|Some tool actions failed/);
+      console.log('[ExtensionHost] Real summary:', result.response.slice(0, 2000));
+    });
+  }
+
   await runStage('Models view activation', async () => {
     await vscode.commands.executeCommand('localforge.modelsView.focus');
   });

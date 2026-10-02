@@ -4,6 +4,14 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [Unreleased]
 
+- Fix directory argument aliases and refuse treating file paths or malformed directory requests as the workspace root; retry inspection errors in Ask as well as Agent mode and preserve readable findings with specific incomplete actions.
+- Reject ungrounded inspection answers, suppress their live rendering before evidence, and distinguish ordinary named JSON data from executable tool calls. Exclude credentials, outside-workspace editors, and escaping links from automatic indexing/context/reference attachment.
+- Check repository summaries against successfully read package identity and explicitly requested exact scripts; ask the model to correct missing evidence, and report unresolved answer requirements without claiming completion. Normalize plain section labels without changing fenced source code.
+- Render live actions chronologically in chat, show exact running/settled commands and exit codes, collapse older run evidence, and simplify conversation surfaces with safe headings, grouped lists, ordered steps, quotes, code and links.
+- Add enforced Project workspace/File/Full Machine tool profiles. File blocks other files, project context, terminal, Git and delegation; Full Machine enables separately approved outside-workspace text reads and directory listings, not unrestricted diff editing or elevated privileges.
+- Add approved, bounded HTTPS documentation reads without redirects and require explicit approval for recognized network commands even in automatic modes. Shell commands remain host processes, not an OS/network sandbox.
+- Replace short six/ten-round defaults with configurable task, context and history budgets; support uncapped rounds with cancellation and repeated-action protection, abridge old complete tool exchanges, and expose local Ollama generation/context settings.
+
 - Route built-in file creation, line replacement, deletion, and move tools through the shared proposal, native edit, and durable recovery engine; remove their direct filesystem mutation fallbacks.
 - Require explicit deletion/move approvals, bind source and destination acceptance/Undo, preserve binary moves/deletions, and refuse collisions, dirty buffers, directories, and symbolic links.
 - Validate integer line ranges and preparation hashes, preserve existing CRLF in line replacement, label file operations in review, and provide original snapshot documents for new-file diffs.

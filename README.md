@@ -25,6 +25,26 @@ LOMVREN is a VS Code coding assistant that connects to local Ollama or an Ollama
 
 ## Modes of Operation
 
+### Chat, access and long-running tasks (0.2.24 development build)
+
+Greetings and simple summary-only requests use read-only tools even when Agent is selected. Mixed requests such as “summarize and fix” retain Agent capabilities. This is conservative intent detection, not a guarantee that a small model understands every instruction. See [the 0.2.24 verification record](docs/release/VERIFICATION_0.2.24.md) for checks and limitations.
+
+Local Ollama requests use a lower sampling temperature (0.1) for less variable coding/tool responses. Change `localforge.ollama.temperature` in VS Code settings if needed; a lower temperature does not guarantee accuracy. A summary can display project identity sourced directly from a successfully read `package.json`, rather than guessing it from the model. Missing explicitly requested exact script commands can trigger a corrective model round.
+
+Live file and command actions now appear where they happen in the conversation. A running command shows `Running: <command>`; its completed row shows `Ran: <command> · exit <code>`. Expand **Inspect run details** for input, output and failures. Earlier activity is collapsed under **Previous run details**. Replies support safe Markdown headings, grouped bullet/numbered lists, quotes, code and HTTP(S) links; model HTML is never executed.
+
+The **Access** selector enforces built-in tool restrictions, independently of edit/command approval policies:
+
+- **Project workspace** (default): file tools stay within the open workspace. Terminal commands require their own policy; they run as your existing OS account and are **not OS-sandboxed**.
+- **File**: select one file in the first workspace folder. Only that path may be read or proposed for editing; repository context, other files, terminal commands, Git and delegation are blocked. Previous broader conversation context is not sent. Project validation commands are unavailable until you change scope.
+- **Full Machine**: requires explicit confirmation and enables `read_machine_file` / `list_machine_directory` for absolute outside-workspace paths. Every such action needs approval, including in Always proceed mode. Regular text-file reads are bounded to 256 KiB. Workspace diff/Undo tools remain workspace-only; this is not unrestricted outside-workspace editing, an administrator grant, or an OS sandbox. Approved shell commands already operate with your account's permissions. Access resets when the extension restarts and cannot be changed during a task.
+
+`read_web_page` reads an explicitly approved HTTPS URL, with a 1 MiB response limit and no redirects, credentials, browser execution or automatic search engine. Page content is untrusted reference data. Recognized network commands (including package installation) also request approval. Arbitrary scripts can access networks; the extension does **not** impose an OS-level network firewall. Local model inference does not send code to the publisher; selecting remote/API inference sends prompts and context to your configured endpoint. Approving internet requests can transmit their URL/query to that destination.
+
+In **Settings**, configure task rounds (default 80; `0` removes the round cap), local context window (default 8192), and local output tokens (`-1` removes the extension's generation cap). Advanced VS Code settings also expose `localforge.agent.contextTokens` and `localforge.agent.historyCharacters`. History compaction removes old complete exchanges with an abridged evidence notice; it is a character estimate, not an exact token guarantee. Local inference has no publisher token quota, but model context, RAM/VRAM, speed and tool reliability are finite. Repeated identical actions stop rather than looping forever. Small models can still fail complex engineering requests; this build does not claim parity with commercial coding agents.
+
+Try **Ask**: “Inspect the project and summarize its purpose, architecture, entry points, run/test commands and what you could not verify.” Then **Agent**: “Create a responsive portfolio in this workspace. Propose the files, explain how to preview it, and verify after approval.” Diff-review mode prepares changes rather than applying them; accept the changes and continue the task to inspect/verify the resulting files. Use Always proceed only when you explicitly want permitted low-risk edits applied automatically.
+
 ### Model management
 
 Open the **Models** view in the LOMVREN sidebar to search installed models, select one for chat, or set a default for chat and agent tasks. Enter an Ollama model name to install or update it. Downloads show live progress and provide Pause, Resume, and Cancel controls. Resume sends a new pull request for the same model; Ollama may reuse completed layers. Paused downloads survive closing and reopening the view during the current extension session. Deletion requires confirmation and is limited to discovered local Ollama models. Start Ollama before installing or discovering local models.

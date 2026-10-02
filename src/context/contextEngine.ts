@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { WorkspaceIndexer } from './workspaceIndexer';
 import { LexicalRetrievalEngine, RetrievalEngine, SearchMatch } from './retrieval';
 import { ContextBudget } from './contextBudget';
+import { canAttachWorkspaceContext } from './accessBoundary';
 
 export interface ContextItem {
   source: 'selection' | 'active_file' | 'open_tabs' | 'retrieval' | 'diagnostics' | 'git';
@@ -49,7 +50,7 @@ export class ContextEngine {
 
     // 1. Current Selection & Active Editor File
     const editor = vscode.window.activeTextEditor;
-    if (editor) {
+    if (editor && await canAttachWorkspaceContext(editor.document.uri)) {
       const relPath = vscode.workspace.asRelativePath(editor.document.uri);
       const selection = editor.document.getText(editor.selection).trim();
 
@@ -111,7 +112,9 @@ export class ContextEngine {
           return input?.uri ? [input.uri] : [];
         });
 
-        const uniqueTabPaths = [...new Set(openUris.map((u) => vscode.workspace.asRelativePath(u)))].slice(0, 6);
+        const allowedUris: vscode.Uri[] = [];
+        for (const uri of openUris) if (await canAttachWorkspaceContext(uri)) allowedUris.push(uri);
+        const uniqueTabPaths = [...new Set(allowedUris.map((uri) => vscode.workspace.asRelativePath(uri)))].slice(0, 6);
         if (uniqueTabPaths.length) {
           const listText = uniqueTabPaths.map((p) => `- ${p}`).join('\n');
           const alloc = budget.allocate('open_tabs', listText, 250);
@@ -164,6 +167,7 @@ export class ContextEngine {
       let projectSummary = `Workspace: ${rootFolder.name}`;
       try {
         const pkgUri = vscode.Uri.joinPath(rootFolder.uri, 'package.json');
+        if (!await canAttachWorkspaceContext(pkgUri)) throw new Error('Package metadata is outside the authorized context boundary.');
         const pkgBytes = await vscode.workspace.fs.readFile(pkgUri);
         const pkgData = JSON.parse(new TextDecoder().decode(pkgBytes));
         if (pkgData.name) {

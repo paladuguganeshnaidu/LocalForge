@@ -19,7 +19,7 @@ export class ModelRegistry {
   private models = new Map<string, ModelMetadata>();
   private health = new Map<string, ProviderHealth>();
 
-  registerProvider(provider: ModelProvider, source: ModelSource = 'local', endpoint?: string, gpuInfo?: string): void {
+  registerProvider(provider: ModelProvider, source: ModelSource = provider.source ?? 'local', endpoint?: string, gpuInfo?: string): void {
     this.providers.set(provider.id, { provider, source, endpoint, gpuInfo });
   }
 

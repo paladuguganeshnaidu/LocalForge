@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { GitContextService } from './gitContext';
 import { TerminalManager } from '../terminal/terminalManager';
+import { canAttachWorkspaceContext } from './accessBoundary';
+import { validateWorkspaceRelativePath } from '../core/workspacePaths';
 
 export interface ResolvedContextReference {
   type: 'file' | 'selection' | 'terminal' | 'diagnostics' | 'git';
@@ -53,7 +55,7 @@ export class ContextReferenceResolver {
     if (/@selection\b/i.test(cleaned)) {
       cleaned = cleaned.replace(/@selection\b/gi, '').trim();
       const editor = vscode.window.activeTextEditor;
-      if (editor && !editor.selection.isEmpty) {
+      if (editor && !editor.selection.isEmpty && await canAttachWorkspaceContext(editor.document.uri)) {
         references.push({
           type: 'selection',
           label: `Selection in ${vscode.workspace.asRelativePath(editor.document.uri)}`,
@@ -80,7 +82,7 @@ export class ContextReferenceResolver {
     if (/@diagnostics\b/i.test(cleaned)) {
       cleaned = cleaned.replace(/@diagnostics\b/gi, '').trim();
       const editor = vscode.window.activeTextEditor;
-      if (editor) {
+      if (editor && await canAttachWorkspaceContext(editor.document.uri)) {
         const diags = vscode.languages.getDiagnostics(editor.document.uri);
         if (diags.length) {
           const list = diags.slice(0, 10).map((d) => `[Line ${d.range.start.line + 1}] ${d.message}`).join('\n');
@@ -115,15 +117,21 @@ export class ContextReferenceResolver {
       const filePath = fileMatch[1];
       if (workspaceRoot) {
         try {
-          const uri = vscode.Uri.joinPath(workspaceRoot, filePath);
+          const uri = vscode.Uri.joinPath(workspaceRoot, ...validateWorkspaceRelativePath(filePath));
+          if (!await canAttachWorkspaceContext(uri)) throw new Error('This file requires a separately approved read tool and was not attached automatically.');
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.type !== vscode.FileType.File || stat.size > 256 * 1024) throw new Error('Reference must be a regular text file up to 256 KiB.');
           const bytes = await vscode.workspace.fs.readFile(uri);
+          if (bytes.includes(0)) throw new Error('Binary reference was not attached.');
           const text = new TextDecoder().decode(bytes);
           references.push({
             type: 'file',
             label: filePath,
             content: text.slice(0, 10000)
           });
-        } catch {}
+        } catch (error) {
+          references.push({ type: 'file', label: filePath, content: `Not attached: ${error instanceof Error ? error.message : 'File is unavailable.'}` });
+        }
       }
     }
     cleaned = cleaned.replace(fileRefPattern, '').trim();

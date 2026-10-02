@@ -1,6 +1,12 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { formatToolInput, formatToolOutput } = require('../dist/core/activityDetails.js');
+const { formatCommandLabel, formatToolInput, formatToolOutput } = require('../dist/core/activityDetails.js');
+
+test('command titles show the exact test command and redact secret arguments', () => {
+  assert.equal(formatCommandLabel('run_test', {}), 'npm test');
+  assert.equal(formatCommandLabel('run_test', { test_filter: 'tests/sample.test.js' }), 'npm test -- "tests/sample.test.js"');
+  assert.equal(formatCommandLabel('run_command', { command: 'npm test --token secret-value' }), 'npm test --token [REDACTED]');
+});
 
 test('activity input shows commands while masking credential arguments', () => {
   const details = formatToolInput('run_command', {

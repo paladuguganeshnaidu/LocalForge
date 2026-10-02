@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { scoreText, selectRelevantLines } from './relevance';
+import { canAttachWorkspaceContext } from './accessBoundary';
 
 export { scoreText, selectRelevantLines } from './relevance';
 
@@ -34,6 +35,7 @@ export async function findRelevantSnippets(
 
   for (const uri of candidates) {
     if (excludeUri && uri.toString() === excludeUri.toString()) continue;
+    if (!await canAttachWorkspaceContext(uri)) continue;
     try {
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.size > maxFileBytes) continue;

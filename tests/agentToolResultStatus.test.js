@@ -4,6 +4,75 @@ const { AgentLoop } = require('../dist/agent/agentLoop');
 const { PermissionManager } = require('../dist/agent/permissionManager');
 const { ToolRegistry } = require('../dist/agent/toolRegistry');
 
+test('required inspection retries ungrounded model answers without streaming them as facts', async () => {
+  let rounds = 0;
+  const streamed = [];
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }, async () => ({ content: 'Actual portfolio' }));
+  const provider = { id: 'inspection', chatWithTools: async (_model, _messages, _tools, _signal, delta) => {
+    rounds += 1;
+    if (rounds === 1) { delta('Unverified invented summary'); return { role: 'assistant', content: 'Unverified invented summary' }; }
+    if (rounds === 2) return { role: 'assistant', content: '', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'package.json' } } }] };
+    delta('## Summary\n- Actual portfolio');
+    return { role: 'assistant', content: '## Summary\n- Actual portfolio' };
+  } };
+  const result = await new AgentLoop(provider, registry).run('fixture', [{ role: 'user', content: 'Inspect package.json' }], { requireToolUse: true, onModelText: (value) => streamed.push(value) });
+  assert.equal(result.state.status, 'completed');
+  assert.equal(rounds, 3);
+  assert.doesNotMatch(streamed.join(''), /invented/);
+  assert.match(streamed.join(''), /Actual portfolio/);
+});
+
+test('required inspection never presents an invented summary as verified completion', async () => {
+  const provider = { id: 'refusal', chatWithTools: async () => ({ role: 'assistant', content: 'Your project is definitely a React app.' }) };
+  const result = await new AgentLoop(provider, new ToolRegistry()).run('fixture', [{ role: 'user', content: 'Inspect my project' }], { requireToolUse: true });
+  assert.equal(result.state.status, 'failed');
+  assert.doesNotMatch(result.response, /definitely a React/);
+  assert.match(result.response, /Inspection needed/);
+});
+
+test('repository summaries preserve findings and explain the specific incomplete read', async () => {
+  let rounds = 0;
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }, async () => { throw new Error('Cannot read missing.ts: file does not exist.'); });
+  const provider = { id: 'summary', chatWithTools: async () => ++rounds === 1 ? { role: 'assistant', content: '', tool_calls: [{ id: 'missing', function: { name: 'read_file', arguments: { path: 'missing.ts' } } }] } : { role: 'assistant', content: '## Project summary\n- A portfolio with an HTML entry point.\n- The README documents a local preview server.' } };
+  const result = await new AgentLoop(provider, registry).run('fixture', [{ role: 'user', content: 'Read the project and summarize it.' }], { mode: 'ask' });
+  assert.match(result.response, /## Project summary/);
+  assert.match(result.response, /## Incomplete actions/);
+  assert.match(result.response, /missing.ts: file does not exist/);
+  assert.doesNotMatch(result.response, /before accepting any changes/);
+  assert.equal(rounds, 4);
+  assert.equal(result.state.status, 'failed');
+});
+
+test('local tasks can exceed ten rounds, compact tool history and expose plain-language progress', async () => {
+  let rounds = 0;
+  const progress = [];
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }, async (args) => ({ path: args.path, content: 'x'.repeat(7500) }));
+  const provider = { id: 'long', chatWithTools: async (_model, messages) => {
+    rounds += 1;
+    assert.ok(messages.some((message) => message.content === 'Inspect twenty portfolio components.'), 'The original task must survive compaction');
+    const callIds = new Set(messages.flatMap((message) => (message.tool_calls ?? []).map((call) => call.id)));
+    for (const message of messages.filter((message) => message.role === 'tool')) assert.ok(callIds.has(message.tool_call_id), 'Compaction must not orphan tool replies');
+    return rounds <= 20 ? { role: 'assistant', content: '', tool_calls: [{ id: 'read-' + rounds, function: { name: 'read_file', arguments: { path: 'component-' + rounds } } }] } : { role: 'assistant', content: '## Summary\n- Inspected twenty components.' };
+  } };
+  const result = await new AgentLoop(provider, registry).run('fixture', [{ role: 'user', content: 'Inspect twenty portfolio components.' }], { maxRounds: 0, maxHistoryCharacters: 16000, onProgress: (value) => progress.push(value) });
+  assert.equal(rounds, 21);
+  assert.equal(result.state.status, 'completed');
+  assert.ok(progress.every((value) => value === 'Thinking'));
+});
+
+test('uncapped tasks still stop a non-progressing repeated action loop', async () => {
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }, async () => ({ content: 'same file' }));
+  const provider = { id: 'stuck', chatWithTools: async () => ({ role: 'assistant', content: '', tool_calls: [{ id: 'same', function: { name: 'read_file', arguments: { path: 'same.ts' } } }] }) };
+  const result = await new AgentLoop(provider, registry).run('fixture', [{ role: 'user', content: 'Inspect' }], { maxRounds: 0 });
+  assert.equal(result.state.status, 'failed');
+  assert.equal(result.state.steps.length, 5);
+  assert.match(result.response, /without making progress/);
+});
+
 test('agent marks a non-zero command result as a tool warning and passes it back to the model', async () => {
   let requestCount = 0;
   let activityError;
@@ -79,7 +148,7 @@ test('agent summarizes verified tool outcomes when the model omits its final res
     { role: 'user', content: 'Make a file change and run tests.' }
   ], { maxRounds: 1 });
 
-  assert.equal(result.state.status, 'completed');
+  assert.equal(result.state.status, 'waiting_for_approval');
   assert.match(result.response, /did not provide a written summary/i);
   assert.match(result.response, /src\/new\.ts \(not applied\)/);
   assert.match(result.response, /Command finished with exit code 0/);

@@ -29,7 +29,11 @@ import { CheckpointManager } from '../agent/orchestration/checkpointManager';
 import { registerAllCoreTools } from '../agent/coreTools';
 import { ProductMode } from '../agent/orchestration/types';
 import { LocalForgeSelfTest } from './selfTest';
-import { formatToolInput, formatToolOutput } from './activityDetails';
+import { formatCommandLabel, formatToolInput, formatToolOutput } from './activityDetails';
+import { AgentAccessPolicy, AccessScope } from '../agent/accessPolicy';
+import { registerExternalTools } from '../agent/externalTools';
+import { createRepositorySummaryFormatter, createRepositorySummaryValidator } from '../agent/summaryEvidence';
+import { isReadOnlyInspectionTask } from '../agent/taskIntent';
 
 export interface EngineInitOptions {
   ollamaEndpoint?: string;
@@ -50,6 +54,7 @@ export class LocalForgeEngine {
   public readonly compositeProvider: CompositeProvider;
   public readonly modelRouter: ModelRouter;
   public readonly toolRegistry: ToolRegistry;
+  public readonly accessPolicy = new AgentAccessPolicy();
   public readonly permissionManager: PermissionManager;
   public readonly editEngine: EditEngine;
   public readonly agentEngine: AgentEngine;
@@ -78,7 +83,14 @@ export class LocalForgeEngine {
     options: EngineInitOptions = {}
   ) {
     const ollamaUrl = options.ollamaEndpoint || 'http://127.0.0.1:11434';
-    const localOllama = new OllamaProvider(ollamaUrl, 'ollama');
+    const localOllama = new OllamaProvider(ollamaUrl, 'ollama', () => {
+      const configuration = vscode.workspace.getConfiguration('localforge.ollama');
+      return {
+        num_ctx: configuration.get<number>('contextWindow', 8192),
+        num_predict: configuration.get<number>('maxOutputTokens', -1),
+        temperature: configuration.get<number>('temperature', 0.1)
+      };
+    });
 
     const defaultProviders: ModelProvider[] = [localOllama];
     if (options.openAiEndpoint) {
@@ -89,14 +101,18 @@ export class LocalForgeEngine {
     this.modelRegistry = new ModelRegistry();
     this.modelRegistry.registerProvider(localOllama, localOllama.source, ollamaUrl);
     if (options.openAiEndpoint) {
-      this.modelRegistry.registerProvider(new OpenAiCompatibleProvider('openai', options.openAiEndpoint), 'local', options.openAiEndpoint);
+      const compatible = new OpenAiCompatibleProvider('openai', options.openAiEndpoint);
+      this.modelRegistry.registerProvider(compatible, compatible.source, options.openAiEndpoint);
     }
 
     this.modelRouter = new ModelRouter(() => this.modelRegistry.getModels());
 
     const savedPermissionMode = context.globalState?.get<unknown>('localforge.permissionMode');
     this.permissionManager = new PermissionManager(isPermissionMode(savedPermissionMode) ? savedPermissionMode : 'always_ask');
+    this.permissionManager.setAccessPolicy(this.accessPolicy);
     this.toolRegistry = new ToolRegistry();
+    this.toolRegistry.setAccessPolicy(this.accessPolicy);
+    registerExternalTools(this.toolRegistry, async (path) => await vscode.window.showWarningMessage(`Sensitive file: ${path}. Reading it may send credentials to the selected model endpoint. Approve only if you intend to expose this content.`, { modal: true }, 'Read sensitive file') === 'Read sensitive file');
 
     this.editEngine = new EditEngine(context.workspaceState, context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined);
     this.terminalManager = new TerminalManager();
@@ -204,6 +220,12 @@ export class LocalForgeEngine {
     return Boolean(this.currentAbortController);
   }
 
+  public setAccessScope(scope: AccessScope, filePath?: string): void {
+    if (this.isBusy()) throw new Error('Wait for the current task or cancel it before changing access.');
+    this.accessPolicy.setScope(scope, filePath);
+    this.permissionManager.clearSession();
+  }
+
   public async executeTask(
     userPrompt: string,
     mode: AgentMode,
@@ -245,6 +267,7 @@ export class LocalForgeEngine {
 
     // 1. Slash commands parsing
     const parsedSlash = this.referenceResolver.parseSlashCommand(userPrompt);
+    if (this.accessPolicy.getState().scope === 'file' && parsedSlash.command && !['clear', 'plan'].includes(parsedSlash.command)) throw new Error('This shortcut is unavailable with File access. Change scope before accessing other project data or running commands.');
     let effectivePrompt = parsedSlash.cleanPrompt || userPrompt;
 
     if (parsedSlash.command) {
@@ -420,6 +443,12 @@ export class LocalForgeEngine {
       }
     }
 
+    const agentConfiguration = vscode.workspace.getConfiguration('localforge.agent');
+    const chosenMetadata = this.modelRegistry.getModels().find((entry) => entry.id === chosenModel || entry.name === chosenModel);
+    const contextWindow = chosenMetadata?.providerId === 'ollama' || chosenModel.startsWith('ollama:')
+      ? vscode.workspace.getConfiguration('localforge.ollama').get<number>('contextWindow', 8192)
+      : chosenMetadata?.capabilities?.contextWindow ?? 8192;
+
     const session = this.sessionManager.getActiveSession();
     session.mode = effectiveMode;
     session.model = chosenModel;
@@ -451,31 +480,31 @@ export class LocalForgeEngine {
         status
       });
       onActivity?.(act);
-      onProgress?.(`${category}: ${title}`);
+      onProgress?.(title);
       return act;
     };
 
     // 2. Resolve @ references
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    const resolved = await this.referenceResolver.resolveReferences(effectivePrompt, workspaceRoot);
+    const fileScoped = this.accessPolicy.getState().scope === 'file';
+    const resolved = fileScoped ? { cleanedPrompt: effectivePrompt, references: [] } : await this.referenceResolver.resolveReferences(effectivePrompt, workspaceRoot);
     effectivePrompt = resolved.cleanedPrompt;
 
-    let contextHeader = '';
+    let contextHeader = this.accessPolicy.getPrompt() + '\n\n';
     if (resolved.references.length > 0) {
       contextHeader += 'Attached References:\n' + resolved.references.map((r) => `[${r.label}]\n${r.content}`).join('\n\n') + '\n\n';
     }
 
     // 3. Context retrieval - budget appropriately for local context windows
-    if (this.contextEngine) {
-      const isLocal = !chosenModel.startsWith('remote:') && !chosenModel.startsWith('openai:');
-      const maxTokens = isLocal ? 2000 : 8000;
+    if (this.contextEngine && !fileScoped) {
+      const maxTokens = Math.min(agentConfiguration.get<number>('contextTokens', 4000), Math.max(500, Math.floor(contextWindow / 4)));
       const ctx = await this.contextEngine.assembleContext(effectivePrompt, { maxTokens, includeWorkspace: true });
       contextHeader += ctx.promptText;
       session.lastContextPreview = ctx.summary;
     }
 
     const messages: ChatMessage[] = [
-      ...session.messages.slice(-10),
+      ...(fileScoped ? [] : session.messages.slice(-10)),
       {
         role: 'user',
         content: contextHeader ? `${contextHeader}\n\nTask:\n${effectivePrompt}` : effectivePrompt
@@ -493,6 +522,12 @@ export class LocalForgeEngine {
           mode: effectiveMode,
           strategy,
           signal,
+          maxRounds: agentConfiguration.get<number>('maxRounds', 80),
+          readOnlyInspection: isReadOnlyInspectionTask(effectivePrompt),
+          maxHistoryCharacters: Math.min(agentConfiguration.get<number>('historyCharacters', 48000), contextWindow * 3),
+          requireToolUse: effectiveMode !== 'plan' && /\b(?:read|inspect|summari[sz]e|summary|analy[sz]e|create|build|fix|edit|modify|refactor|implement|delete|move|run|test)\b/i.test(effectivePrompt),
+          validateFinalResponse: effectiveMode === 'plan' ? undefined : createRepositorySummaryValidator(effectivePrompt),
+          formatFinalResponse: effectiveMode === 'plan' ? undefined : createRepositorySummaryFormatter(effectivePrompt),
           onProgress: (p) => {
             onProgress?.(p);
           },
@@ -507,21 +542,32 @@ export class LocalForgeEngine {
             let title = `Running tool ${name}`;
             let targetPath: string | undefined;
 
-            if (name === 'search_workspace') {
+            if (['search_workspace', 'search_text', 'search_files', 'symbol_search'].includes(name)) {
               cat = 'Searching';
               title = `Searching workspace for "${(args as any).query || ''}"`;
-            } else if (name === 'read_workspace_file') {
+            } else if (['read_workspace_file', 'read_file', 'read_files'].includes(name)) {
               cat = 'Reading';
               targetPath = (args as any).path;
               title = `Reading ${targetPath || 'file'}`;
+            } else if (name === 'read_machine_file') {
+              cat = 'Reading';
+              targetPath = String(args.path ?? '');
+              title = `Reading outside workspace: ${targetPath}`;
+            } else if (name === 'list_directory' || name === 'list_machine_directory') {
+              cat = 'Reading';
+              targetPath = String(args.path ?? args.directory ?? '');
+              title = `Reading directory: ${targetPath || 'workspace root'}`;
+            } else if (name === 'read_web_page') {
+              cat = 'Searching';
+              title = `Reading internet documentation: ${String(args.url ?? '')}`;
             } else if (['write_workspace_file', 'edit_workspace_file', 'write_file', 'create_file', 'replace_range', 'delete_file', 'move_file'].includes(name)) {
               cat = 'Editing';
               targetPath = String(args.path ?? args.source_path ?? '');
               title = name === 'delete_file' ? `Preparing deletion of ${targetPath}` : name === 'move_file'
                 ? `Preparing move: ${targetPath} → ${String(args.destination_path ?? '')}` : `Preparing edit for ${targetPath || 'file'}`;
-            } else if (name === 'run_command') {
+            } else if (['run_command', 'run_test', 'run_build'].includes(name)) {
               cat = 'Running';
-              title = `Running: ${(args as any).command || ''}`;
+              title = `Running: ${formatCommandLabel(name, args)}`;
             } else if (name === 'browser_action') {
               cat = 'Browser';
               title = `Browser action: ${(args as any).action || ''}`;
@@ -537,13 +583,19 @@ export class LocalForgeEngine {
               inputSummary: formatToolInput(name, args)
             });
             onActivity?.(act);
-            onProgress?.(`${cat}: ${title}`);
+            onProgress?.(title);
             activeActivities.set(callId, act);
           },
           onToolEnd: (name, res, error, callId) => {
             const existing = callId ? activeActivities.get(callId) : undefined;
             if (existing) {
+              const commandResult = res && typeof res === 'object' ? res as Record<string, unknown> : {};
+              const settledTitle = signal.aborted ? `Cancelled: ${existing.title}` : error ? `Failed: ${existing.title}` :
+                commandResult.duplicateSuppressed ? `Reused previous result: ${existing.title}` : existing.title.startsWith('Running:')
+                  ? existing.title.replace(/^Running:/, 'Ran:') + (typeof commandResult.exitCode === 'number' ? ` · exit ${commandResult.exitCode}` : '')
+                  : existing.title.replace(/^Reading\b/, 'Read').replace(/^Preparing\b/, 'Prepared').replace(/^Searching\b/, 'Searched');
               const updated = this.turnManager.updateActivity(turn.turnId, existing.id, {
+                title: settledTitle,
                 status: signal.aborted ? 'cancelled' : error ? 'error' : 'success',
                 durationMs: Date.now() - existing.timestamp,
                 error: error || undefined,
@@ -679,6 +731,8 @@ export class LocalForgeEngine {
     };
 
     try {
+      const proposal = this.editEngine.getProposal(proposalId);
+      if (proposal) for (const file of proposal.files.filter((file) => !files || files.includes(file.path))) this.accessPolicy.assertFile(file.path);
       const editResult = await this.editEngine.applyProposal(proposalId, files, signal);
       if (!editResult.success) {
         emitAct('Editing', 'Failed to apply proposal changes', 'error', editResult.errors.map((error) => error.error).join(', '));
@@ -689,7 +743,7 @@ export class LocalForgeEngine {
       emitAct('Editing', `Applied changes to ${editResult.appliedCount} file(s)`, 'success');
 
       let validationPassed: boolean | undefined;
-      if (workspaceRoot && editResult.appliedFiles.length > 0) {
+      if (workspaceRoot && editResult.appliedFiles.length > 0 && this.accessPolicy.getState().scope !== 'file') {
         emitAct('Validating', 'Running project validation tests...', 'running');
         const attempts = await this.agentEngine.validateAndRepair(
           this.compositeProvider,
@@ -725,6 +779,7 @@ export class LocalForgeEngine {
         this.turnManager.addArtifact(turn.turnId, walkthrough);
         onArtifact?.(walkthrough);
       }
+      if (this.accessPolicy.getState().scope === 'file') emitAct('Validating', 'Automatic project commands are disabled with File access. Change scope to run tests.', 'warning');
 
       this.turnManager.completeTurn(turn.turnId, validationPassed === false ? 'failed' : 'completed', editResult.appliedFiles);
       emitAct(
@@ -745,6 +800,7 @@ export class LocalForgeEngine {
 
   public async rollbackRecordedChanges(recoveryId: string, files?: string[], onActivity?: (activity: TurnActivity) => void): Promise<EditRollbackResult> {
     if (this.isBusy()) throw new Error('Wait for the current task or cancel it before restoring changes.');
+    if (this.accessPolicy.getState().scope === 'file') throw new Error('Recorded project rollback requires Project workspace access.');
     const controller = new AbortController();
     const session = this.sessionManager.getActiveSession();
     const turn = this.turnManager.startTurn({ conversationId: session.id, modelId: session.model || '', mode: 'agent', strategy: 'fast' });
@@ -782,6 +838,7 @@ export class LocalForgeEngine {
     modelPreference?: string,
     options: OrchestratorOptions = {}
   ): Promise<OrchestrationResult> {
+    if (this.accessPolicy.getState().scope === 'file') throw new Error('Multi-agent project execution is unavailable with File access.');
     const routing = this.modelRouter.route(mode === 'agent' ? 'agent' : 'chat', modelPreference);
     const chosenModel = routing.modelId;
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;

@@ -1,6 +1,7 @@
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { PermissionManager, ToolCategory } from './permissionManager';
 import { withCancellation } from '../core/cancellation';
+import { AgentAccessPolicy } from './accessPolicy';
 
 export interface ToolExecutionContext {
   signal: AbortSignal;
@@ -26,6 +27,7 @@ export interface RegisteredTool {
   category: ToolCategory;
   riskLevel: ToolRiskLevel;
   requiresApproval: boolean;
+  permissionRequired?: boolean;
   capabilitiesRequired?: string[];
   handler: (args: Record<string, unknown>, context: ToolExecutionContext) => Promise<unknown>;
   validate?: (args: Record<string, unknown>) => void;
@@ -39,6 +41,7 @@ export interface RegisterToolOptions {
   category?: ToolCategory;
   riskLevel?: ToolRiskLevel;
   requiresApproval?: boolean;
+  permissionRequired?: boolean;
   capabilitiesRequired?: string[];
   validate?: (args: Record<string, unknown>) => void;
   redact?: (result: unknown) => unknown;
@@ -49,6 +52,15 @@ export interface RegisterToolOptions {
 
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
+  private accessPolicy?: AgentAccessPolicy;
+
+  public setAccessPolicy(policy: AgentAccessPolicy): void {
+    this.accessPolicy = policy;
+  }
+
+  public isToolAllowed(name: string): boolean {
+    return !this.accessPolicy || this.accessPolicy.allowsTool(name);
+  }
 
   public registerTool(
     definition: ModelToolDefinition,
@@ -96,6 +108,7 @@ export class ToolRegistry {
       category: cat,
       riskLevel: risk,
       requiresApproval,
+      permissionRequired: typeof categoryOrOptions === 'object' ? categoryOrOptions.permissionRequired : undefined,
       capabilitiesRequired,
       handler,
       validate,
@@ -125,7 +138,7 @@ export class ToolRegistry {
   public getDefinitions(categoryFilter?: ToolCategory): ModelToolDefinition[] {
     const list: ModelToolDefinition[] = [];
     for (const tool of this.tools.values()) {
-      if (!categoryFilter || tool.category === categoryFilter) {
+      if ((!categoryFilter || tool.category === categoryFilter) && (!this.accessPolicy || this.accessPolicy.allowsTool(tool.name))) {
         list.push(tool.definition);
       }
     }
@@ -143,6 +156,9 @@ export class ToolRegistry {
     if (!tool) {
       throw new Error(`Tool “${name}” is not allow-listed or registered.`);
     }
+
+    this.accessPolicy?.assertTool(name, args);
+    if (tool.permissionRequired && !permissionManager) throw new Error('Explicit access approval requires an interactive permission manager.');
 
     if (tool.validate) {
       tool.validate(args);
