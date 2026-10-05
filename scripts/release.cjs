@@ -50,7 +50,7 @@ async function main() {
   const lockPath = path.join(root, 'package-lock.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-  if (manifest.name !== 'localforge-vscode' || manifest.publisher !== 'paladuguganeshnaidu' || lock.version !== manifest.version || lock.packages?.['']?.version !== manifest.version) throw new Error('Extension identity and lock versions must match before release.');
+  if (manifest.name !== 'tuxnest-vscode' || manifest.publisher !== 'tuxnest' || lock.version !== manifest.version || lock.packages?.['']?.version !== manifest.version) throw new Error('Extension identity and lock versions must match before release.');
   const output = planPackage(root, input.output || `${manifest.name}-${input.version}.vsix`);
   const npm = path.join(path.dirname(process.env.npm_execpath || ''), 'npm-cli.js');
   if (!fs.existsSync(npm)) throw new Error('Run this helper through npm run release.');

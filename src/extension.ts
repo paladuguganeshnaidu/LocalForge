@@ -62,8 +62,8 @@ export interface LocalForgeExtensionApi {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<LocalForgeExtensionApi> {
-  const ollamaUrl = vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434');
-  const openAiUrls = vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '');
+  const ollamaUrl = vscode.workspace.getConfiguration('tuxnest.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434');
+  const openAiUrls = vscode.workspace.getConfiguration('tuxnest.providers').get<string>('openAICompatibleUrls', '');
 
   const engine = new LocalForgeEngine(context, {
     ollamaEndpoint: ollamaUrl,
@@ -78,29 +78,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
     await viewProvider.refresh();
   });
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
-    if (!event.affectsConfiguration('localforge.ollama.baseUrl') && !event.affectsConfiguration('localforge.providers.openAICompatibleUrls')) return;
+    if (!event.affectsConfiguration('tuxnest.ollama.baseUrl') && !event.affectsConfiguration('tuxnest.providers.openAICompatibleUrls')) return;
     void engine.updateProviderConfiguration({
-      ollamaEndpoint: vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'),
-      openAiEndpoints: vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '')
+      ollamaEndpoint: vscode.workspace.getConfiguration('tuxnest.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'),
+      openAiEndpoints: vscode.workspace.getConfiguration('tuxnest.providers').get<string>('openAICompatibleUrls', '')
     }).then(() => viewProvider.refresh()).catch((error) => vscode.window.showErrorMessage(`Could not update providers: ${error instanceof Error ? error.message : 'Unknown provider error'}`));
   }));
 
   const completionProvider = new LocalForgeCompletionProvider(
     engine.compositeProvider,
-    () => vscode.workspace.getConfiguration('localforge.autocomplete').get<boolean>('enabled', false),
+    () => vscode.workspace.getConfiguration('tuxnest.autocomplete').get<boolean>('enabled', false),
     () => viewProvider.modelForTask('completion')
   );
 
   context.subscriptions.push(
     modelCenterProvider,
-    vscode.window.registerWebviewViewProvider('localforge.chatView', viewProvider, {
+    vscode.window.registerWebviewViewProvider('tuxnest.chatView', viewProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode.window.registerWebviewViewProvider('localforge.modelsView', modelCenterProvider, {
+    vscode.window.registerWebviewViewProvider('tuxnest.modelsView', modelCenterProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.workspace.registerTextDocumentContentProvider(
-      'localforge-proposed',
+      'tuxnest-proposed',
       engine.editEngine.createContentProvider()
     ),
     vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, completionProvider),
@@ -110,48 +110,48 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       }
     }),
 
-    vscode.commands.registerCommand('localforge.refreshModels', async () => {
+    vscode.commands.registerCommand('tuxnest.refreshModels', async () => {
       try {
         await engine.bootstrap();
         await viewProvider.refresh();
-        void vscode.window.showInformationMessage('LOMVREN model registry refreshed.');
+        void vscode.window.showInformationMessage('TuxNest model registry refreshed.');
       } catch (err: any) {
         void vscode.window.showErrorMessage(`Model refresh failed: ${err.message || String(err)}`);
       }
     }),
 
-    vscode.commands.registerCommand('localforge.explain', async () => {
+    vscode.commands.registerCommand('tuxnest.explain', async () => {
       await explainSelection(viewProvider);
     }),
 
-    vscode.commands.registerCommand('localforge.fix', async () => {
+    vscode.commands.registerCommand('tuxnest.fix', async () => {
       await fixSelection(engine, viewProvider);
     }),
 
-    vscode.commands.registerCommand('localforge.editSelection', async () => {
+    vscode.commands.registerCommand('tuxnest.editSelection', async () => {
       await proposeEdit(engine, viewProvider);
     }),
 
-    vscode.commands.registerCommand('localforge.searchWorkspace', async () => {
+    vscode.commands.registerCommand('tuxnest.searchWorkspace', async () => {
       await searchWorkspace();
     }),
 
-    vscode.commands.registerCommand('localforge.configureRemote', async () => {
+    vscode.commands.registerCommand('tuxnest.configureRemote', async () => {
       await configureRemoteProfile(context);
     }),
 
-    vscode.commands.registerCommand('localforge.connectRemote', async () => {
+    vscode.commands.registerCommand('tuxnest.connectRemote', async () => {
       await connectRemote(context, engine, viewProvider);
     }),
 
-    vscode.commands.registerCommand('localforge.disconnectRemote', async () => {
+    vscode.commands.registerCommand('tuxnest.disconnectRemote', async () => {
       await engine.remoteManager.disconnect();
       viewProvider.setRemoteSession(undefined);
       await viewProvider.refresh();
       void vscode.window.showInformationMessage('Disconnected from remote GPU host.');
     }),
 
-    vscode.commands.registerCommand('localforge.remoteGpuStatus', async () => {
+    vscode.commands.registerCommand('tuxnest.remoteGpuStatus', async () => {
       const session = engine.remoteManager.getActiveSession();
       if (!session) {
         void vscode.window.showInformationMessage('No active remote GPU connection. Use "Connect to Remote GPU Host" first.');
@@ -170,7 +170,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       }
     }),
 
-    vscode.commands.registerCommand('localforge.diagnose', async () => {
+    vscode.commands.registerCommand('tuxnest.diagnose', async () => {
       const report = await engine.diagnosticsService.runDiagnostics();
       const markdown = engine.diagnosticsService.formatReportMarkdown(report);
       const doc = await vscode.workspace.openTextDocument({
@@ -180,7 +180,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       await vscode.window.showTextDocument(doc, { preview: true });
     }),
 
-    vscode.commands.registerCommand('localforge.doctor', async () => {
+    vscode.commands.registerCommand('tuxnest.doctor', async () => {
       const report = await engine.diagnosticsService.runDiagnostics();
       const markdown = engine.diagnosticsService.formatReportMarkdown(report);
       const doc = await vscode.workspace.openTextDocument({
@@ -190,9 +190,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       await vscode.window.showTextDocument(doc, { preview: true });
     }),
 
-    vscode.commands.registerCommand('localforge.selfTest', async () => {
+    vscode.commands.registerCommand('tuxnest.selfTest', async () => {
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Running LOMVREN Autonomous Agent Self-Test...' },
+        { location: vscode.ProgressLocation.Notification, title: 'Running TuxNest SI Agent Self-Test...' },
         async () => {
           const report = await engine.selfTest.runSelfTest();
           const markdown = engine.selfTest.formatReportMarkdown(report);
@@ -205,40 +205,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       );
     }),
 
-    vscode.commands.registerCommand('localforge.continueTask', async () => {
+    vscode.commands.registerCommand('tuxnest.continueTask', async () => {
       const lastTask = engine.taskManager.getLastTask();
       if (!lastTask) {
         void vscode.window.showInformationMessage('No previous task found in this workspace.');
         return;
       }
-      await vscode.commands.executeCommand('localforge.chatView.focus');
+      await vscode.commands.executeCommand('tuxnest.chatView.focus');
       const msg = `Continuing previous task:\n"${lastTask.task}"\nStatus was: ${lastTask.status}.\nPlease continue and finalize the work.`;
       await viewProvider.sendUserPrompt(msg, { mode: lastTask.mode });
     }),
 
-    vscode.commands.registerCommand('localforge.newSession', async () => {
+    vscode.commands.registerCommand('tuxnest.newSession', async () => {
       await viewProvider.startNewSession();
       await viewProvider.refresh();
-      void vscode.window.showInformationMessage('Started new LOMVREN session.');
+      void vscode.window.showInformationMessage('Started new TuxNest session.');
     }),
 
-    vscode.commands.registerCommand('localforge.newConversation', async () => {
+    vscode.commands.registerCommand('tuxnest.newConversation', async () => {
       await viewProvider.startNewSession();
       await viewProvider.refresh();
-      void vscode.window.showInformationMessage('Started new LOMVREN conversation.');
+      void vscode.window.showInformationMessage('Started new TuxNest conversation.');
     }),
 
-    vscode.commands.registerCommand('localforge.openAgent', async () => {
-      await vscode.commands.executeCommand('localforge.chatView.focus');
+    vscode.commands.registerCommand('tuxnest.openAgent', async () => {
+      await vscode.commands.executeCommand('tuxnest.chatView.focus');
     }),
 
-    vscode.commands.registerCommand('localforge.cancelAgent', () => {
+    vscode.commands.registerCommand('tuxnest.cancelAgent', () => {
       engine.cancelCurrentTask();
       viewProvider.cancelActiveChat();
-      void vscode.window.showInformationMessage('LOMVREN agent task cancelled.');
+      void vscode.window.showInformationMessage('TuxNest SI Agent task cancelled.');
     }),
 
-    vscode.commands.registerCommand('localforge.reviewChanges', async () => {
+    vscode.commands.registerCommand('tuxnest.reviewChanges', async () => {
       const proposals = engine.editEngine.getPendingProposals();
       if (!proposals.length) {
         void vscode.window.showInformationMessage('No pending changes to review.');
@@ -250,7 +250,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       }
     }),
 
-    vscode.commands.registerCommand('localforge.undoChanges', async (recoveryId?: string) => {
+    vscode.commands.registerCommand('tuxnest.undoChanges', async (recoveryId?: string) => {
       let selectedId = typeof recoveryId === 'string' ? recoveryId : undefined;
       if (!selectedId) {
         const records = engine.editEngine.getRecoveryHistory().filter((record) => record.remainingFiles.length > 0);
@@ -267,7 +267,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       if (selectedId) await viewProvider.rollbackRecordedChanges(selectedId);
     }),
 
-    vscode.commands.registerCommand('localforge.showArtifacts', async () => {
+    vscode.commands.registerCommand('tuxnest.showArtifacts', async () => {
       const session = engine.sessionManager.getActiveSession();
       const artifacts = engine.artifactManager.getArtifactsByConversation(session.id);
       if (!artifacts.length) {
@@ -286,21 +286,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       }
     }),
 
-    vscode.commands.registerCommand('localforge.setAgentMode', async (targetMode?: string) => {
+    vscode.commands.registerCommand('tuxnest.setAgentMode', async (targetMode?: string) => {
       let mode = targetMode;
       if (!mode) {
         const pick = await vscode.window.showQuickPick(['Ask', 'Plan', 'Agent'], {
-          placeHolder: 'Select LOMVREN agent mode'
+          placeHolder: 'Select TuxNest mode'
         });
         if (pick) mode = pick.toLowerCase();
       }
       if (mode) {
         viewProvider.activeMode = mode.toLowerCase() as any;
-        void vscode.window.showInformationMessage(`LOMVREN agent mode set to: ${mode}`);
+        void vscode.window.showInformationMessage(`TuxNest mode set to: ${mode}`);
       }
     }),
 
-    vscode.commands.registerCommand('localforge.setModel', async (targetModel?: string) => {
+    vscode.commands.registerCommand('tuxnest.setModel', async (targetModel?: string) => {
       let modelId = targetModel;
       if (!modelId) {
         const models = engine.modelRegistry.getModels();
@@ -321,14 +321,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
       }
     }),
 
-    vscode.commands.registerCommand('localforge.reindexWorkspace', async () => {
+    vscode.commands.registerCommand('tuxnest.reindexWorkspace', async () => {
       if (engine.accessPolicy.getState().scope === 'file') throw new Error('Workspace reindex is unavailable with File access.');
       if (engine.indexer) {
         await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: 'Re-indexing workspace context...', cancellable: true },
           async (_progress, token) => {
             const count = await engine.indexer!.indexWorkspace(token);
-            void vscode.window.showInformationMessage(`Indexed ${count} workspace files for LOMVREN.`);
+            void vscode.window.showInformationMessage(`Indexed ${count} workspace files for TuxNest.`);
           }
         );
       }
@@ -354,7 +354,7 @@ export async function deactivate(): Promise<void> {
 async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('Open a file and select code for LOMVREN to explain.');
+    void vscode.window.showInformationMessage('Open a file and select code for TuxNest to explain.');
     return;
   }
   const targetRange = editor.selection.isEmpty
@@ -365,7 +365,7 @@ async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<v
     void vscode.window.showInformationMessage('Select non-empty code to explain.');
     return;
   }
-  await vscode.commands.executeCommand('localforge.chatView.focus');
+  await vscode.commands.executeCommand('tuxnest.chatView.focus');
   const relPath = vscode.workspace.asRelativePath(editor.document.uri);
   const prompt = formatExplainPrompt(original, editor.document.languageId, relPath);
   await viewProvider.sendUserPrompt(prompt, { includeContext: false, mode: 'ask' });
@@ -374,11 +374,11 @@ async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<v
 async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('Open a file before asking LOMVREN to fix code.');
+    void vscode.window.showInformationMessage('Open a file before asking TuxNest to fix code.');
     return;
   }
   if (!vscode.workspace.isTrusted) {
-    void vscode.window.showWarningMessage('LOMVREN code fixes require a trusted workspace.');
+    void vscode.window.showWarningMessage('TuxNest code fixes require a trusted workspace.');
     return;
   }
 
@@ -388,7 +388,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
     : editor.selection;
   const original = editor.document.getText(targetRange);
   if (!original.trim()) {
-    void vscode.window.showInformationMessage('Select code or place the cursor on code you want LOMVREN to fix.');
+    void vscode.window.showInformationMessage('Select code or place the cursor on code you want TuxNest to fix.');
     return;
   }
 
@@ -403,7 +403,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
     : 'Fix bug or issue in selected code';
 
   const instruction = await vscode.window.showInputBox({
-    title: 'LOMVREN: Fix code',
+    title: 'TuxNest: Fix code',
     prompt: diagnosticMessages.length
       ? `Found ${diagnosticMessages.length} issue(s) at selection. Describe the fix or press Enter to address diagnostics.`
       : 'Describe what to fix in the selected code.',
@@ -430,7 +430,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
   let replacement = '';
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'LOMVREN is generating a fix', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'TuxNest is generating a fix', cancellable: true },
       async (progress, token) => {
         const cancellation = token.onCancellationRequested(() => controller.abort());
         try {
@@ -458,7 +458,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
 
   const originalDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: original });
   const proposedDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: replacement });
-  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'LOMVREN: Review proposed fix');
+  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'TuxNest: Review proposed fix');
   const choice = await vscode.window.showInformationMessage('Review the diff. Apply this fix to the original file?', 'Apply', 'Discard');
   if (choice !== 'Apply') return;
 
@@ -473,11 +473,11 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
 async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('Open a file before asking LOMVREN to edit code.');
+    void vscode.window.showInformationMessage('Open a file before asking TuxNest to edit code.');
     return;
   }
   if (!vscode.workspace.isTrusted) {
-    void vscode.window.showWarningMessage('LOMVREN edits require a trusted workspace.');
+    void vscode.window.showWarningMessage('TuxNest edits require a trusted workspace.');
     return;
   }
 
@@ -498,7 +498,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
   }
 
   const instruction = await vscode.window.showInputBox({
-    title: 'LOMVREN: Edit code',
+    title: 'TuxNest: Edit code',
     prompt: 'Describe the change. The selected code, or the whole file if nothing is selected, is sent to the selected model.',
     placeHolder: 'e.g. Add input validation and preserve the current API',
     ignoreFocusOut: true
@@ -514,7 +514,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
   let replacement = '';
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'LOMVREN is preparing an edit', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'TuxNest is preparing an edit', cancellable: true },
       async (progress, token) => {
         const cancellation = token.onCancellationRequested(() => controller.abort());
         try {
@@ -542,7 +542,7 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
 
   const originalDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: original });
   const proposedDoc = await vscode.workspace.openTextDocument({ language: editor.document.languageId, content: replacement });
-  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'LOMVREN: Review proposed edit');
+  await vscode.commands.executeCommand('vscode.diff', originalDoc.uri, proposedDoc.uri, 'TuxNest: Review proposed edit');
   const choice = await vscode.window.showInformationMessage('Review the diff. Apply this edit to the original file?', 'Apply', 'Discard');
   if (choice !== 'Apply') return;
 
@@ -566,7 +566,7 @@ async function applyRecordedSelection(
     if (engine.isBusy()) throw new Error('Wait for the running task before applying a selection edit.');
     const result = await applyReviewedSelection(engine.editEngine, document, range, replacement, signal);
     if (!result.success) throw new Error(result.errors.map((error) => error.error).join('\n'));
-    void vscode.window.showInformationMessage('LOMVREN saved the reviewed edit. Recorded Undo is available in Changes or the command palette.');
+    void vscode.window.showInformationMessage('TuxNest saved the reviewed edit. Recorded Undo is available in Changes or the command palette.');
   } catch (error) {
     void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
   } finally {
@@ -579,7 +579,7 @@ async function searchWorkspace(): Promise<void> {
     void vscode.window.showWarningMessage('Workspace search requires a trusted workspace.');
     return;
   }
-  const query = await vscode.window.showInputBox({ title: 'LOMVREN: Search workspace', prompt: 'Find files and code related to a question or symbol' });
+  const query = await vscode.window.showInputBox({ title: 'TuxNest: Search workspace', prompt: 'Find files and code related to a question or symbol' });
   if (!query?.trim()) return;
   try {
     const snippets = await findRelevantSnippets(query, { maxFiles: 12, maxChars: 20000 });
@@ -593,7 +593,7 @@ async function searchWorkspace(): Promise<void> {
         description: snippet.text.replace(/\s+/g, ' ').slice(0, 140),
         snippet
       })),
-      { title: 'LocalForge workspace matches' }
+      { title: 'TuxNest workspace matches' }
     );
     if (!selected) return;
     const document = await vscode.workspace.openTextDocument(selected.snippet.uri);
@@ -652,7 +652,7 @@ async function configureRemoteProfile(context: vscode.ExtensionContext): Promise
     privateKeyPath
   };
   await context.globalState.update(REMOTE_PROFILES_KEY, [...profiles.filter((item) => item.id !== profile.id), profile]);
-  await context.secrets.store(`localforge.remote.${profile.id}.credential`, JSON.stringify({ secret }));
+  await context.secrets.store(`tuxnest.remote.${profile.id}.credential`, JSON.stringify({ secret }));
   void vscode.window.showInformationMessage(`Saved remote profile “${profile.name}”. Secrets are stored in VS Code SecretStorage.`);
 }
 

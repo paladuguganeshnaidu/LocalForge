@@ -139,12 +139,12 @@ test('discovery errors are visible, preserve the old snapshot and recover only a
 });
 
 test('limits are explicit, validated, bounded and config changes rebuild without stale entries', async (context) => {
-  const index = fixture(context); index.startWatching(); settings.set('localforge.context.maxIndexedFiles', 1);
+  const index = fixture(context); index.startWatching(); settings.set('tuxnest.context.maxIndexedFiles', 1);
   write('first.txt', 'FIRST_TOKEN'); write('second.txt', 'SECOND_TOKEN'); await index.indexWorkspace();
   assert.equal(index.getStats().fileCount, 1); assert.equal(index.getStats().limitReached, true);
-  settings.set('localforge.context.maxIndexedFiles', 2); configurationEvent.fire({ affectsConfiguration: (section) => section === 'localforge.context' }); await index.whenIdle();
+  settings.set('tuxnest.context.maxIndexedFiles', 2); configurationEvent.fire({ affectsConfiguration: (section) => section === 'tuxnest.context' }); await index.whenIdle();
   assert.equal(index.getStats().fileCount, 2); assert.equal(index.getStats().limitReached, false);
-  settings.set('localforge.context.maxIndexedFiles', NaN); assert.equal(readWorkspaceIndexLimits().maxFiles, 2000);
+  settings.set('tuxnest.context.maxIndexedFiles', NaN); assert.equal(readWorkspaceIndexLimits().maxFiles, 2000);
   for (const [key, value] of [['context.maxIndexedFiles', 0], ['context.maxFileBytes', 10], ['context.maxIndexCharacters', Infinity]]) assert.equal(isWebviewMessage({ type: 'updateSettings', settings: { [key]: value } }), false);
   assert.equal(isWebviewMessage({ type: 'reindexWorkspace' }), true);
 });

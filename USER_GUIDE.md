@@ -1,19 +1,19 @@
-# LOMVREN local coding agent — 1.0.0 release-candidate guide
+# TuxNest — 1.0.0 User Guide
 
-The Marketplace identity remains `paladuguganeshnaidu.localforge-vscode`. Version 1.0.0 is locally packaged at the user's request; its version number does not certify production readiness. Publication is held for confirmation. Do not infer build, browser or test success from generated files or model prose.
+The extension identity is `tuxnest.tuxnest-vscode` (publisher: `tuxnest`). Version 1.0.0 delivers the complete rebrand to **TuxNest**, introducing **TuxNest Chat** and the autonomous **TuxNest SI Agent**.
 
 ## Install and open
 
 1. Use VS Code 1.106 or later. Open a disposable, trusted project folder for your first agent task.
-2. Run **Extensions: Install from VSIX** and select the newly validated development artifact. Reload the window. **LOMVREN: Diagnose Installation** reports the actual active version and extension path.
-3. Run **LOMVREN: Open Agent**. Model and mode selectors are in the bottom composer. Use the file picker to attach exact files; advanced controls are in Settings.
-4. **LOMVREN: Doctor**, **Run Self-Test** and **Refresh Models** help diagnose connectivity. A packaged version does not prove that a particular model can complete your task.
+2. Run **Extensions: Install from VSIX** and select the validated `tuxnest-vscode-1.0.0.vsix` package artifact. Reload the window. **TuxNest: Diagnose Installation** reports the actual active version and extension path.
+3. Run **TuxNest: Open TuxNest SI Agent** or open **TuxNest Chat** in the Secondary Sidebar. Model and mode selectors are in the bottom composer. Use the file picker to attach exact files; advanced controls are in Settings.
+4. **TuxNest: Doctor**, **Run Self-Test** and **Refresh Models** help diagnose connectivity. A packaged version does not prove that a particular model can complete your task.
 
 ## Local, GPU and API models
 
 - Local: install and run Ollama yourself, then open Models and refresh. Installed models are discovered through Ollama, not invented by the extension. Select an installed model explicitly.
 - Downloads: choose an actual discovered download target in Models before installing a supported Ollama model. A remote target downloads on that remote Ollama host, not on this laptop. Review the model's license, disk size and RAM/VRAM requirements first. Downloads can take time or fail; check the actual target and status.
-- SSH GPU: use **Configure Remote GPU Host**, configure your own host/user/key or password and remote Ollama port, then **Connect to Remote GPU Host**. Verify the host fingerprint independently before trusting it. Ollama must be running on the remote host. The extension tunnels its API and discovers that host's installed models; local file changes and commands still run on your laptop/workspace, not automatically on the GPU server.
+- SSH GPU: use **TuxNest: Configure Remote GPU Host**, configure your own host/user/key or password and remote Ollama port, then **TuxNest: Connect to Remote GPU Host**. Verify the host fingerprint independently before trusting it. Ollama must be running on the remote host. The extension tunnels its API and discovers that host's installed models; local file changes and commands still run on your laptop/workspace, not automatically on the GPU server.
 - If the studio or SSH connection closes, the remote models are removed and the chat reports disconnection. The selected model is not silently replaced. Restart the studio/Ollama if needed, reconnect and retry explicitly. Partial generated text is not completion, and prior saved edits are not automatically rolled back or re-executed.
 - Connected local GPU: Ollama controls acceleration on its own machine. The extension does not install GPU drivers or guarantee all layers fit in VRAM.
 - API: Settings accepts explicit OpenAI-compatible API base URLs. Select that endpoint's discovered model. Context is sent to the selected endpoint; there is no publisher-hosted inference service.
@@ -34,7 +34,7 @@ At the default 8192 context, High/Ultra do not silently allocate a larger KV cac
 
 ## Edits and real verification
 
-With diff review, accept/reject proposals through Changes; files are not considered saved merely because a proposal exists. Stale snapshots or save errors must be resolved before continuing. **Undo Recorded Changes** uses available recorded recovery, not arbitrary Git history.
+With diff review, accept/reject proposals through Changes; files are not considered saved merely because a proposal exists. Stale snapshots or save errors must be resolved before continuing. **TuxNest: Undo Recorded Changes** uses available recorded recovery, not arbitrary Git history.
 
 Activity rows show actual reads/writes, the command while running, exit status and output after settlement. Expand details for errors. A process marked started still needs a readiness check. Website verification uses an isolated installed Chrome/Edge and loopback URLs; external assets, service workers, downloads and WebSockets are blocked there. A production preview with local assets is more reliable than HMR.
 
@@ -49,13 +49,13 @@ In Agent mode, request discovery of `delegate_task` for a **planner**, **reposit
 ## First tasks
 
 1. Ask: “Read README.md and package.json. Summarize the actual project and commands; distinguish inspected facts from assumptions.”
-2. Agent: “Create agent-edit-test.md with exactly two lines: # Agent Edit Test and LOMVREN created this file. If it exists, stop. Do not change other files. Propose the change for approval.” Accept, then request a saved-file read.
+2. Agent: “Create agent-edit-test.md with exactly two lines: # Agent Edit Test and TuxNest SI Agent created this file. If it exists, stop. Do not change other files. Propose the change for approval.” Accept, then request a saved-file read.
 3. In an empty disposable folder: “Create a tiny original responsive index.html with a main landmark, a button and visible status. Start an owned localhost server. Verify render, button click, mobile and desktop widths. Report failures honestly.”
 4. Increase scope only after real saved-file, command, browser and cleanup checks pass with your selected model.
 
 ## Recovery and release limits
 
-For source builds: `npm ci`, `npm test`, then `npm run package`. Packaging refuses to overwrite an existing artifact. For a development revision of the same version, use `npm run package -- localforge-vscode-0.3.0-<unique-label>.vsix`. The preserved 0.3.0 checkpoint is not silently replaced; a fresh CI checkout can package normally. Verify/install the exact artifact you tested, not whichever VSIX filename looks newest.
+For source builds: `npm ci`, `npm test`, then `npm run package`. Packaging refuses to overwrite an existing artifact. For a development revision of the same version, use `npm run package -- tuxnest-vscode-1.0.0-<unique-label>.vsix`. The preserved 1.0.0 checkpoint is not silently replaced; a fresh CI checkout can package normally. Verify/install the exact artifact you tested, not whichever VSIX filename looks newest.
 
 If an action hangs, use Stop and wait for cancellation acknowledgement; do not start overlapping tasks. Inspect the failed row, saved file and real command output. Refresh disconnected models or reconnect the verified SSH host. A weak model can repeatedly produce invalid code or tools; retry with a more capable model rather than hiding the errors.
 

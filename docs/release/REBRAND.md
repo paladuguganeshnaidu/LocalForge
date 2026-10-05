@@ -49,3 +49,26 @@ To protect existing users, preserve Marketplace review ratings, and avoid breaki
 4. **Historical Continuity:**
    - Historical release notes (`RELEASE_NOTES_0.1.7.md` through `RELEASE_NOTES_0.2.3.md`) are preserved for auditability and historical tracking.
    - Public documentation prominently notes: *"LOMVREN was previously published as LocalForge."*
+
+---
+
+# Brand Evolution: TuxNest v1.0.0
+
+**Effective Release:** v1.0.0  
+**Date:** October 5, 2026  
+
+With the landmark **v1.0.0** release, the project has transitioned to its definitive identity: **TuxNest**, introducing **TuxNest Chat** and the autonomous **TuxNest SI Agent**.
+
+| Domain | Prior State | TuxNest v1.0.0 State |
+| :--- | :--- | :--- |
+| **Product Brand** | LOMVREN / LocalForge | **TuxNest** |
+| **Marketplace Display Name** | `LOMVREN` | **`TuxNest`** |
+| **Technical Extension Name** | `localforge-vscode` | **`tuxnest-vscode`** |
+| **Publisher** | `paladuguganeshnaidu` | **`tuxnest`** |
+| **View Container & Chat** | `localforge.chatView` | **`tuxnest.chatView` ("TuxNest Chat")** |
+| **Autonomous Loop** | `LOMVREN Agent` | **`TuxNest SI Agent`** |
+| **Commands Prefix** | `localforge.*` | **`tuxnest.*`** |
+| **Settings Prefix** | `localforge.*` | **`tuxnest.*`** |
+| **Proposed Scheme** | `localforge-proposed:` | **`tuxnest-proposed:`** |
+| **Brand Icon** | `media/lomvren-icon.png` | **`media/tuxnest-icon.png`** |
+

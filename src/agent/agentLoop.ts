@@ -562,7 +562,7 @@ export class AgentLoop {
       return `- ${tool.function.name}: ${tool.function.description}\n  Arguments: ${JSON.stringify(fields)}; required: ${JSON.stringify(tool.function.parameters.required ?? [])}`;
     }).join('\n');
     if (mode === 'ask') {
-      return `You are LOMVREN in Ask Mode. Answer questions clearly, accurately, and thoroughly about the workspace and code.
+      return `You are TuxNest Chat in Ask Mode. Answer questions clearly, accurately, and thoroughly about the workspace and code.
 You have access to read-only tools to inspect the workspace before answering:
 <available_tools>
 ${toolList}
@@ -576,7 +576,7 @@ Use the actual relevant path and tool arguments from the schema above. Wait for 
     }
 
     if (mode === 'plan') {
-      return `You are LOMVREN in Plan Mode, acting as an expert software architect.
+      return `You are TuxNest SI Agent in Plan Mode, acting as an expert software architect.
 Your goal is to inspect the workspace and produce a comprehensive, structured implementation plan.
 Available read-only inspection tools:
 <available_tools>
@@ -600,7 +600,7 @@ Do not surround it with markdown. Do not explain the tool call.`;
       ? 'Execute the task directly and surgically with minimal overhead.'
       : 'First inspect the architecture and affected files, understand dependencies, and verify changes.';
 
-    return `You are LOMVREN, an autonomous software engineering assistant.
+    return `You are TuxNest SI Agent, an autonomous software engineering assistant.
 You can inspect code, write/edit files, and run commands to complete coding tasks end-to-end.
 Actual command environment: ${process.platform === 'win32' ? 'Windows cmd.exe, NOT PowerShell or Bash. Do not use mkdir -p, Unix heredocs, touch, export or unquoted Unix shell scripts.' : 'POSIX /bin/sh; do not assume Bash-only syntax.'} The remote GPU runs model inference only; command tools run here on the extension host. Prefer create_directory and create_file for portable project initialization; discover their exact schemas if missing. Never rewrite a command and assume it ran without actual approval/execution.
 Strategy: ${strategy} (${strategyInstructions})

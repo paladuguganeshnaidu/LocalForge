@@ -1,7 +1,7 @@
 /**
  * scripts/verify-marketplace-package.cjs
  *
- * Automated Quality Gate & Marketplace Packaging Assertion Script for LOMVREN.
+ * Automated Quality Gate & Marketplace Packaging Assertion Script for TuxNest.
  * Enforces identity preservation, version alignment, and manifest consistency.
  */
 
@@ -12,10 +12,10 @@ const assert = require('assert');
 const { createHash } = require('node:crypto');
 
 const EXPECTED_IDENTITY = {
-  name: 'localforge-vscode',
-  publisher: 'paladuguganeshnaidu',
-  displayName: 'LOMVREN',
-  icon: 'media/lomvren-icon.png'
+  name: 'tuxnest-vscode',
+  publisher: 'tuxnest',
+  displayName: 'TuxNest',
+  icon: 'media/tuxnest-icon.png'
 };
 
 function verifyCurrentBuildPayload(pkgJson, vsixPkg, filesListing, rootDir, readEntry) {
@@ -33,7 +33,7 @@ function verifyCurrentBuildPayload(pkgJson, vsixPkg, filesListing, rootDir, read
 
 function main() {
   console.log('=====================================================');
-  console.log('  LOMVREN VS Code Marketplace Release Verification');
+  console.log('  TuxNest VS Code Marketplace Release Verification');
   console.log('=====================================================\n');
 
   const rootDir = path.resolve(__dirname, '..');

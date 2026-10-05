@@ -1,10 +1,10 @@
 {
-  "name": "localforge-vscode",
-  "displayName": "LOMVREN",
-  "description": "Use local Ollama and SSH-tunneled Ollama models for AI-assisted coding in VS Code.",
+  "name": "tuxnest-vscode",
+  "displayName": "TuxNest",
+  "description": "TuxNest Chat & TuxNest SI Agent: Use local Ollama and SSH-tunneled Ollama models for AI-assisted coding in VS Code.",
   "version": "1.0.0",
-  "publisher": "paladuguganeshnaidu",
-  "icon": "media/lomvren-icon.png",
+  "publisher": "tuxnest",
+  "icon": "media/tuxnest-icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/paladuguganeshnaidu/LocalForge.git"
@@ -26,28 +26,30 @@
     "local ai",
     "coding agent",
     "remote gpu",
-    "ssh"
+    "ssh",
+    "tuxnest",
+    "si agent"
   ],
   "activationEvents": [
-    "onView:localforge.chatView",
-    "onView:localforge.modelsView",
-    "onCommand:localforge.openAgent",
-    "onCommand:localforge.newConversation",
-    "onCommand:localforge.continueTask",
-    "onCommand:localforge.reviewChanges",
-    "onCommand:localforge.undoChanges",
-    "onCommand:localforge.showArtifacts",
-    "onCommand:localforge.diagnose",
-    "onCommand:localforge.doctor",
-    "onCommand:localforge.selfTest",
-    "onCommand:localforge.refreshModels",
-    "onCommand:localforge.connectRemote",
-    "onCommand:localforge.disconnectRemote",
-    "onCommand:localforge.remoteGpuStatus",
-    "onCommand:localforge.reindexWorkspace",
-    "onCommand:localforge.cancelAgent",
-    "onCommand:localforge.setAgentMode",
-    "onCommand:localforge.setModel",
+    "onView:tuxnest.chatView",
+    "onView:tuxnest.modelsView",
+    "onCommand:tuxnest.openAgent",
+    "onCommand:tuxnest.newConversation",
+    "onCommand:tuxnest.continueTask",
+    "onCommand:tuxnest.reviewChanges",
+    "onCommand:tuxnest.undoChanges",
+    "onCommand:tuxnest.showArtifacts",
+    "onCommand:tuxnest.diagnose",
+    "onCommand:tuxnest.doctor",
+    "onCommand:tuxnest.selfTest",
+    "onCommand:tuxnest.refreshModels",
+    "onCommand:tuxnest.connectRemote",
+    "onCommand:tuxnest.disconnectRemote",
+    "onCommand:tuxnest.remoteGpuStatus",
+    "onCommand:tuxnest.reindexWorkspace",
+    "onCommand:tuxnest.cancelAgent",
+    "onCommand:tuxnest.setAgentMode",
+    "onCommand:tuxnest.setModel",
     "onStartupFinished"
   ],
   "main": "./dist/extension.bundle.js",
@@ -55,145 +57,145 @@
     "viewsContainers": {
       "secondarySidebar": [
         {
-          "id": "localforge-secondary",
-          "title": "lomvren",
-          "icon": "media/localforge.svg"
+          "id": "tuxnest-secondary",
+          "title": "TuxNest",
+          "icon": "media/tuxnest.svg"
         }
       ]
     },
     "views": {
-      "localforge-secondary": [
+      "tuxnest-secondary": [
         {
           "type": "webview",
-          "id": "localforge.chatView",
-          "name": "LOMVREN Agent"
+          "id": "tuxnest.chatView",
+          "name": "TuxNest Chat"
         },
         {
           "type": "webview",
-          "id": "localforge.modelsView",
+          "id": "tuxnest.modelsView",
           "name": "Models"
         }
       ]
     },
     "commands": [
       {
-        "command": "localforge.openAgent",
-        "title": "LOMVREN: Open Agent"
+        "command": "tuxnest.openAgent",
+        "title": "TuxNest: Open TuxNest SI Agent"
       },
       {
-        "command": "localforge.newConversation",
-        "title": "LOMVREN: New Conversation"
+        "command": "tuxnest.newConversation",
+        "title": "TuxNest: New Conversation"
       },
       {
-        "command": "localforge.continueTask",
-        "title": "LOMVREN: Continue Previous Task"
+        "command": "tuxnest.continueTask",
+        "title": "TuxNest: Continue Previous Task"
       },
       {
-        "command": "localforge.reviewChanges",
-        "title": "LOMVREN: Review Changes"
+        "command": "tuxnest.reviewChanges",
+        "title": "TuxNest: Review Changes"
       },
       {
-        "command": "localforge.showArtifacts",
-        "title": "LOMVREN: Show Artifacts"
+        "command": "tuxnest.showArtifacts",
+        "title": "TuxNest: Show Artifacts"
       },
       {
-        "command": "localforge.diagnose",
-        "title": "LOMVREN: Diagnose Installation"
+        "command": "tuxnest.diagnose",
+        "title": "TuxNest: Diagnose Installation"
       },
       {
-        "command": "localforge.doctor",
-        "title": "LOMVREN: Doctor"
+        "command": "tuxnest.doctor",
+        "title": "TuxNest: Doctor"
       },
       {
-        "command": "localforge.selfTest",
-        "title": "LOMVREN: Run Self-Test"
+        "command": "tuxnest.selfTest",
+        "title": "TuxNest: Run Self-Test"
       },
       {
-        "command": "localforge.refreshModels",
-        "title": "LOMVREN: Refresh Models"
+        "command": "tuxnest.refreshModels",
+        "title": "TuxNest: Refresh Models"
       },
       {
-        "command": "localforge.connectRemote",
-        "title": "LOMVREN: Connect to Remote GPU Host"
+        "command": "tuxnest.connectRemote",
+        "title": "TuxNest: Connect to Remote GPU Host"
       },
       {
-        "command": "localforge.disconnectRemote",
-        "title": "LOMVREN: Disconnect Remote GPU Host"
+        "command": "tuxnest.disconnectRemote",
+        "title": "TuxNest: Disconnect Remote GPU Host"
       },
       {
-        "command": "localforge.remoteGpuStatus",
-        "title": "LOMVREN: Show Remote GPU Status"
+        "command": "tuxnest.remoteGpuStatus",
+        "title": "TuxNest: Show Remote GPU Status"
       },
       {
-        "command": "localforge.reindexWorkspace",
-        "title": "LOMVREN: Re-index Workspace Context"
+        "command": "tuxnest.reindexWorkspace",
+        "title": "TuxNest: Re-index Workspace Context"
       },
       {
-        "command": "localforge.cancelAgent",
-        "title": "LOMVREN: Cancel Agent"
+        "command": "tuxnest.cancelAgent",
+        "title": "TuxNest: Cancel Agent"
       },
       {
-        "command": "localforge.setAgentMode",
-        "title": "LOMVREN: Set Agent Mode"
+        "command": "tuxnest.setAgentMode",
+        "title": "TuxNest: Set Agent Mode"
       },
       {
-        "command": "localforge.setModel",
-        "title": "LOMVREN: Set Model"
+        "command": "tuxnest.setModel",
+        "title": "TuxNest: Set Model"
       },
       {
-        "command": "localforge.editSelection",
-        "title": "LOMVREN: Propose a Diff-Reviewed Edit"
+        "command": "tuxnest.editSelection",
+        "title": "TuxNest: Propose a Diff-Reviewed Edit"
       },
       {
-        "command": "localforge.undoChanges",
-        "title": "LOMVREN: Undo Recorded Changes"
+        "command": "tuxnest.undoChanges",
+        "title": "TuxNest: Undo Recorded Changes"
       },
       {
-        "command": "localforge.explain",
-        "title": "LOMVREN: Explain Selected Code"
+        "command": "tuxnest.explain",
+        "title": "TuxNest: Explain Selected Code"
       },
       {
-        "command": "localforge.fix",
-        "title": "LOMVREN: Fix Selected Code or Diagnostics"
+        "command": "tuxnest.fix",
+        "title": "TuxNest: Fix Selected Code or Diagnostics"
       },
       {
-        "command": "localforge.searchWorkspace",
-        "title": "LOMVREN: Search Workspace Context"
+        "command": "tuxnest.searchWorkspace",
+        "title": "TuxNest: Search Workspace Context"
       },
       {
-        "command": "localforge.configureRemote",
-        "title": "LOMVREN: Configure Remote GPU Host"
+        "command": "tuxnest.configureRemote",
+        "title": "TuxNest: Configure Remote GPU Host"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "localforge.explain",
-          "group": "LOMVREN@1",
+          "command": "tuxnest.explain",
+          "group": "TuxNest@1",
           "when": "editorHasSelection"
         },
         {
-          "command": "localforge.fix",
-          "group": "LOMVREN@2",
+          "command": "tuxnest.fix",
+          "group": "TuxNest@2",
           "when": "editorTextFocus"
         },
         {
-          "command": "localforge.editSelection",
-          "group": "LOMVREN@3",
+          "command": "tuxnest.editSelection",
+          "group": "TuxNest@3",
           "when": "editorTextFocus"
         }
       ]
     },
     "configuration": {
-      "title": "LOMVREN",
+      "title": "TuxNest",
       "properties": {
-        "localforge.chatMemory.enabled": {
+        "tuxnest.chatMemory.enabled": {
           "type": "boolean",
           "default": true,
           "scope": "resource",
           "description": "Retrieve relevant older user/assistant messages locally using lexical BM25 ranking. Raw tool results are excluded."
         },
-        "localforge.chatMemory.scope": {
+        "tuxnest.chatMemory.scope": {
           "type": "string",
           "enum": [
             "current",
@@ -203,7 +205,7 @@
           "scope": "resource",
           "description": "Current chat is private by default. All explicitly allows retrieval from other chats in this workspace. Retrieved evidence may be sent to the selected model endpoint."
         },
-        "localforge.chatMemory.recentCharacters": {
+        "tuxnest.chatMemory.recentCharacters": {
           "type": "integer",
           "default": 6000,
           "minimum": 0,
@@ -211,7 +213,7 @@
           "scope": "resource",
           "description": "Character budget for up to ten recent user/assistant messages, separate from older-chat retrieval."
         },
-        "localforge.chatMemory.retrievedCharacters": {
+        "tuxnest.chatMemory.retrievedCharacters": {
           "type": "integer",
           "default": 3000,
           "minimum": 0,
@@ -219,7 +221,7 @@
           "scope": "resource",
           "description": "Maximum older-chat excerpt characters. Model input budget can reduce this further."
         },
-        "localforge.chatMemory.resultCount": {
+        "tuxnest.chatMemory.resultCount": {
           "type": "integer",
           "default": 4,
           "minimum": 1,
@@ -227,28 +229,28 @@
           "scope": "resource",
           "description": "Maximum retrieved older-chat messages. Use /search chat <query> and /context to inspect sources."
         },
-        "localforge.agent.maxRounds": {
+        "tuxnest.agent.maxRounds": {
           "type": "integer",
           "default": 80,
           "minimum": 0,
           "maximum": 10000,
           "description": "Maximum model/tool rounds per task. 0 continues until completion or cancellation, with repeated-action protection. Local model context and memory are still finite."
         },
-        "localforge.agent.contextTokens": {
+        "tuxnest.agent.contextTokens": {
           "type": "integer",
           "default": 4000,
           "minimum": 500,
           "maximum": 100000,
           "description": "Estimated token budget for automatically retrieved project context. Increase only when your model and hardware support it."
         },
-        "localforge.agent.historyCharacters": {
+        "tuxnest.agent.historyCharacters": {
           "type": "integer",
           "default": 48000,
           "minimum": 16000,
           "maximum": 1000000,
           "description": "Conversation character budget before old tool results are compacted. This is not an exact model token or context-window measurement."
         },
-        "localforge.context.maxIndexedFiles": {
+        "tuxnest.context.maxIndexedFiles": {
           "type": "integer",
           "default": 2000,
           "minimum": 1,
@@ -256,7 +258,7 @@
           "scope": "resource",
           "description": "Maximum eligible text files retained in the local workspace index. The index status reports partial coverage when a file, character, or discovery limit is reached."
         },
-        "localforge.context.maxFileBytes": {
+        "tuxnest.context.maxFileBytes": {
           "type": "integer",
           "default": 262144,
           "minimum": 1024,
@@ -264,7 +266,7 @@
           "scope": "resource",
           "description": "Maximum bytes per indexed text file. Binary/generated/ignored/sensitive files remain excluded."
         },
-        "localforge.context.maxIndexCharacters": {
+        "tuxnest.context.maxIndexCharacters": {
           "type": "integer",
           "default": 8000000,
           "minimum": 100000,
@@ -272,65 +274,65 @@
           "scope": "resource",
           "description": "Total retained source-text character limit for local workspace retrieval. Higher limits use more memory; chunk strings and metadata also consume memory."
         },
-        "localforge.ollama.contextWindow": {
+        "tuxnest.ollama.contextWindow": {
           "type": "integer",
           "default": 8192,
           "minimum": 2048,
           "maximum": 1048576,
           "description": "Ollama num_ctx for local chat. Larger context needs more RAM/VRAM and must be supported by the selected model."
         },
-        "localforge.ollama.maxOutputTokens": {
+        "tuxnest.ollama.maxOutputTokens": {
           "type": "integer",
           "default": -1,
           "minimum": -1,
           "maximum": 1048576,
           "description": "Ollama num_predict. -1 leaves generation uncapped by this extension; finite model context and hardware still apply. Cancel stops generation."
         },
-        "localforge.ollama.baseUrl": {
+        "tuxnest.ollama.baseUrl": {
           "type": "string",
           "scope": "machine",
           "default": "http://127.0.0.1:11434",
           "description": "Base URL for the local Ollama server."
         },
-        "localforge.ollama.temperature": {
+        "tuxnest.ollama.temperature": {
           "type": "number",
           "default": 0.1,
           "minimum": 0,
           "maximum": 2,
           "description": "Local generation sampling temperature. A low value makes coding/tool use less variable; model accuracy is not guaranteed."
         },
-        "localforge.ollama.agentThinking": {
+        "tuxnest.ollama.agentThinking": {
           "type": "boolean",
           "default": false,
           "description": "Request internal reasoning from thinking-capable models. Off requests non-thinking mode only when the runtime advertises that control; thinking-only models may still reason. For faster CPU tool execution, select a non-thinking Instruct model. Reasoning is not displayed as chat."
         },
-        "localforge.providers.openAICompatibleUrls": {
+        "tuxnest.providers.openAICompatibleUrls": {
           "type": "string",
           "scope": "machine",
           "default": "http://127.0.0.1:1234/v1,http://127.0.0.1:8080/v1,http://127.0.0.1:8000/v1",
           "description": "Comma- or newline-separated HTTP(S) API base URLs. Each endpoint has independent discovery/routing. No credentials, query parameters or fragments. Remote endpoints receive selected model prompts/context. Applies after an active task finishes."
         },
-        "localforge.autocomplete.enabled": {
+        "tuxnest.autocomplete.enabled": {
           "type": "boolean",
           "default": false,
           "description": "Enable local-model inline code completions. Prompts include nearby editor text."
         },
-        "localforge.routing.chatModel": {
+        "tuxnest.routing.chatModel": {
           "type": "string",
           "default": "",
           "description": "Preferred model id or provider id for chat. Leave blank to use the selected model."
         },
-        "localforge.routing.editModel": {
+        "tuxnest.routing.editModel": {
           "type": "string",
           "default": "",
           "description": "Preferred model id or provider id for edit proposals."
         },
-        "localforge.routing.agentModel": {
+        "tuxnest.routing.agentModel": {
           "type": "string",
           "default": "",
           "description": "Preferred model id or provider id for agent tasks."
         },
-        "localforge.routing.completionModel": {
+        "tuxnest.routing.completionModel": {
           "type": "string",
           "default": "",
           "description": "Preferred model id or provider id for inline completions."

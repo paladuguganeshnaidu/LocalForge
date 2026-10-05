@@ -51,7 +51,7 @@ test('DiagnosticsService (Doctor) evaluates platform, workspace, git, and tool h
   assert.equal(report.overallStatus, 'green');
 
   const md = doctor.formatReportMarkdown(report);
-  assert.ok(md.includes('# LocalForge Doctor Report'));
+  assert.ok(md.includes('# TuxNest Doctor Report'));
   assert.ok(md.includes('Host Environment'));
   assert.ok(md.includes('Workspace State'));
   assert.ok(md.includes('Git Integration'));
@@ -115,7 +115,7 @@ test('LocalForgeSelfTest runs 13 automated checks and produces machine-readable 
   assert.ok(report.totalDurationMs >= 0);
 
   const md = selfTest.formatReportMarkdown(report);
-  assert.ok(md.includes('# LocalForge Automated Self-Test Report'));
+  assert.ok(md.includes('# TuxNest Automated Self-Test Report'));
   assert.ok(md.includes('`activation`'));
   assert.ok(md.includes('`tool_registry`'));
   assert.ok(md.includes('`terminal_execution`'));

@@ -57,8 +57,8 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
       const model = (await this.provider.listModels()).find((item) => item.id === modelId || item.name === modelId);
       if (!model) throw new Error('That model is no longer available. Refresh and try again.');
       await this.onModelsChanged?.();
-      await vscode.commands.executeCommand('localforge.setModel', model.id || model.name);
-      await vscode.commands.executeCommand('localforge.chatView.focus');
+      await vscode.commands.executeCommand('tuxnest.setModel', model.id || model.name);
+      await vscode.commands.executeCommand('tuxnest.chatView.focus');
       this.notice('complete', `${model.displayName || model.name} selected for chat.`);
     } catch (error) {
       this.notice('error', error instanceof Error ? error.message : String(error));
@@ -68,7 +68,7 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   private async refresh(): Promise<void> {
     try {
       const models = await this.provider.listModels();
-      const defaultModel = vscode.workspace.getConfiguration('localforge.routing').get<string>('agentModel', '');
+      const defaultModel = vscode.workspace.getConfiguration('tuxnest.routing').get<string>('agentModel', '');
       this.post({ type: 'models', models, defaultModel });
       const targets = this.provider.getDownloadTargets ? await this.provider.getDownloadTargets() : this.provider.pullModel ? [{ id: this.provider.id || 'ollama', label: 'Configured Ollama', source: this.provider.source }] : [];
       this.post({ type: 'downloadTargets', targets });
@@ -209,12 +209,12 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       await this.onModelsChanged?.();
-      const configuration = vscode.workspace.getConfiguration('localforge.routing');
+      const configuration = vscode.workspace.getConfiguration('tuxnest.routing');
       await Promise.all([
         configuration.update('agentModel', modelId, vscode.ConfigurationTarget.Global),
         configuration.update('chatModel', modelId, vscode.ConfigurationTarget.Global)
       ]);
-      await vscode.commands.executeCommand('localforge.setModel', modelId);
+      await vscode.commands.executeCommand('tuxnest.setModel', modelId);
       await this.refresh();
       this.notice('complete', `${model.displayName || model.name} is now the default chat and agent model.`);
     } catch (error) {

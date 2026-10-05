@@ -8,7 +8,7 @@ const { planPackage } = require('../scripts/package-extension.cjs');
 test('normal packaging refuses to replace an existing checkpoint and accepts a new exact development artifact', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lomvren-package-guard-'));
   try {
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'localforge-vscode', version: '0.3.0' }));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'tuxnest-vscode', version: '0.3.0' }));
     const checkpoint = planPackage(root);
     fs.writeFileSync(checkpoint, 'PRESERVED_RUNTIME');
     assert.throws(() => planPackage(root), /Refusing to overwrite/);

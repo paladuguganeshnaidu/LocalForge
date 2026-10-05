@@ -93,7 +93,7 @@ export class LocalForgeEngine {
     this.modelRegistry = new ModelRegistry();
     this.compositeProvider = new CompositeProvider([], this.modelRegistry);
     const ollamaGenerationOptions = () => {
-      const configuration = vscode.workspace.getConfiguration('localforge.ollama');
+      const configuration = vscode.workspace.getConfiguration('tuxnest.ollama');
       const effort = this.sessionManager?.getActiveSession().effort ?? 'medium';
       const budget = resolveEffortBudget(effort, { contextWindow: configuration.get<number>('contextWindow', 8192), maxOutputTokens: configuration.get<number>('maxOutputTokens', -1) });
       return {
@@ -111,7 +111,7 @@ export class LocalForgeEngine {
 
     this.modelRouter = new ModelRouter(() => this.modelRegistry.getModels());
 
-    const savedPermissionMode = context.globalState?.get<unknown>('localforge.permissionMode');
+    const savedPermissionMode = context.globalState?.get<unknown>('tuxnest.permissionMode') ?? context.globalState?.get<unknown>('localforge.permissionMode');
     this.permissionManager = new PermissionManager(isPermissionMode(savedPermissionMode) ? savedPermissionMode : 'always_ask');
     this.permissionManager.setAccessPolicy(this.accessPolicy);
     this.toolRegistry = new ToolRegistry();
@@ -131,7 +131,7 @@ export class LocalForgeEngine {
 
     this.artifactManager = new ArtifactManager();
     this.turnManager = new TurnManager(() => this.scheduleTraceSave());
-    this.turnManager.restorePersistedHistory(context.workspaceState.get<unknown>('localforge.activityTraceHistory'));
+    this.turnManager.restorePersistedHistory(context.workspaceState.get<unknown>('tuxnest.activityTraceHistory') ?? context.workspaceState.get<unknown>('localforge.activityTraceHistory'));
     this.browserTool = new BrowserTool();
     context.subscriptions.push({ dispose: () => { void this.browserTool.dispose(); } });
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
@@ -242,7 +242,7 @@ export class LocalForgeEngine {
     const saving = (this.tracePersistence ?? Promise.resolve()).then(async () => {
       const sessions = new Map(this.sessionManager.getSessions().map((session) => [session.id, session]));
       const history = this.turnManager.getPersistedHistory().filter((turn) => sessions.has(turn.conversationId) && turn.historyEpoch === sessions.get(turn.conversationId)?.historyEpoch);
-      await this.context.workspaceState.update('localforge.activityTraceHistory', history);
+      await this.context.workspaceState.update('tuxnest.activityTraceHistory', history);
     });
     this.tracePersistence = saving.catch(() => {});
     await saving;
@@ -372,7 +372,7 @@ export class LocalForgeEngine {
           }
           const query = parsedSlash.cleanPrompt.replace(/^chat\b/i, '').trim();
           const session = this.sessionManager.getActiveSession();
-          const configuration = vscode.workspace.getConfiguration('localforge.chatMemory');
+          const configuration = vscode.workspace.getConfiguration('tuxnest.chatMemory');
           const memoryOptions = readChatMemoryOptions((key, fallback) => configuration.get(key, fallback));
           const matches = query ? await new ChatMemoryIndex(this.sessionManager).search(query, session.id, { scope: memoryOptions.scope, limit: memoryOptions.resultCount, maximumCharacters: memoryOptions.memoryCharacters, signal }) : [];
           return {
@@ -401,7 +401,7 @@ export class LocalForgeEngine {
           break;
         }
         case 'diagnose': {
-          void vscode.commands.executeCommand('localforge.diagnose');
+          void vscode.commands.executeCommand('tuxnest.diagnose');
           return {
             runId: `run-${Date.now()}`,
             task: 'Diagnose installation',
@@ -414,7 +414,7 @@ export class LocalForgeEngine {
           };
         }
         case 'remote': {
-          void vscode.commands.executeCommand('localforge.connectRemote');
+          void vscode.commands.executeCommand('tuxnest.connectRemote');
           return {
             runId: `run-${Date.now()}`,
             task: 'Remote GPU Connection',
@@ -547,16 +547,16 @@ export class LocalForgeEngine {
       if (models.length > 0) {
         chosenModel = models[0].id || models[0].name;
       } else {
-        throw new Error('No local LLM detected. Please ensure Ollama is running (`ollama serve`) or configure a remote GPU / OpenAI-compatible endpoint in LocalForge settings.');
+        throw new Error('No local LLM detected. Please ensure Ollama is running (`ollama serve`) or configure a remote GPU / OpenAI-compatible endpoint in TuxNest settings.');
       }
     }
 
-    const agentConfiguration = vscode.workspace.getConfiguration('localforge.agent');
+    const agentConfiguration = vscode.workspace.getConfiguration('tuxnest.agent');
     const chosenMetadata = this.modelRegistry.getModels().find((entry) => entry.id === chosenModel || entry.name === chosenModel);
     if (modelPreference && modelPreference.toLowerCase() !== 'auto' && (!routing.model || !chosenMetadata)) throw new Error(`Selected model "${modelPreference}" is unavailable or ambiguous. Your chat is preserved; choose a provider-qualified model.`);
     const ollamaModel = chosenMetadata?.providerId === 'ollama' || chosenMetadata?.providerId.startsWith('ssh-ollama-') || chosenModel.startsWith('ollama:');
     const configuredContextWindow = ollamaModel
-      ? Math.min(vscode.workspace.getConfiguration('localforge.ollama').get<number>('contextWindow', 8192), chosenMetadata?.capabilities?.contextWindow ?? Infinity)
+      ? Math.min(vscode.workspace.getConfiguration('tuxnest.ollama').get<number>('contextWindow', 8192), chosenMetadata?.capabilities?.contextWindow ?? Infinity)
       : chosenMetadata?.capabilities?.contextWindow ?? 8192;
 
     const session = this.sessionManager.getActiveSession();
@@ -612,7 +612,7 @@ export class LocalForgeEngine {
         if (ctx.workspaceSummary) sources.push({ category: 'workspace_summary', label: 'Workspace metadata', content: ctx.workspaceSummary });
         for (const item of ctx.items) sources.push({ category: item.source === 'retrieval' ? 'workspace_retrieval' : item.source, label: item.label, path: item.path, content: item.content, chunk: item.chunk });
       }
-      const memoryConfiguration = vscode.workspace.getConfiguration('localforge.chatMemory');
+      const memoryConfiguration = vscode.workspace.getConfiguration('tuxnest.chatMemory');
       const composed = conversational ? undefined : await composeRequestContext({
         session, prompt: effectivePrompt, policyPrompt: this.accessPolicy.getPrompt(), accessScope: fileScoped ? 'file' : this.accessPolicy.getState().scope,
         contextWindow, memory: new ChatMemoryIndex(this.sessionManager), options: readChatMemoryOptions((key, fallback) => memoryConfiguration.get(key, fallback)), sources, signal

@@ -200,7 +200,7 @@ export class DiagnosticsService {
   public formatReportMarkdown(report: DiagnosticsReport): string {
     const statusText = report.overallStatus === 'green' ? '[HEALTHY]' : report.overallStatus === 'yellow' ? '[WARNINGS DETECTED]' : '[ACTION REQUIRED]';
     const lines = [
-      `# LocalForge Doctor Report`,
+      `# TuxNest Doctor Report`,
       `**Overall Health**: ${statusText}`,
       `*Checked at: ${new Date(report.timestamp).toLocaleString()}*`,
       '',

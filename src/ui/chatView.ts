@@ -201,12 +201,12 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
   private setPermissionMode(mode: PermissionMode): void {
     this.engine?.permissionManager.setMode(mode);
-    void this.context.globalState?.update('localforge.permissionMode', mode);
+    void this.context.globalState?.update('tuxnest.permissionMode', mode);
     this.post({ type: 'permissionMode', mode });
   }
 
   public modelForTask(task: ModelTask): string | undefined {
-    const configuration = vscode.workspace.getConfiguration('localforge.routing');
+    const configuration = vscode.workspace.getConfiguration('tuxnest.routing');
     const preferences: Record<ModelTask, string> = {
       chat: configuration.get<string>('chatModel', ''),
       edit: configuration.get<string>('editModel', ''),
@@ -359,7 +359,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
       if (!isWebviewMessage(message)) {
         if (message && typeof message === 'object' && 'type' in message && message.type === 'updateSettings') this.post({ type: 'error', message: 'Invalid settings values. Endpoint URLs require HTTP(S) without credentials, query parameters or fragments. No settings were saved.' });
-        console.warn('[LocalForge] Received unrecognized webview message; payload omitted.');
+        console.warn('[TuxNest] Received unrecognized webview message; payload omitted.');
         return;
       }
 
@@ -426,7 +426,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         }
       }
 
-      if (message.type === 'openModels') await vscode.commands.executeCommand('localforge.modelsView.focus');
+      if (message.type === 'openModels') await vscode.commands.executeCommand('tuxnest.modelsView.focus');
       if (message.type === 'getContextFiles') {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         const files: string[] = [];
@@ -447,23 +447,23 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (message.type === 'connectRemote') {
-        await vscode.commands.executeCommand('localforge.connectRemote');
+        await vscode.commands.executeCommand('tuxnest.connectRemote');
       }
 
       if (message.type === 'disconnectRemote') {
-        await vscode.commands.executeCommand('localforge.disconnectRemote');
+        await vscode.commands.executeCommand('tuxnest.disconnectRemote');
       }
 
       if (message.type === 'configureRemote') {
-        await vscode.commands.executeCommand('localforge.configureRemote');
+        await vscode.commands.executeCommand('tuxnest.configureRemote');
       }
 
       if (message.type === 'diagnose') {
-        await vscode.commands.executeCommand('localforge.diagnose');
+        await vscode.commands.executeCommand('tuxnest.diagnose');
       }
 
       if (message.type === 'continueTask') {
-        await vscode.commands.executeCommand('localforge.continueTask');
+        await vscode.commands.executeCommand('tuxnest.continueTask');
       }
 
       if (message.type === 'clear') {
@@ -512,7 +512,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
       if (message.type === 'updateSettings') {
         if (message.settings && typeof message.settings === 'object') {
-          const config = vscode.workspace.getConfiguration('localforge');
+          const config = vscode.workspace.getConfiguration('tuxnest');
           if (Object.keys(message.settings).some((key) => key.startsWith('chatMemory.') || key.startsWith('context.')) && !vscode.workspace.workspaceFolders?.length) throw new Error('Open a workspace before changing workspace memory/index settings.');
           if (message.settings['chatMemory.scope'] === 'all' && config.get<string>('chatMemory.scope', 'current') !== 'all') {
             const choice = await vscode.window.showWarningMessage('Allow retrieval from all chats in this workspace? Retrieved messages can be sent to the selected model endpoint. Current chat only is the private default.', { modal: true }, 'Allow all-chat memory');
@@ -524,7 +524,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         }
         this.postAgentSettings();
         if (this.engine && ('ollama.baseUrl' in message.settings || 'providers.openAICompatibleUrls' in message.settings)) {
-          await this.engine.updateProviderConfiguration({ ollamaEndpoint: vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'), openAiEndpoints: vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '') });
+          await this.engine.updateProviderConfiguration({ ollamaEndpoint: vscode.workspace.getConfiguration('tuxnest.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'), openAiEndpoints: vscode.workspace.getConfiguration('tuxnest.providers').get<string>('openAICompatibleUrls', '') });
           await this.refresh();
         }
       }
@@ -766,7 +766,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postAgentSettings(): void {
-    const configuration = vscode.workspace.getConfiguration('localforge');
+    const configuration = vscode.workspace.getConfiguration('tuxnest');
     this.post({ type: 'agentSettings', maxRounds: configuration.get<number>('agent.maxRounds', 80), contextWindow: configuration.get<number>('ollama.contextWindow', 8192), maxOutputTokens: configuration.get<number>('ollama.maxOutputTokens', -1),
       chatMemory: { enabled: configuration.get('chatMemory.enabled', true), scope: configuration.get('chatMemory.scope', 'current'), recentCharacters: configuration.get('chatMemory.recentCharacters', 6000), retrievedCharacters: configuration.get('chatMemory.retrievedCharacters', 3000), resultCount: configuration.get('chatMemory.resultCount', 4) },
       workspaceIndex: { maxIndexedFiles: configuration.get('context.maxIndexedFiles', 2000), maxFileBytes: configuration.get('context.maxFileBytes', 262144), maxIndexCharacters: configuration.get('context.maxIndexCharacters', 8000000) },
@@ -808,7 +808,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     files?: string[];
   }): Promise<void> {
     if (this.busy) {
-      console.warn('[LocalForge] Cancelling prior in-flight task for incoming prompt.');
+      console.warn('[TuxNest] Cancelling prior in-flight task for incoming prompt.');
       this.cancelActiveChat();
     }
     const interaction = Symbol('chat');
@@ -963,9 +963,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <main class="conversation-area">
     <div class="main-scroll" id="mainScroll" role="region" aria-label="Conversation and actual tool activity" tabindex="0">
       <div class="msg-assistant welcome">
-        <span class="welcome-label">LOMVREN</span>
+        <span class="welcome-label">TuxNest Chat</span>
         <strong>What would you like to build?</strong>
-        <p>Ask about your code, plan a change, or let the agent work. You review the edits.</p>
+        <p>Ask about your code, plan a change, or let TuxNest SI Agent work. You review the edits.</p>
       </div>
       <div class="timeline" id="timelineContainer" style="display:none;"></div>
     </div>
@@ -1001,7 +1001,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         <div class="slash-item" data-cmd="/remote"><span>/remote</span><span style="color:var(--subtle);">SSH remote GPU</span></div>
         <div class="slash-item" data-cmd="/clear"><span>/clear</span><span style="color:var(--subtle);">Clear conversation</span></div>
       </div>
-      <textarea id="promptInput" aria-label="Message to LOMVREN" placeholder="Ask anything, or describe what to build…" rows="3"></textarea>
+      <textarea id="promptInput" aria-label="Message to TuxNest Chat" placeholder="Ask anything, or describe what to build with TuxNest…" rows="3"></textarea>
       <div class="composer-bottom">
         <select id="modeSelect" aria-label="Conversation mode">
           <option value="agent">Agent</option><option value="ask">Ask</option><option value="plan">Plan</option>
@@ -1068,7 +1068,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <!-- Settings Drawer -->
   <div class="drawer" id="settingsDrawer" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1">
     <div class="drawer-header">
-      <div class="drawer-title">LOMVREN Settings</div>
+      <div class="drawer-title">TuxNest Settings</div>
       <button class="icon-btn" id="closeSettingsBtn">
         <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
@@ -1159,7 +1159,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         window.__cachedVsCodeApi = api;
         return api;
       } catch (err) {
-        console.warn('[LOMVREN] acquireVsCodeApi reuse or error:', err);
+        console.warn('[TuxNest] acquireVsCodeApi reuse or error:', err);
         return window.__cachedVsCodeApi || { postMessage: function() {} };
       }
     })();
@@ -2057,7 +2057,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         const isConnError = msg.message && (msg.message.includes('Ollama') || msg.message.includes('connect') || msg.message.includes('fetch'));
         card.innerHTML = '<div style="color:var(--vscode-errorForeground, #f48771); font-weight:600; margin-bottom:4px;">Task Failed</div>' +
           '<div style="font-size:12px; line-height:1.4;">' + escapeHtml(msg.message || 'Unknown error') + '</div>' +
-          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\\'ollama serve\\'). Try running <code>LOMVREN: Doctor</code> from the command palette.</div>' : '');
+          (isConnError ? '<div style="margin-top:8px; font-size:11px; opacity:0.85;">Tip: Ensure Ollama is running (\\'ollama serve\\'). Try running <code>TuxNest: Doctor</code> from the command palette.</div>' : '');
         mainScroll.appendChild(card);
         scrollToLatest(false);
       }

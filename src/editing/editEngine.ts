@@ -284,8 +284,8 @@ export class EditEngine {
 
     const query = new URLSearchParams({ proposal: proposalId }).toString();
     const encodedPath = encodeURI(filePath).replace(/#/g, '%23');
-    const tempDocUri = vscode.Uri.parse(`localforge-proposed:${encodedPath}?${query}`);
-    const originalUri = vscode.Uri.parse(`localforge-proposed:${encodedPath}?${query}&side=original`);
+    const tempDocUri = vscode.Uri.parse(`tuxnest-proposed:${encodedPath}?${query}`);
+    const originalUri = vscode.Uri.parse(`tuxnest-proposed:${encodedPath}?${query}&side=original`);
 
     await vscode.commands.executeCommand(
       'vscode.diff',

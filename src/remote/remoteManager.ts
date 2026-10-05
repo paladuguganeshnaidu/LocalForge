@@ -5,7 +5,7 @@ import { OllamaGenerationOptions, OllamaProvider } from '../providers/ollamaProv
 import { CompositeProvider } from '../providers/compositeProvider';
 import { ModelRegistry } from '../providers/modelRegistry';
 
-export const REMOTE_PROFILES_KEY = 'localforge.remoteGpuProfiles';
+export const REMOTE_PROFILES_KEY = 'tuxnest.remoteGpuProfiles';
 
 export interface RemoteSessionInfo {
   profile: RemoteGpuProfile;
@@ -196,6 +196,6 @@ export class RemoteManager {
   }
 
   private getSecretKey(profileId: string): string {
-    return `localforge.remote.${profileId}.credential`;
+    return `tuxnest.remote.${profileId}.credential`;
   }
 }

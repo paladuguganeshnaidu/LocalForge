@@ -33,7 +33,7 @@ export class LocalForgeSelfTest {
 
     // 2. Configuration
     results.push(await this.testCheck('configuration', async () => {
-      const config = vscode.workspace.getConfiguration('localforge');
+      const config = vscode.workspace.getConfiguration('tuxnest');
       const ollamaUrl = config.get<string>('ollama.baseUrl');
       return `Configuration read successfully (Ollama URL: ${ollamaUrl || 'default'}).`;
     }));
@@ -158,7 +158,7 @@ export class LocalForgeSelfTest {
   public formatReportMarkdown(report: SelfTestReport): string {
     const statusText = report.allPassed ? '[PASS] ALL TESTS PASSED' : '[FAIL] FAILURES DETECTED';
     const lines = [
-      '# LocalForge Automated Self-Test Report',
+      '# TuxNest Automated Self-Test Report',
       `**Result**: ${statusText}`,
       `**Duration**: ${report.totalDurationMs}ms`,
       `*Generated at: ${new Date(report.timestamp).toLocaleString()}*`,

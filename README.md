@@ -1,11 +1,11 @@
-# LOMVREN
+# TuxNest
 
-For installation, model/GPU setup, scopes, approval choices, edits, verification, read-only specialists and temporary workflow tools, see the [0.3.0 development user guide](USER_GUIDE.md). The preserved 0.3.0 checkpoint and subsequent development builds are not a 1.0.0 production sign-off.
+For installation, model/GPU setup, scopes, approval choices, edits, verification, read-only specialists and temporary workflow tools, see the [1.0.0 user guide](USER_GUIDE.md).
 
 > **A local-first autonomous engineering environment for AI-assisted software development.**  
-> *Note: LOMVREN was previously published as LocalForge.*
+> *Featuring TuxNest Chat and the autonomous TuxNest SI Agent.*
 
-LOMVREN is a VS Code coding assistant that connects to local Ollama or an Ollama instance on a user-managed remote GPU through an SSH tunnel. It does not provide hosted inference or proprietary telemetry. When remote inference is selected, prompts and the context you include are sent through the encrypted tunnel to that remote host; review that host's access and retention policies before connecting.
+TuxNest is a VS Code coding assistant that connects to local Ollama or an Ollama instance on a user-managed remote GPU through an SSH tunnel. It does not provide hosted inference or proprietary telemetry. When remote inference is selected, prompts and the context you include are sent through the encrypted tunnel to that remote host; review that host's access and retention policies before connecting.
 
 ---
 
@@ -67,7 +67,7 @@ Memory defaults to **Current chat only**. The Settings drawer exposes memory ena
 
 Retrieval excludes raw tool calls/results, NUL-containing data, and messages longer than 8,000 characters. Known credential patterns are redacted without rewriting stored originals; arbitrary secrets cannot be guaranteed recognizable. Original messages remain the source of truth, and the derived lexical index is rebuilt from private chat storage. Clear/delete immediately remove eligible source messages. New assistant replies record memory provenance; deleting or clearing a source chat prevents those derived replies from being retrieved or resent as recent context, including transitive copies. Previously saved, untraceable copies and historical context previews are not cryptographically erased. The native IPC/restart and live-model checks are recorded in the verification ledger; rendered UI acceptance is still required before release.
 
-Local Ollama requests use a lower sampling temperature (0.1) for less variable coding/tool responses. Change `localforge.ollama.temperature` in VS Code settings if needed; a lower temperature does not guarantee accuracy. A summary can display project identity sourced directly from a successfully read `package.json`, rather than guessing it from the model. Missing explicitly requested exact script commands can trigger a corrective model round.
+Local Ollama requests use a lower sampling temperature (0.1) for less variable coding/tool responses. Change `tuxnest.ollama.temperature` in VS Code settings if needed; a lower temperature does not guarantee accuracy. A summary can display project identity sourced directly from a successfully read `package.json`, rather than guessing it from the model. Missing explicitly requested exact script commands can trigger a corrective model round.
 
 Live file and command actions now appear where they happen in the conversation. A running command shows `Running: <command>`; its completed row shows `Ran: <command> · exit <code>`. Expand **Inspect run details** for input, output and failures. Earlier activity is collapsed under **Previous run details**. Replies support safe Markdown headings, grouped bullet/numbered lists, quotes, code and HTTP(S) links; model HTML is never executed.
 
@@ -87,7 +87,7 @@ Agent tools now include `create_directory`, `file_stat`, `inspect_package_script
 
 A requested website build cannot count as completed after only reading inspiration. Explicitly requested project builds, tracked server startup and rendered-browser checks need successful tool evidence. This is a conservative evidence gate, not proof of design quality, complete accessibility or every requested interaction. Repeated unchanged failed calls stop after three dispatched attempts and explain the blocker. A model still has to create the code correctly: the available 1.5B model failed the full Torii task during real testing. There is no claim of GPT 6.1 SOL availability, 100 independent tools or a production-quality website until those checks actually pass.
 
-In **Settings**, configure task rounds (default 80; `0` removes the round cap), local context window (default 8192), and local output tokens (`-1` removes the extension's generation cap). Advanced VS Code settings also expose `localforge.agent.contextTokens` and `localforge.agent.historyCharacters`. History compaction removes old complete exchanges with an abridged evidence notice; it is a character estimate, not an exact token guarantee. Local inference has no publisher token quota, but model context, RAM/VRAM, speed and tool reliability are finite. Repeated identical actions stop rather than looping forever. Small models can still fail complex engineering requests; this build does not claim parity with commercial coding agents.
+In **Settings**, configure task rounds (default 80; `0` removes the round cap), local context window (default 8192), and local output tokens (`-1` removes the extension's generation cap). Advanced VS Code settings also expose `tuxnest.agent.contextTokens` and `tuxnest.agent.historyCharacters`. History compaction removes old complete exchanges with an abridged evidence notice; it is a character estimate, not an exact token guarantee. Local inference has no publisher token quota, but model context, RAM/VRAM, speed and tool reliability are finite. Repeated identical actions stop rather than looping forever. Small models can still fail complex engineering requests; this build does not claim parity with commercial coding agents.
 
 Try **Ask**: “Inspect the project and summarize its purpose, architecture, entry points, run/test commands and what you could not verify.” Then **Agent**: “Create a responsive portfolio in this workspace. Propose the files, explain how to preview it, and verify after approval.” Diff-review mode prepares changes rather than applying them; accept the changes and continue the task to inspect/verify the resulting files. Use Always proceed only when you explicitly want permitted low-risk edits applied automatically.
 
@@ -95,13 +95,13 @@ Try **Ask**: “Inspect the project and summarize its purpose, architecture, ent
 
 `/search <query>` runs bounded lexical workspace retrieval without a model call. Results identify the source path, line range, score, chunk ID, file SHA-256, and excerpt truncation. It is not exhaustive full-project understanding or semantic embedding search. `/context` records the workspace chunk metadata actually attached to the last model request.
 
-The index starts automatically and watches file creation, changes, deletion, renames, accepted edits and rollback. Full rebuilds replace the snapshot atomically; retrieval checks that selected source bytes still match their hashes before attaching them. Use **Settings → Workspace index → Rebuild index** or **LOMVREN: Re-index Workspace Context** to rebuild. Settings shows real files/chunks, last update, partial coverage and errors. Command-palette rebuild is cancellable. File access blocks workspace retrieval and both rebuild entry points.
+The index starts automatically and watches file creation, changes, deletion, renames, accepted edits and rollback. Full rebuilds replace the snapshot atomically; retrieval checks that selected source bytes still match their hashes before attaching them. Use **Settings → Workspace index → Rebuild index** or **TuxNest: Re-index Workspace Context** to rebuild. Settings shows real files/chunks, last update, partial coverage and errors. Command-palette rebuild is cancellable. File access blocks workspace retrieval and both rebuild entry points.
 
 Workspace-scoped limits default to **2,000 files**, **256 KiB per file** and **8,000,000 text characters**. Candidate discovery is separately bounded; reaching a limit is explicitly reported as partial coverage. The drawer exposes these limits. Binary/NUL data, invalid UTF-8, sensitive paths, generated/build/dependency directories and packaging assets are excluded. Root/nested `.gitignore` and `.ignore`, plus `files.exclude`/`search.exclude`, are honored. Simple sibling `when` conditions are supported; invalid or excessively expanded rules fail the rebuild visibly rather than silently admitting excluded files. Indexing reads saved disk content, not unsaved buffer versions. Native watcher/edit/restart tests are documented in the verification ledger; complete rendered UI acceptance remains pending.
 
 ### Model management
 
-Open the **Models** view in the LOMVREN sidebar to search installed models, select one for chat, or set a default for chat and agent tasks. Enter an Ollama model name to install or update it. Downloads show live progress and provide Pause, Resume, and Cancel controls. Resume sends a new pull request for the same model; Ollama may reuse completed layers. Paused downloads survive closing and reopening the view during the current extension session. Deletion requires confirmation and is limited to discovered local Ollama models. Start Ollama before installing or discovering local models.
+Open the **Models** view in the TuxNest sidebar to search installed models, select one for chat, or set a default for chat and agent tasks. Enter an Ollama model name to install or update it. Downloads show live progress and provide Pause, Resume, and Cancel controls. Resume sends a new pull request for the same model; Ollama may reuse completed layers. Paused downloads survive closing and reopening the view during the current extension session. Deletion requires confirmation and is limited to discovered local Ollama models. Start Ollama before installing or discovering local models.
 
 | Mode | Purpose | Tools Allowed | Safety Behavior |
 | :--- | :--- | :--- | :--- |
@@ -116,7 +116,7 @@ Open the **Models** view in the LOMVREN sidebar to search installed models, sele
 
 ### Undo reviewed changes
 
-Open **Changes → Recorded changes**, or run **LOMVREN: Undo Recorded Changes** from the Command Palette. Select a recorded edit and confirm restoration. Reviewed chat edits, accepted selection fixes, and built-in file creation, line replacement, deletion, and move tools save original bytes before applying changes; recovery survives restarting VS Code. Restoring removes created files, restores deleted files, reverses moves, and preserves original encoding markers and line endings. Move source/destination paths must be accepted or restored together. It refuses to overwrite later changes, dirty editors, or paths outside the original open workspace. Restore newer edits first when they affect the same files. Deletions and moves require explicit tool approval even in automatic modes, followed by diff review unless approved auto-application is configured.
+Open **Changes → Recorded changes**, or run **TuxNest: Undo Recorded Changes** from the Command Palette. Select a recorded edit and confirm restoration. Reviewed chat edits, accepted selection fixes, and built-in file creation, line replacement, deletion, and move tools save original bytes before applying changes; recovery survives restarting VS Code. Restoring removes created files, restores deleted files, reverses moves, and preserves original encoding markers and line endings. Move source/destination paths must be accepted or restored together. It refuses to overwrite later changes, dirty editors, or paths outside the original open workspace. Restore newer edits first when they affect the same files. Deletions and moves require explicit tool approval even in automatic modes, followed by diff review unless approved auto-application is configured.
 
 Backups contain source code and are stored locally in this extension's per-workspace storage, outside the project. The interface and recovery-list tool expose metadata, not backup contents. **Remove backup** permanently removes that record's Undo capability after confirmation. Storage is capped at 40 records / 16 MiB, with an 8 MiB per-file preparation limit; only fully restored records may be pruned automatically. If full or unreadable, further reviewed edits are blocked rather than discarding recoverable backups. Binary files support deletion and moves, not text replacement. Directories and symbolic links are not accepted by these file tools. Recovery does not cover arbitrary terminal commands or MCP mutations; it restores file contents/existence, not all filesystem metadata or newly created empty parent directories. It is not a whole-workspace backup or a command sandbox.
 
@@ -126,10 +126,10 @@ Developers can run `npm run test:recovery-restart` to verify exact file restorat
 
 ## Interaction & Information Architecture
 
-The LOMVREN agent panel follows a native, focused hierarchy:
+The TuxNest agent panel follows a native, focused hierarchy:
 
 1. **Header**:
-   - LOMVREN branding and active conversation title.
+   - TuxNest branding and active conversation title.
    - Quick action buttons (New Session, Refresh Models, Diagnostics, Settings).
    - Compact model indicator displaying active model, provider, and compute target (`Local GPU`, `Remote GPU (SSH)`, or `Auto`).
 2. **Mode Selector**:
@@ -171,8 +171,8 @@ ollama pull qwen2.5-coder:1.5b
 
 ### 2. First Run
 
-1. Open VS Code. LOMVREN is available in the **Secondary Sidebar** (or Primary Sidebar/Panel).
-2. LOMVREN will detect running model runtimes and populate the unified model picker.
+1. Open VS Code. TuxNest is available in the **Secondary Sidebar** (or Primary Sidebar/Panel).
+2. TuxNest will detect running model runtimes and populate the unified model picker.
 3. Choose your preferred mode (`Agent`, `Plan`, or `Ask`).
 4. Type a task (e.g., *"Add authentication middleware"* or *"Explain the repository structure"*).
 
@@ -210,11 +210,11 @@ Click or type `@` references to attach context directly into the prompt:
 
 Run large models (14B, 32B, 70B) on a remote GPU workstation or cloud instance (RunPod, Lambda Labs, home rig) while working locally:
 
-1. Click **Settings** or run `LOMVREN: Configure Remote GPU Host`.
+1. Click **Settings** or run `TuxNest: Configure Remote GPU Host`.
 2. Enter host, username, port, and authentication method (SSH key or password).
 3. Secrets are stored securely in **VS Code SecretStorage**—never in plaintext files or logs.
-4. Run `LOMVREN: Connect to Remote GPU Host`.
-5. LOMVREN establishes a loopback-only SSH tunnel (`127.0.0.1:port -> remote Ollama`), pins the server's SSH fingerprint, and discovers all remote models.
+4. Run `TuxNest: Connect to Remote GPU Host`.
+5. TuxNest establishes a loopback-only SSH tunnel (`127.0.0.1:port -> remote Ollama`), pins the server's SSH fingerprint, and discovers all remote models.
 6. Remote models appear in the unified model picker with location tags and NVIDIA GPU telemetry (GPU name, VRAM used/total, utilization).
 7. Disconnecting cleans up the tunnel and removes remote models from the active registry immediately.
 
@@ -244,7 +244,7 @@ Older saved `openai:<model>` selections may become unavailable because compatibl
 
 ## Testing & Verification
 
-LOMVREN employs a rigorous multi-tier testing strategy:
+TuxNest employs a rigorous multi-tier testing strategy:
 
 - **Unit & Integration Tests**: `npm test` compiles TypeScript and runs the checked-in automated regression tests.
 - **High-Volume Stress Tests**: `tests/highVolumeStress.test.js` exercises 1,000 tool-call parser inputs across all syntaxes, 1,000 malformed inputs, 1,000 path security traversals, 1,000 webview message validations, 100 edit proposals, 100 permission checks, 100 synthetic agent loops, 10 real terminal executions, and concurrent cancellation scenarios.

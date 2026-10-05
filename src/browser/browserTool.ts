@@ -104,7 +104,7 @@ export class BrowserTool {
       const response = await fetch(safeUrl, {
         signal: controller.signal,
         redirect: 'error',
-        headers: { 'User-Agent': 'LOMVREN-LocalBrowser/0.2.5' }
+        headers: { 'User-Agent': 'TuxNest-LocalBrowser/1.0.0' }
       });
       const contentLength = Number(response.headers.get('content-length') || 0);
       if (contentLength > 1024 * 1024) throw new Error('Local page response exceeds the 1 MiB inspection limit.');

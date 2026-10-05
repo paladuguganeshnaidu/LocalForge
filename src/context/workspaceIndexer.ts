@@ -17,7 +17,7 @@ export interface WorkspaceIndexStatus {
   limits: WorkspaceIndexLimits;
 }
 export function readWorkspaceIndexLimits(): WorkspaceIndexLimits {
-  const configuration = vscode.workspace.getConfiguration?.('localforge.context');
+  const configuration = vscode.workspace.getConfiguration?.('tuxnest.context');
   const bounded = (key: string, fallback: number, minimum: number, maximum: number): number => {
     const value = configuration?.get<number>(key, fallback);
     return Number.isInteger(value) ? Math.max(minimum, Math.min(maximum, value!)) : fallback;
@@ -105,7 +105,7 @@ export class WorkspaceIndexer implements vscode.Disposable {
       this.watcher = vscode.workspace.createFileSystemWatcher('**/*');
       this.disposables.push(this.watcher.onDidCreate((uri) => this.schedule(uri)), this.watcher.onDidChange((uri) => this.schedule(uri)), this.watcher.onDidDelete((uri) => this.schedule(uri)), this.watcher);
       if (vscode.workspace.onDidChangeConfiguration) this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => {
-        if (['localforge.context', 'files.exclude', 'search.exclude'].some((section) => event.affectsConfiguration(section))) this.requestRebuild();
+        if (['tuxnest.context', 'files.exclude', 'search.exclude'].some((section) => event.affectsConfiguration(section))) this.requestRebuild();
       }));
       if (vscode.workspace.onDidChangeWorkspaceFolders) this.disposables.push(vscode.workspace.onDidChangeWorkspaceFolders(() => this.requestRebuild()));
       if (vscode.workspace.onDidGrantWorkspaceTrust) this.disposables.push(vscode.workspace.onDidGrantWorkspaceTrust(() => this.requestRebuild()));

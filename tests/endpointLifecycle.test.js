@@ -172,7 +172,7 @@ test('provider settings validate every endpoint, preserve explicit unavailable s
   assert.equal(isWebviewMessage({ type: 'updateSettings', settings: { 'ollama.baseUrl': 'http://localhost:11434', 'providers.openAICompatibleUrls': 'http://localhost:1234/v1,\nhttps://api.example.test/v1' } }), true);
   for (const key of ['ollama.baseUrl', 'providers.openAICompatibleUrls']) assert.equal(isWebviewMessage({ type: 'updateSettings', settings: { [key]: 'https://host/v1?api_key=secret' } }), false);
   const properties = require('../package.json').contributes.configuration.properties;
-  assert.equal(properties['localforge.ollama.baseUrl'].scope, 'machine');
-  assert.equal(properties['localforge.providers.openAICompatibleUrls'].scope, 'machine');
+  assert.equal(properties['tuxnest.ollama.baseUrl'].scope, 'machine');
+  assert.equal(properties['tuxnest.providers.openAICompatibleUrls'].scope, 'machine');
   assert.equal(routeModel([{ id: 'b:shared', name: 'shared' }], 'chat', { chat: 'removed:shared' }, 'b:shared'), undefined);
 });

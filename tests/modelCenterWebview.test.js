@@ -109,7 +109,7 @@ test('Use in chat routes the discovered canonical model and rejects stale select
   const center = new ModelCenterViewProvider({ listModels: async () => [installedModel] });
   const view = attachView(center);
   await view.send({ type: 'selectModel', model: installedModel.id });
-  assert.deepEqual(commands, [['localforge.setModel', installedModel.id], ['localforge.chatView.focus']]);
+  assert.deepEqual(commands, [['tuxnest.setModel', installedModel.id], ['tuxnest.chatView.focus']]);
   await view.send({ type: 'selectModel', model: 'missing' });
   assert.equal(commands.length, 2);
   assert.equal(view.posts.at(-1).type, 'modelCenterNotice');

@@ -73,7 +73,7 @@ test('normal engine requests inject older evidence and deterministic slash comma
 
 test('SSH Ollama uses configured context and the same bounded native tool inventory as local Ollama', async () => {
   const { engine } = await fixture();
-  settings.set('localforge.ollama.contextWindow', 4096);
+  settings.set('tuxnest.ollama.contextWindow', 4096);
   const model = { id: 'ssh-ollama-fixture:qwen%3A14b', name: 'qwen:14b', providerId: 'ssh-ollama-fixture', capabilities: { contextWindow: 32768 } };
   engine.modelRegistry.getModels = () => [model];
   let captured;
@@ -92,16 +92,16 @@ test('SSH Ollama uses configured context and the same bounded native tool invent
 test('runtime cross-chat setting is explicit, disabled memory and File access prevent injection, delete removes evidence', async () => {
   const { engine, requests, secondId, setScope } = await fixture();
   assert.doesNotMatch((await engine.executeTask('/search chat SILVER-PEAR-4826', 'ask')).response, /private codename/);
-  settings.set('localforge.chatMemory.scope', 'all');
+  settings.set('tuxnest.chatMemory.scope', 'all');
   const search = await engine.executeTask('/search chat SILVER-PEAR-4826', 'ask');
   assert.match(search.response, /all chats — explicitly enabled/);
   assert.match(search.response, /SILVER-PEAR-4826/);
   await engine.deleteConversation(secondId);
   assert.match((await engine.executeTask('/search chat SILVER-PEAR-4826', 'ask')).response, /No matching/);
-  settings.set('localforge.chatMemory.enabled', false);
+  settings.set('tuxnest.chatMemory.enabled', false);
   await engine.executeTask('What was the internal test codename?', 'ask');
   assert.doesNotMatch(JSON.stringify(requests.at(-1)), /ORBITAL-MANGO/);
-  settings.set('localforge.chatMemory.enabled', true);
+  settings.set('tuxnest.chatMemory.enabled', true);
   setScope('file');
   await engine.executeTask('What was the internal test codename?', 'ask');
   assert.equal(requests.at(-1).length, 1);
