@@ -47,8 +47,8 @@ export class AgentAccessPolicy {
   }
 
   public getPrompt(): string {
-    if (this.scope === 'file') return `Access scope: File. Only ${this.filePath} is authorized. No repository search, other files, terminal, Git or delegation is permitted. Read that file through read_file. Network documentation still requires explicit approval.`;
-    if (this.scope === 'machine') return 'Access scope: Full Machine, at the current OS user privileges only. Workspace edit tools still use workspace-relative paths and reviewable diffs. For outside-workspace inspection use read_machine_file or list_machine_directory with an absolute path; each requires approval. No OS sandbox or administrator privileges are granted. Shell commands require the command permission policy; never use them to evade denied file or network access.';
-    return 'Access scope: Project workspace. Built-in file tools are restricted to the open workspace. Commands run as the current OS user and are not OS-sandboxed; command approval is separate. Internet documentation requires explicit approval.';
+    if (this.scope === 'file') return `STRICT ACCESS SCOPE: File-only mode.\nAuthorized file: ${this.filePath}\nYou may ONLY read and propose edits to this single file using read_file. All other operations are BLOCKED: no repository search, no other file access, no terminal commands, no Git operations, no delegation. Network documentation still requires explicit approval. Do not attempt to work around these restrictions.`;
+    if (this.scope === 'machine') return 'ACCESS SCOPE: Full Machine (current OS user privileges only).\nWorkspace edit tools still use workspace-relative paths with reviewable diffs. For outside-workspace inspection, use read_machine_file or list_machine_directory with absolute paths — each requires separate explicit approval. CONSTRAINTS: No administrator privileges are granted. No OS sandbox is active. Shell commands require the command permission policy. Never use shell commands to evade a denied file or network access request.';
+    return 'ACCESS SCOPE: Project workspace.\nBuilt-in file tools are restricted to the open workspace folder. Shell commands run as the current OS user and are NOT OS-sandboxed — command approval is a separate policy. Internet/documentation access requires explicit approval. Respect these boundaries in every tool call.';
   }
 }

@@ -62,7 +62,7 @@ export class TerminalManager {
           killer.stdout?.on('data', data => { output = (output + data.toString()).slice(-2000); });
           killer.stderr?.on('data', data => { output = (output + data.toString()).slice(-2000); });
           killer.on('error', error => { child.kill('SIGKILL'); reject(error); });
-          killer.on('close', code => code === 0 ? complete() : reject(new Error(`Owned process-tree termination exited with code ${code}: ${output.trim()}`)));
+          killer.on('close', code => (code === 0 || /There is no running instance of the task|not found/i.test(output)) ? complete() : reject(new Error(`Owned process-tree termination exited with code ${code}: ${output.trim()}`)));
         });
       } else {
         try {

@@ -49,7 +49,7 @@ export class TuxNestCompletionProvider implements vscode.InlineCompletionItemPro
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: 'You are a code autocomplete engine. Return only the exact code to insert at the cursor. Do not add markdown fences, explanations, or repeat existing text. Keep the completion concise.'
+        content: 'You are an intelligent code completion engine. RULES: (1) Return ONLY the exact code to insert at the cursor position — nothing else. (2) NO markdown fences, NO explanations, NO repeated existing text. (3) Infer intent from the surrounding context: variable types, function signatures, import patterns, and coding conventions. (4) Complete with idiomatic, production-quality code that handles edge cases. (5) Match the indentation and style of the surrounding code exactly. (6) Keep completions concise and focused — complete the current statement or block, not entire functions unless clearly needed.'
       },
       {
         role: 'user',

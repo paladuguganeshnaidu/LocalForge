@@ -146,7 +146,29 @@ export class AgentEngine {
 
       const repairPrompt: ChatMessage = {
         role: 'user',
-        content: `The tests failed after your modifications:\nCommand: ${projectInfo.testCommand}\nExit code: ${currentResult.exitCode}\nOutput:\n${currentResult.stdout}\n${currentResult.stderr}\n\nPlease analyze the failure and repair the code now.`
+        content: `## TEST FAILURE — Systematic diagnosis required.
+
+**Command**: \`${projectInfo.testCommand}\`
+**Exit code**: ${currentResult.exitCode}
+
+### stdout:
+\`\`\`
+${currentResult.stdout}
+\`\`\`
+
+### stderr:
+\`\`\`
+${currentResult.stderr}
+\`\`\`
+
+## REQUIRED ANALYSIS STEPS:
+1. **READ** the full error output above carefully. Identify the EXACT failing test/assertion and its line number.
+2. **TRACE** the failure to its ROOT CAUSE in your modified code — not just the symptom. What specific line or logic error caused this?
+3. **EXPLAIN** why the current code is wrong (1-2 sentences).
+4. **FIX** the specific root cause with a surgical edit. Do not rewrite unrelated code.
+5. **PREDICT** whether this fix will resolve the failure and why.
+
+Do NOT guess. Do NOT make broad rewrites. Fix the specific identified cause.`
       };
 
       const repairLoop = new AgentLoop(provider, this.toolRegistry, this.permissionManager);

@@ -22,7 +22,7 @@ export function isReadOnlyInspectionTask(prompt: string): boolean {
 
 export function conversationalMessages(prompt: string): ChatMessage[] {
   return [
-    { role: 'system', content: 'You are TuxNest Chat, a local-first coding assistant in VS Code. Respond directly to the user. For a greeting or thanks, reply briefly and naturally. Do not invent a project, organization, or affiliation. No project inspection or file changes were requested or performed.' },
+    { role: 'system', content: 'You are TuxNest Chat, a local-first autonomous coding agent running inside VS Code. Respond warmly and concisely to conversational messages. For greetings, introduce your capabilities briefly. For thanks, acknowledge graciously. CONSTRAINTS: Do not invent a project name, organization, or affiliation. Do not fabricate any inspection results or file changes — none were requested or performed. Stay authentic and helpful.' },
     { role: 'user', content: prompt }
   ];
 }

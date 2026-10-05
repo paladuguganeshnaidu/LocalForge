@@ -29,7 +29,18 @@ export function cleanModelCodeOutput(text: string): string {
 }
 
 export function formatExplainPrompt(code: string, languageId: string, relativePath: string): string {
-  return `Please explain the following ${languageId} code from ${relativePath}:\n\n\`\`\`${languageId}\n${code.slice(0, 20000)}\n\`\`\``;
+  return `Analyze the following ${languageId} code from \`${relativePath}\` with depth and precision:
+
+\`\`\`${languageId}
+${code.slice(0, 20000)}
+\`\`\`
+
+Provide a structured explanation covering:
+1. **Purpose**: What does this code accomplish? What problem does it solve?
+2. **How it works**: Step-by-step walkthrough of the logic flow. Explain non-obvious patterns.
+3. **Key constructs**: Explain any complex language features, design patterns, or idioms used.
+4. **Dependencies**: What does this code depend on? What depends on it?
+5. **Edge cases & potential issues**: Any error handling gaps, performance concerns, or subtle bugs?`;
 }
 
 export function formatFixPrompt(
@@ -45,7 +56,7 @@ export function formatFixPrompt(
   return [
     {
       role: 'system',
-      content: 'You are a careful coding assistant. Return only the complete replacement text for the supplied code to fix the issue. Do not use markdown fences, notes, or explanations.'
+      content: 'You are a precise code repair specialist. RULES: (1) Return ONLY the complete replacement text — no markdown fences, no explanations, no notes, no surrounding context. (2) Fix the SPECIFIC issue requested while preserving all unrelated logic, comments, formatting, and behavior. (3) Handle edge cases that the original code missed. (4) Maintain the exact coding style, indentation, and conventions of the original.'
     },
     {
       role: 'user',
@@ -509,8 +520,14 @@ async function proposeEdit(engine: TuxNestEngine, viewProvider: TuxNestViewProvi
 
   const controller = new AbortController();
   const messages: ChatMessage[] = [
-    { role: 'system', content: 'You are a careful coding assistant. Return only the complete replacement text for the supplied code. Do not use markdown fences or explanations.' },
-    { role: 'user', content: `File: ${vscode.workspace.asRelativePath(editor.document.uri)}\nLanguage: ${editor.document.languageId}\nChange requested: ${instruction}\n\nCode to replace:\n${original.slice(0, 30000)}` }
+    {
+      role: 'system',
+      content: 'You are a surgical code editor. RULES: (1) Return ONLY the complete replacement code — no markdown fences, no explanations, no commentary. (2) Apply the EXACT change requested while preserving all other logic, comments, formatting, and behavior. (3) Think through edge cases and error handling for the change. (4) Match the existing code style precisely — same indentation, naming conventions, and patterns.'
+    },
+    {
+      role: 'user',
+      content: `File: ${vscode.workspace.asRelativePath(editor.document.uri)}\nLanguage: ${editor.document.languageId}\nChange requested: ${instruction}\n\nCode to replace:\n${original.slice(0, 30000)}`
+    }
   ];
 
   let replacement = '';
