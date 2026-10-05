@@ -12,6 +12,8 @@ scratch/**
 artifacts/**
 coverage/**
 docs/**
+IMPLEMENTATION_VERIFICATION.md
+AGENT-TEST-*.md
 scripts/**
 *.log
 *.patch
@@ -20,5 +22,6 @@ scripts/**
 .DS_Store
 package-lock.json
 node_modules/**
+!node_modules/playwright-core/**
 dist/**
 !dist/extension.bundle.js

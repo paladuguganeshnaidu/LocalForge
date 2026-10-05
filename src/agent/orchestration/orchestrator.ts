@@ -15,11 +15,14 @@ import {
 } from './types';
 import { AgentError } from './errors';
 import { inferModelCapabilities } from '../../providers/modelCapabilities';
+import { getEditRequestPolicy } from '../../editing/editRequestPolicy';
 
 export interface OrchestratorOptions {
   mode?: ProductMode;
   signal?: AbortSignal;
   maxConcurrency?: number;
+  subagentTimeoutMs?: number;
+  subagentMaxRounds?: number;
   onLifecycleEvent?: (event: AgentLifecycleEvent) => void;
   onProgress?: (message: string) => void;
   onThought?: (chunk: string) => void;
@@ -95,7 +98,10 @@ export class MultiAgentOrchestrator {
         }
 
         // Execute available tasks respecting concurrency limits
-        const tasksToRun = readyTasks.slice(0, Math.max(1, 4 - this.pool.getActiveCount()));
+        const concurrency = Math.max(1, Math.min(16, options.maxConcurrency ?? 1));
+        const slots = Math.min(this.pool.getAvailableSlots(), Math.max(0, concurrency - this.pool.getActiveCount()));
+        if (!slots) { await new Promise(resolve => setTimeout(resolve, 50)); continue; }
+        const tasksToRun = readyTasks.slice(0, slots);
 
         await Promise.all(
           tasksToRun.map(async (taskNode) => {
@@ -116,20 +122,23 @@ export class MultiAgentOrchestrator {
               toolPermissions: ['read', 'edit', 'execute'],
               budget: {
                 maxTokens: 16000,
-                maxRounds: 6,
+                maxRounds: options.subagentMaxRounds ?? 24,
                 maxToolCalls: 4,
-                timeoutMs: 120000,
+                timeoutMs: options.subagentTimeoutMs ?? 0,
                 retryLimit: 2
               },
-              signal: options.signal
+              signal: options.signal,
+              editRequestPolicy: getEditRequestPolicy(userGoal)
             };
 
-            const result = await this.agentManager.executeSubagent(context, model, {
+            const execute = () => this.agentManager.executeSubagent(context, model, {
               onLifecycleEvent: options.onLifecycleEvent,
               onProgress: options.onProgress,
               onThought: options.onThought
             });
+            const result = this.editEngine ? await this.editEngine.withRequestPolicy(context.editRequestPolicy!, execute) : await execute();
 
+            for (const file of result.filesModified) if (!filesModified.includes(file)) filesModified.push(file);
             if (result.status === 'completed') {
               graph.markCompleted(taskNode.id, result);
               priorDecisions.push(`[${taskNode.role}] ${result.output.slice(0, 150)}`);

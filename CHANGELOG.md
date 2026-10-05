@@ -4,6 +4,23 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-05
+
+- Local release candidate requested by the user; publication requires confirmation. Original full-site/3D acceptance, 100 independent tools and 20B/40B model verification remain open.
+- Prioritize general execution/testing for non-web tasks, retain atomic benchmark evidence, and provide an input-driven release/install/publish workflow.
+- Require actual registered Node test counts when explicitly requested; verify replacement-file readback before clearing stale exact-patch failures. Respect exact requested output values instead of substituting row counts for sums.
+- Refuse website completion when the requested favicon is missing, not only when an existing SVG favicon is malformed.
+
+## [0.3.2] - 2026-10-04
+
+- Add persisted Low, Medium, High and Ultra effort selection beside the model, with responsive wrapping and safe busy-state acknowledgement. Effort controls real local generation and agent budgets; context remains bounded by configured and advertised model limits. Ultra allows uncapped rounds, not infinite single responses or guaranteed completion.
+- Preserve the packaged 0.3.0 checkpoint. Packaging refuses to overwrite an existing artifact and validates the exact runtime, browser payload, version and Marketplace identity.
+- Repair workspace-session command/edit approvals, host acknowledgement and permission settlement when activity storage fails. Protected operations still require their own approval; session grants are not an OS sandbox.
+- Add approved read-only specialist delegation and temporary fixed workflow registration. These are real executable integrations, not 100 independent tools or unrestricted generated extension code.
+- Offer portable directory creation and actual platform/shell guidance; clear failed directory preparation only with fresh exact directory evidence. Read runtime-advertised model context instead of relying only on model-name heuristics.
+- Report interrupted Ollama streams clearly, reject unfinished normal EOF, preserve cancellation/protocol diagnostics and never silently retry or switch models. Close forwarded sockets and remove disconnected SSH providers/models; stale setup/status results cannot resurrect an old connection or overwrite a replacement.
+- This is a tested development package, not 1.0.0 production certification. Full NexusFlow/3D, two successful clean full-site runs and the broader autonomous workflows remain separate acceptance requirements.
+
 - Fix directory argument aliases and refuse treating file paths or malformed directory requests as the workspace root; retry inspection errors in Ask as well as Agent mode and preserve readable findings with specific incomplete actions.
 - Reject ungrounded inspection answers, suppress their live rendering before evidence, and distinguish ordinary named JSON data from executable tool calls. Exclude credentials, outside-workspace editors, and escaping links from automatic indexing/context/reference attachment.
 - Check repository summaries against successfully read package identity and explicitly requested exact scripts; ask the model to correct missing evidence, and report unresolved answer requirements without claiming completion. Normalize plain section labels without changing fenced source code.

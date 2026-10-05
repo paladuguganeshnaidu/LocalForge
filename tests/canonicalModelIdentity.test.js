@@ -89,3 +89,12 @@ test('UI selecting a model executes exactly that model by canonical ModelRef.id'
   assert.equal(res.model.id, 'remote-ssh:qwen2.5-coder%3A32b');
   assert.match(res.reason, /User selected/);
 });
+
+test('a disappeared explicit model never silently routes to a different available provider', () => {
+  const router = new ModelRouter(() => [{ id: 'remote:shared', name: 'shared', providerId: 'remote' }]);
+  const unavailable = router.route('chat', 'local:shared');
+  assert.equal(unavailable.modelId, 'local:shared');
+  assert.equal(unavailable.model, undefined);
+  assert.match(unavailable.reason, /unavailable/);
+  assert.equal(router.route('chat', 'auto').modelId, 'remote:shared');
+});

@@ -8,6 +8,23 @@ let baseUrl;
 let pullRequest;
 let deleteRequest;
 
+test('a gracefully closed stream after abort is cancellation, never successful completion', async () => {
+  const controller = new AbortController();
+  let delivered = '';
+  const fakeFetch = async () => new Response(new ReadableStream({
+    start(stream) {
+      stream.enqueue(new TextEncoder().encode(JSON.stringify({ message: { content: 'FIRST_TOKEN' } }) + '\n'));
+      controller.signal.addEventListener('abort', () => stream.close(), { once: true });
+    }
+  }), { headers: { 'Content-Type': 'application/x-ndjson' } });
+  const provider = new OllamaProvider('http://127.0.0.1:11434', 'fixture', undefined, fakeFetch);
+  try {
+    await assert.rejects(provider.streamChat('fixture', [{ role: 'user', content: 'Controlled cancellation' }], token => { delivered += token; controller.abort(); }, controller.signal), /abort/i);
+    assert.equal(delivered, 'FIRST_TOKEN');
+  } finally { provider.dispose(); }
+});
+
+
 before(async () => {
   server = http.createServer((request, response) => {
     if (request.url === '/api/version') {
@@ -72,6 +89,7 @@ before(async () => {
         }
         response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
         if (input.tools?.length) {
+          response.write(JSON.stringify({ message: { thinking: 'PRIVATE_FIXTURE_REASONING' } }) + '\n');
           response.write(JSON.stringify({ message: { content: 'Inspecting ' } }) + '\n');
           response.end(JSON.stringify({ message: { tool_calls: [{ function: { name: 'search_workspace', arguments: { query: 'parser' } } }] }, done: true }) + '\n');
           return;
@@ -200,4 +218,18 @@ test('streams Ollama native tool calls and visible assistant text', async () => 
   assert.equal(message.content, 'Inspecting ');
   assert.equal(message.tool_calls[0].function.name, 'search_workspace');
   assert.deepEqual(message.tool_calls[0].function.arguments, { query: 'parser' });
+});
+
+test('Ollama native generation reports actual stream progress without exposing private reasoning', async () => {
+  const provider = new OllamaProvider(baseUrl);
+  const updates = [];
+  let visible = '';
+  const message = await provider.chatWithTools('qwen:progress', [{ role: 'user', content: 'Inspect workspace' }], [{ type: 'function', function: { name: 'search_workspace', description: 'Search', parameters: { type: 'object' } } }], undefined, delta => { visible += delta; }, update => { updates.push(update); });
+  assert.deepEqual(updates.map(update => update.phase), ['thinking', 'responding', 'preparing_tool']);
+  assert.deepEqual(updates.map(update => update.receivedChunks), [1, 2, 3]);
+  assert.equal(updates.at(-1).contentCharacters, visible.length);
+  assert.equal(updates.at(-1).toolCalls, 1);
+  assert.equal(message.tool_calls[0].function.name, 'search_workspace');
+  assert.doesNotMatch(visible + JSON.stringify(updates), /PRIVATE_FIXTURE_REASONING/);
+  provider.dispose();
 });

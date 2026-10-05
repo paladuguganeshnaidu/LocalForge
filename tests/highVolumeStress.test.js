@@ -222,7 +222,7 @@ test('High-Volume Stress: 100 permission safety and shell operator tests', () =>
     } else {
       const safeCommand = `npm test -- --grep test_${i}`;
       assert.doesNotThrow(() => pm.validateCommandSafety(safeCommand));
-      assert.equal(pm.isSafeCommand(safeCommand), true);
+      assert.equal(pm.isSafeCommand(safeCommand), false);
     }
   }
 });

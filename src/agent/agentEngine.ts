@@ -5,7 +5,9 @@ import { ToolRegistry } from './toolRegistry';
 import { PermissionManager } from './permissionManager';
 import { ValidationEngine, ValidationAttempt } from './validationEngine';
 import { EditEngine } from '../editing/editEngine';
+import { getEditRequestPolicy } from '../editing/editRequestPolicy';
 import { TerminalManager } from '../terminal/terminalManager';
+import { validateCodingCompletion } from './completionEvidence';
 
 export interface AgentRunSummary {
   runId: string;
@@ -38,6 +40,18 @@ export class AgentEngine {
     options: AgentLoopOptions = {},
     workspaceRoot?: vscode.Uri
   ): Promise<AgentRunSummary> {
+    const policy = options.editRequestPolicy ?? getEditRequestPolicy(messages.at(-1)?.content ?? '');
+    const run = () => this.runTaskWithPolicy(provider, model, messages, { ...options, editRequestPolicy: policy }, workspaceRoot);
+    return this.editEngine ? this.editEngine.withRequestPolicy(policy, run) : run();
+  }
+
+  private async runTaskWithPolicy(
+    provider: ModelProvider,
+    model: string,
+    messages: ChatMessage[],
+    options: AgentLoopOptions,
+    workspaceRoot?: vscode.Uri
+  ): Promise<AgentRunSummary> {
     const loop = new AgentLoop(provider, this.toolRegistry, this.permissionManager);
     const startTime = Date.now();
     const validationAttempts: ValidationAttempt[] = [];
@@ -46,6 +60,7 @@ export class AgentEngine {
     // Run the main agent loop
     const { response, state } = await loop.run(model, messages, {
       ...options,
+      validateFinalResponse: (answer, currentState) => options.validateFinalResponse?.(answer, currentState) || validateCodingCompletion(options.taskPrompt ?? messages.at(-1)?.content ?? '', currentState),
       onToolEnd: (name, result, error, id) => {
         if (['write_workspace_file', 'edit_workspace_file', 'write_file', 'create_file', 'replace_range', 'delete_file', 'move_file'].includes(name) && !error) {
           const res = result as { path?: string; from?: string; to?: string; applied?: boolean; success?: boolean; proposed?: boolean };

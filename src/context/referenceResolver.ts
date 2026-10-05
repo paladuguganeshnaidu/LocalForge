@@ -111,10 +111,10 @@ export class ContextReferenceResolver {
     }
 
     // 5. @file:path or @path/to/file
-    const fileRefPattern = /@(?:file:)?([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)\b/g;
+    const fileRefPattern = /@file:("(?:[^"\\]|\\.)*")|@(?:file:)?([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)\b/g;
     let fileMatch: RegExpExecArray | null;
     while ((fileMatch = fileRefPattern.exec(cleaned)) !== null) {
-      const filePath = fileMatch[1];
+      const filePath: string = fileMatch[1] ? JSON.parse(fileMatch[1]) : fileMatch[2];
       if (workspaceRoot) {
         try {
           const uri = vscode.Uri.joinPath(workspaceRoot, ...validateWorkspaceRelativePath(filePath));

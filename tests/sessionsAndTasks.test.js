@@ -36,7 +36,7 @@ test('SessionManager manages workspace sessions in memento storage', async () =>
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].messages.length, 1);
 
-  const newSess = sm.createNewSession('Refactor session', 'plan');
+  const newSess = await sm.createNewSession('Refactor session', 'plan');
   assert.equal(sm.getSessions().length, 2);
   assert.equal(sm.getActiveSession().id, newSess.id);
 

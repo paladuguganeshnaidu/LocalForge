@@ -2,7 +2,7 @@
   "name": "localforge-vscode",
   "displayName": "LOMVREN",
   "description": "Use local Ollama and SSH-tunneled Ollama models for AI-assisted coding in VS Code.",
-  "version": "0.2.24",
+  "version": "1.0.0",
   "publisher": "paladuguganeshnaidu",
   "icon": "media/lomvren-icon.png",
   "repository": {
@@ -20,6 +20,13 @@
   "categories": [
     "Machine Learning",
     "Other"
+  ],
+  "keywords": [
+    "ollama",
+    "local ai",
+    "coding agent",
+    "remote gpu",
+    "ssh"
   ],
   "activationEvents": [
     "onView:localforge.chatView",
@@ -49,7 +56,7 @@
       "secondarySidebar": [
         {
           "id": "localforge-secondary",
-          "title": "LOMVREN",
+          "title": "lomvren",
           "icon": "media/localforge.svg"
         }
       ]
@@ -180,39 +187,128 @@
     "configuration": {
       "title": "LOMVREN",
       "properties": {
+        "localforge.chatMemory.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Retrieve relevant older user/assistant messages locally using lexical BM25 ranking. Raw tool results are excluded."
+        },
+        "localforge.chatMemory.scope": {
+          "type": "string",
+          "enum": [
+            "current",
+            "all"
+          ],
+          "default": "current",
+          "scope": "resource",
+          "description": "Current chat is private by default. All explicitly allows retrieval from other chats in this workspace. Retrieved evidence may be sent to the selected model endpoint."
+        },
+        "localforge.chatMemory.recentCharacters": {
+          "type": "integer",
+          "default": 6000,
+          "minimum": 0,
+          "maximum": 32000,
+          "scope": "resource",
+          "description": "Character budget for up to ten recent user/assistant messages, separate from older-chat retrieval."
+        },
+        "localforge.chatMemory.retrievedCharacters": {
+          "type": "integer",
+          "default": 3000,
+          "minimum": 0,
+          "maximum": 16000,
+          "scope": "resource",
+          "description": "Maximum older-chat excerpt characters. Model input budget can reduce this further."
+        },
+        "localforge.chatMemory.resultCount": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "resource",
+          "description": "Maximum retrieved older-chat messages. Use /search chat <query> and /context to inspect sources."
+        },
         "localforge.agent.maxRounds": {
-          "type": "integer", "default": 80, "minimum": 0, "maximum": 10000,
+          "type": "integer",
+          "default": 80,
+          "minimum": 0,
+          "maximum": 10000,
           "description": "Maximum model/tool rounds per task. 0 continues until completion or cancellation, with repeated-action protection. Local model context and memory are still finite."
         },
         "localforge.agent.contextTokens": {
-          "type": "integer", "default": 4000, "minimum": 500, "maximum": 100000,
+          "type": "integer",
+          "default": 4000,
+          "minimum": 500,
+          "maximum": 100000,
           "description": "Estimated token budget for automatically retrieved project context. Increase only when your model and hardware support it."
         },
         "localforge.agent.historyCharacters": {
-          "type": "integer", "default": 48000, "minimum": 16000, "maximum": 1000000,
+          "type": "integer",
+          "default": 48000,
+          "minimum": 16000,
+          "maximum": 1000000,
           "description": "Conversation character budget before old tool results are compacted. This is not an exact model token or context-window measurement."
         },
+        "localforge.context.maxIndexedFiles": {
+          "type": "integer",
+          "default": 2000,
+          "minimum": 1,
+          "maximum": 20000,
+          "scope": "resource",
+          "description": "Maximum eligible text files retained in the local workspace index. The index status reports partial coverage when a file, character, or discovery limit is reached."
+        },
+        "localforge.context.maxFileBytes": {
+          "type": "integer",
+          "default": 262144,
+          "minimum": 1024,
+          "maximum": 8388608,
+          "scope": "resource",
+          "description": "Maximum bytes per indexed text file. Binary/generated/ignored/sensitive files remain excluded."
+        },
+        "localforge.context.maxIndexCharacters": {
+          "type": "integer",
+          "default": 8000000,
+          "minimum": 100000,
+          "maximum": 64000000,
+          "scope": "resource",
+          "description": "Total retained source-text character limit for local workspace retrieval. Higher limits use more memory; chunk strings and metadata also consume memory."
+        },
         "localforge.ollama.contextWindow": {
-          "type": "integer", "default": 8192, "minimum": 2048, "maximum": 1048576,
+          "type": "integer",
+          "default": 8192,
+          "minimum": 2048,
+          "maximum": 1048576,
           "description": "Ollama num_ctx for local chat. Larger context needs more RAM/VRAM and must be supported by the selected model."
         },
         "localforge.ollama.maxOutputTokens": {
-          "type": "integer", "default": -1, "minimum": -1, "maximum": 1048576,
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "maximum": 1048576,
           "description": "Ollama num_predict. -1 leaves generation uncapped by this extension; finite model context and hardware still apply. Cancel stops generation."
         },
         "localforge.ollama.baseUrl": {
           "type": "string",
+          "scope": "machine",
           "default": "http://127.0.0.1:11434",
           "description": "Base URL for the local Ollama server."
         },
         "localforge.ollama.temperature": {
-          "type": "number", "default": 0.1, "minimum": 0, "maximum": 2,
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 2,
           "description": "Local generation sampling temperature. A low value makes coding/tool use less variable; model accuracy is not guaranteed."
+        },
+        "localforge.ollama.agentThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Request internal reasoning from thinking-capable models. Off requests non-thinking mode only when the runtime advertises that control; thinking-only models may still reason. For faster CPU tool execution, select a non-thinking Instruct model. Reasoning is not displayed as chat."
         },
         "localforge.providers.openAICompatibleUrls": {
           "type": "string",
+          "scope": "machine",
           "default": "http://127.0.0.1:1234/v1,http://127.0.0.1:8080/v1,http://127.0.0.1:8000/v1",
-          "description": "Comma-separated local OpenAI-compatible model API base URLs (for example LM Studio, llama.cpp, or vLLM)."
+          "description": "Comma- or newline-separated HTTP(S) API base URLs. Each endpoint has independent discovery/routing. No credentials, query parameters or fragments. Remote endpoints receive selected model prompts/context. Applies after an active task finishes."
         },
         "localforge.autocomplete.enabled": {
           "type": "boolean",
@@ -245,16 +341,27 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run compile && npm run bundle",
-    "bundle": "esbuild dist/extension.js --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.bundle.js",
+    "bundle": "esbuild dist/extension.js --bundle --platform=node --format=cjs --target=node20 --external:vscode --external:cpu-features --external:playwright-core --external:*.node --outfile=dist/extension.bundle.js",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test tests/*.test.js",
     "test:extension-host": "npm run build && node tests/runExtensionHostTests.js",
     "test:recovery-restart": "npm run build && node tests/runRecoveryRestartTests.js",
+    "test:chat-restart": "npm run build && node tests/runChatRestartTests.js",
     "test:ollama-smoke": "node scripts/smoke-ollama.cjs",
     "test:ollama-agent": "npm run compile && node scripts/smoke-ollama-agent.cjs",
     "test:ollama-summary": "npm run compile && node scripts/smoke-project-summary.cjs",
-    "package": "npm run build && vsce package && node scripts/verify-marketplace-package.cjs"
+    "test:ollama-greeting": "npm run build && node tests/runChatRestartTests.js --live-greeting",
+    "test:chat-memory": "npm run build && node tests/runChatRestartTests.js --chat-memory",
+    "test:ollama-memory": "npm run build && node tests/runChatRestartTests.js --live-memory",
+    "package": "node scripts/package-extension.cjs",
+    "release": "node scripts/release.cjs"
+  },
+  "dependencies": {
+    "ignore": "7.0.10",
+    "minimatch": "10.2.6",
+    "playwright-core": "1.63.0",
+    "undici": "7.30.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

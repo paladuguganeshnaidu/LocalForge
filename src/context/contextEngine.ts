@@ -10,6 +10,7 @@ export interface ContextItem {
   path?: string;
   content: string;
   tokenEstimate: number;
+  chunk?: { id: string; fileHash: string; startLine: number; endLine: number; mtime?: number };
 }
 
 export interface AssembledContext {
@@ -18,6 +19,7 @@ export interface AssembledContext {
   totalTokens: number;
   maxTokens: number;
   summary: string;
+  workspaceSummary?: string;
 }
 
 export interface ContextEngineOptions {
@@ -130,29 +132,30 @@ export class ContextEngine {
 
     // 4. Workspace Retrieval
     if (options.includeWorkspace && budget.getRemainingTokens() > 500 && vscode.workspace.isTrusted) {
-      if (this.indexer.getDocuments().length === 0) {
-        void this.indexer.indexWorkspace();
-      }
+      await this.indexer.ensureReady();
 
       const docs = this.indexer.getDocuments();
       if (docs.length > 0) {
         const remainingTokens = budget.getRemainingTokens();
         const matches = await this.retrieval.retrieve(query, docs, {
           maxFiles: 5,
+          maxExcerptCharacters: 2400,
           maxChars: remainingTokens * 4,
           activeFileUri: editor?.document.uri.toString()
         });
 
         for (const match of matches) {
+          if (!await this.indexer.isCurrent(match)) continue;
           if (budget.getRemainingTokens() < 100) break;
           const snippetText = `${match.path}:${match.startLine}\n\`\`\`\n${match.text}\n\`\`\``;
           const alloc = budget.allocate('workspace_retrieval', snippetText, 800);
           items.push({
             source: 'retrieval',
-            label: `${match.path}:${match.startLine}`,
+            label: `${match.path}:${match.startLine}–${match.endLine}`,
             path: match.path,
             content: alloc.text,
-            tokenEstimate: alloc.tokensUsed
+            tokenEstimate: alloc.tokensUsed,
+            chunk: { id: match.chunkId, fileHash: match.fileHash, startLine: match.startLine, endLine: match.endLine, mtime: match.mtime }
           });
         }
       }
@@ -160,6 +163,7 @@ export class ContextEngine {
 
     // Build Formatted Prompt Text & Preview
     const promptSections: string[] = [];
+    let workspaceSummary: string | undefined;
 
     // Root Workspace grounding
     if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
@@ -175,6 +179,7 @@ export class ContextEngine {
         }
       } catch {}
       promptSections.push(projectSummary);
+      workspaceSummary = projectSummary;
     }
 
     const activeFileItem = items.find((i) => i.source === 'active_file' || i.source === 'selection');
@@ -206,7 +211,8 @@ export class ContextEngine {
       items,
       totalTokens,
       maxTokens,
-      summary
+      summary,
+      workspaceSummary
     };
   }
 }

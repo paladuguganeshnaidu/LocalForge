@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ModelProvider, ChatMessage } from '../../providers/modelProvider';
 import { ToolRegistry } from '../toolRegistry';
 import { PermissionManager } from '../permissionManager';
-import { AgentLoop } from '../agentLoop';
+import { AgentLoop, AgentState } from '../agentLoop';
 import { AgentRegistry } from './agentRegistry';
 import { AgentPool } from './agentPool';
 import {
@@ -15,6 +15,9 @@ import {
 import { AgentError } from './errors';
 
 export interface AgentManagerOptions {
+  requireToolUse?: boolean;
+  excludedTools?: readonly string[];
+  onToolEnd?: (name: string, result: unknown, error?: string) => void;
   onLifecycleEvent?: (event: AgentLifecycleEvent) => void;
   onProgress?: (message: string) => void;
   onThought?: (chunk: string) => void;
@@ -56,21 +59,14 @@ export class AgentManager {
     emitEvent('INITIALIZING', `Starting subagent role: ${roleDef.displayName}`);
 
     const controller = this.pool.acquire(context.agentId, context.role, context.task, context.signal);
+    const filesModified: string[] = [];
 
     try {
       emitEvent('CONTEXT_BUILDING', 'Assembling scoped subagent context');
 
       // Create a scoped tool registry filtered by allowed tool categories for this role
-      const scopedRegistry = new ToolRegistry();
-      for (const cat of roleDef.allowedToolCategories) {
-        const toolDefs = this.toolRegistry.getDefinitions(cat);
-        for (const def of toolDefs) {
-          const registered = this.toolRegistry.getTool(def.function.name);
-          if (registered) {
-            scopedRegistry.registerTool(def, registered.handler, cat, registered.source);
-          }
-        }
-      }
+      const scopedRegistry = this.toolRegistry.createScopedRegistry(roleDef.allowedToolCategories.filter(category => context.toolPermissions.includes(category)));
+      for (const name of options.excludedTools ?? []) scopedRegistry.unregisterTool(name);
 
       // Build targeted prompt with instruction/data separation
       let contextBlocks = '';
@@ -100,30 +96,38 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
 
       emitEvent('EXECUTING', `Executing subagent with model ${model}`);
 
-      const filesModified: string[] = [];
       const loop = new AgentLoop(this.provider, scopedRegistry, this.permissionManager);
 
       const loopResult = await loop.run(model, messages, {
         signal: controller.signal,
+        requireToolUse: options.requireToolUse,
+        editRequestPolicy: context.editRequestPolicy,
         mode: context.role === 'planner' ? 'plan' : 'agent',
         maxRounds: context.budget.maxRounds,
         maxCallsPerRound: context.budget.maxToolCalls,
         timeoutMs: context.budget.timeoutMs,
+        maxToolDefinitions: model.startsWith('ollama:') || model.startsWith('ssh-ollama-') || this.provider.id === 'ollama' ? 16 : undefined,
+        maxHistoryCharacters: Math.max(4000, Math.min(context.budget.maxTokens, context.modelCapabilities.contextWindow) * 3),
         onProgress: options.onProgress,
+        onToolStart: name => options.onProgress?.(`Reading with ${name}`),
         onThought: options.onThought,
         onToolEnd: (name, result, error) => {
-          if ((name === 'write_workspace_file' || name === 'edit_workspace_file') && !error) {
-            const res = result as { path?: string };
-            if (res?.path && !filesModified.includes(res.path)) {
-              filesModified.push(res.path);
-            }
+          options.onToolEnd?.(name, result, error);
+          if (['write_workspace_file', 'edit_workspace_file', 'write_file', 'create_file', 'replace_range', 'delete_file', 'move_file'].includes(name) && !error) {
+            const res = result as { path?: string; from?: string; to?: string; applied?: boolean; proposed?: boolean };
+            if (res?.applied && !res.proposed) for (const path of [res.path, res.from, res.to]) if (path && !filesModified.includes(path)) filesModified.push(path);
           }
         }
       });
 
+      if (loopResult.state.status !== 'completed') {
+        const error = loopResult.state.unresolvedErrors.join('\n') || 'The subagent did not complete its task.';
+        emitEvent('FAILED', error);
+        return { runId, agentId: context.agentId, role: context.role, taskId: context.task, status: 'failed', output: loopResult.response, filesModified, durationMs: Date.now() - startTime, error };
+      }
       emitEvent('COMPLETED', 'Subagent task execution completed successfully');
 
-      const handoff = this.extractHandoff(context.role, context.task, loopResult.response, filesModified);
+      const handoff = this.extractHandoff(context.role, context.task, loopResult.response, filesModified, loopResult.state);
 
       return {
         runId,
@@ -148,7 +152,7 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
         taskId: context.task,
         status: isCancelled ? 'cancelled' : 'failed',
         output: '',
-        filesModified: [],
+        filesModified,
         durationMs: Date.now() - startTime,
         error: err.message || String(err)
       };
@@ -161,7 +165,8 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
     role: AgentRole,
     taskId: string,
     output: string,
-    filesModified: string[]
+    filesModified: string[],
+    state: AgentState
   ): AgentHandoff | undefined {
     if (role === 'planner') {
       return {
@@ -195,14 +200,19 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
     }
 
     if (role === 'test_engineer') {
-      const passed = !output.toLowerCase().includes('fail') && !output.toLowerCase().includes('error');
+      const executions = state.steps.flatMap(step => step.toolCalls).filter(call => {
+        const result = call.result as Record<string, unknown> | undefined;
+        return !result?.duplicateSuppressed && (call.name === 'run_test' || call.name === 'run_command' && /\b(?:test|unittest|pytest|vitest|jest|cargo\s+test|go\s+test)\b/i.test(String(call.args.command || result?.command || ''))) && typeof result?.exitCode === 'number';
+      });
+      const failedCount = executions.filter(call => call.status !== 'success' || (call.result as Record<string, unknown>).exitCode !== 0).length;
+      const passed = executions.length > 0 && failedCount === 0;
       return {
         type: 'tester',
         data: {
           taskId,
-          testsRun: 1,
+          testsRun: executions.length,
           passed,
-          failedCount: passed ? 0 : 1,
+          failedCount,
           failures: [],
           summary: output.slice(0, 300)
         }
@@ -210,16 +220,13 @@ IMPORTANT SECURITY & POLICY DIRECTIVES:
     }
 
     if (role === 'reviewer' || role === 'security_reviewer') {
-      const clean = !output.toLowerCase().includes('critical') && !output.toLowerCase().includes('vulnerability');
       return {
-        type: 'reviewer',
+        type: 'generic',
         data: {
           taskId,
-          findings: [],
-          severity: clean ? 'clean' : 'warnings',
           affectedFiles: filesModified,
-          requiredChanges: [],
-          approved: clean,
+          verifiedApproval: false,
+          modelReported: true,
           summary: output.slice(0, 300)
         }
       };

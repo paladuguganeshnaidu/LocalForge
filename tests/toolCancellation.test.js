@@ -35,6 +35,20 @@ function provider() {
   };
 }
 
+test('completion classification uses the original task rather than access policy and retrieved context', async () => {
+  const task = 'Create a file named package.json containing the supplied JSON. Do not modify any other files. If the file exists, stop and tell me. Confirm the saved file without claiming that an application was built.';
+  const wrapped = `Access scope: Project workspace.\n\nTask:\n${task}\n\nworkspace_summary: Existing application metadata, build project and browser verification.`;
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'create_file', description: 'Create file', parameters: {} } }, async () => ({ applied: true, path: 'package.json' }));
+  let calls = 0;
+  const model = { id: 'fixture', chatWithTools: async () => ++calls === 1 ? { role: 'assistant', content: '', tool_calls: [{ function: { name: 'create_file', arguments: { path: 'package.json', json: { name: 'fixture' } } } }] } : { role: 'assistant', content: 'Created package.json. No other files changed.' } };
+  const result = await new AgentEngine(registry, new PermissionManager('always_ask', async () => true)).runTask(model, 'fixture', [{ role: 'user', content: wrapped }], { taskPrompt: task, maxRounds: 4 });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.task, task);
+  assert.equal(calls, 2);
+  assert.deepEqual(result.filesModified, ['package.json']);
+});
+
 test('cancelling an approval wait prevents late approval from executing the tool', async () => {
   const approval = deferred();
   const requested = deferred();
@@ -190,11 +204,14 @@ test('cancellation during project detection prevents validation from starting', 
 test('exhausted validation repairs are reported as failed instead of completed', async () => {
   const registry = new ToolRegistry();
   registry.registerTool(definition, async () => ({ success: true, applied: true, path: 'safe.txt' }), 'edit');
-  const engine = new AgentEngine(registry, new PermissionManager('allow_safe_auto'));
+  registry.registerTool({ type: 'function', function: { name: 'run_command', description: 'Run project validation', parameters: {} } }, async () => { throw new Error('Validation uses the controlled validation runner'); });
+  let approvals = 0;
+  const engine = new AgentEngine(registry, new PermissionManager('allow_safe_auto', async (request) => { assert.equal(request.command, 'npm test'); approvals += 1; return true; }));
   engine.validationEngine.detectProject = async () => ({ testCommand: 'npm test' });
   engine.validationEngine.runValidation = async () => ({ command: 'npm test', passed: false, exitCode: 1, stdout: 'failing test', stderr: '', durationMs: 1 });
   const result = await engine.runTask(provider(), 'fixture', [{ role: 'user', content: 'Write a file' }], { mode: 'agent' }, { fsPath: process.cwd() });
   assert.equal(result.validationAttempts.length, 4);
+  assert.equal(approvals, 4);
   assert.equal(result.status, 'failed');
   assert.match(result.response, /Verification failed/);
   assert.ok(result.errors.some((error) => error.includes('Verification failed')));
@@ -202,6 +219,7 @@ test('exhausted validation repairs are reported as failed instead of completed',
 
 test('a replaced task finishing cannot clear the newer task cancellation controller', async () => {
   const engine = Object.create(LocalForgeEngine.prototype);
+  engine.sessionManager = { initialize: async () => {} };
   const first = deferred();
   const second = deferred();
   const signals = [];
@@ -210,7 +228,9 @@ test('a replaced task finishing cannot clear the newer task cancellation control
     return signals.length === 1 ? first.promise : second.promise;
   };
   const previous = engine.executeTask('first', 'agent');
+  await new Promise((resolve) => setImmediate(resolve));
   const current = engine.executeTask('second', 'agent');
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(signals[0].aborted, true);
   first.resolve({ status: 'cancelled' });
   await previous;
@@ -222,8 +242,29 @@ test('a replaced task finishing cannot clear the newer task cancellation control
   assert.equal(engine.isBusy(), false);
 });
 
+test('provider configuration deferred during approved-edit validation reconciles when it finishes', async () => {
+  const engine = Object.create(LocalForgeEngine.prototype);
+  engine.events = new (require('node:events').EventEmitter)();
+  const configurations = [];
+  let refreshes = 0;
+  engine.configuredProviders = { configure: (value) => configurations.push(value), getErrors: () => [] };
+  engine.modelRegistry = { refresh: async () => { refreshes += 1; } };
+  const pending = deferred();
+  engine.applyProposalRun = () => pending.promise;
+  const applying = engine.applyProposalAndValidate('fixture');
+  await engine.updateProviderConfiguration({ openAiEndpoints: 'http://127.0.0.1:8000/v1' });
+  assert.equal(engine.getProviderConfigurationStatus().pending, true);
+  assert.equal(configurations.length, 0);
+  pending.resolve({ success: true });
+  await applying;
+  assert.equal(engine.getProviderConfigurationStatus().pending, false);
+  assert.deepEqual(configurations, [{ openAiEndpoints: 'http://127.0.0.1:8000/v1' }]);
+  assert.equal(refreshes, 1);
+});
+
 test('early task failure releases busy state and review validation remains cancellable', async () => {
   const engine = Object.create(LocalForgeEngine.prototype);
+  engine.sessionManager = { initialize: async () => {} };
   engine.executeTaskRun = async () => { throw new Error('early setup failure'); };
   await assert.rejects(engine.executeTask('fail', 'agent'), /early setup failure/);
   assert.equal(engine.isBusy(), false);

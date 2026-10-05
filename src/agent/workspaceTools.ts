@@ -5,7 +5,9 @@ import { findRelevantSnippets } from '../context/workspaceContext';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { WorkspaceToolExecutor } from './toolAgent';
 import { EditEngine } from '../editing/editEngine';
+import { editToolResult } from '../editing/editToolResult';
 import { TerminalManager } from '../terminal/terminalManager';
+import { ToolRegistry } from './toolRegistry';
 
 const maximumReadBytes = 128 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -120,6 +122,13 @@ export interface WorkspaceToolContext {
   signal?: AbortSignal;
 }
 
+export function registerWorkspaceTools(registry: ToolRegistry, context: () => WorkspaceToolContext): void {
+  for (const definition of allWorkspaceTools) {
+    if (definition.function.name === 'list_directory' || definition.function.name === 'run_command') continue;
+    registry.registerTool(definition, (args, execution) => executeWorkspaceTool(definition.function.name, args, { ...context(), signal: execution.signal }));
+  }
+}
+
 export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, toolContext?: WorkspaceToolContext) => {
   toolContext?.signal?.throwIfAborted();
   if (!vscode.workspace.isTrusted) throw new Error('Workspace tools are disabled until this workspace is trusted.');
@@ -191,13 +200,10 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
         toolContext.signal
       );
 
-      if (toolContext.autoApply) {
+      if (toolContext.autoApply && !toolContext.editEngine.requiresReview) {
         toolContext.signal?.throwIfAborted();
         const applyRes = await toolContext.editEngine.applyProposal(proposal.id, undefined, toolContext.signal);
-        if (!applyRes.success) {
-          throw new Error(`Failed to apply proposal for ${relativePath}: ${applyRes.errors.map((e) => e.error).join(', ')}`);
-        }
-        return { success: true, path: relativePath, proposalId: proposal.id, applied: true, bytesWritten: content.length };
+        return editToolResult(applyRes, { path: relativePath, bytesWritten: applyRes.success ? Buffer.byteLength(content, 'utf8') : 0 });
       }
 
       return {
@@ -221,7 +227,7 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
   if (name === 'edit_workspace_file') {
     const relativePath = getString(args.path, 'path', 500);
     const uri = await resolveWorkspaceUri(relativePath);
-    const target = getString(args.target_content, 'target_content', 50000);
+    const target = getString(args.target_content, 'target_content', 50000, true);
     const replacement = typeof args.replacement_content === 'string' ? args.replacement_content : '';
     const bytes = await vscode.workspace.fs.readFile(uri);
     const existing = new TextDecoder().decode(bytes);
@@ -246,13 +252,10 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
         toolContext.signal
       );
 
-      if (toolContext.autoApply) {
+      if (toolContext.autoApply && !toolContext.editEngine.requiresReview) {
         toolContext.signal?.throwIfAborted();
         const applyRes = await toolContext.editEngine.applyProposal(proposal.id, undefined, toolContext.signal);
-        if (!applyRes.success) {
-          throw new Error(`Failed to apply proposal for ${relativePath}: ${applyRes.errors.map((e) => e.error).join(', ')}`);
-        }
-        return { success: true, path: relativePath, proposalId: proposal.id, applied: true, replacedChars: target.length, newChars: replacement.length };
+        return editToolResult(applyRes, { path: relativePath, replacedChars: target.length, newChars: replacement.length });
       }
 
       return {
@@ -306,7 +309,7 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
   throw new Error(`Tool “${name}” is not allow-listed.`);
 };
 
-function getString(value: unknown, name: string, maxLength: number): string {
+function getString(value: unknown, name: string, maxLength: number, preserveWhitespace = false): string {
   let resolved: string | undefined;
   if (typeof value === 'string') {
     resolved = value;
@@ -322,7 +325,7 @@ function getString(value: unknown, name: string, maxLength: number): string {
   if (!resolved || !resolved.trim() || resolved.length > maxLength) {
     throw new Error(`Tool argument “${name}” must be a non-empty string up to ${maxLength} characters.`);
   }
-  return resolved.trim();
+  return preserveWhitespace ? resolved : resolved.trim();
 }
 
 function getWorkspaceRootUri(): vscode.Uri {

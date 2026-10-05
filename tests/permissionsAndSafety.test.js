@@ -4,6 +4,41 @@ const { test } = require('node:test');
 const { PermissionManager } = require('../dist/agent/permissionManager.js');
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 
+test('explicit workspace-session approval covers changing ordinary commands and edits but not new registrations or protected actions', async () => {
+  let requests = 0;
+  const registry = new ToolRegistry();
+  const definition = name => ({ type: 'function', function: { name, description: 'Executable permission fixture', parameters: {} } });
+  for (const name of ['run_command', 'create_file', 'delete_file', 'read_web_page']) registry.registerTool(definition(name), async () => ({ success: true }));
+  const permissions = new PermissionManager('always_ask', async () => { requests += 1; return false; });
+  permissions.grantWorkspaceSession(registry.getAllTools().filter(tool => tool.source === 'builtin').map(tool => tool.authorizationId));
+  assert.equal(permissions.shouldAutoApplyEdits(), true);
+  await registry.executeTool('run_command', { command: 'node --test one.test.cjs' }, permissions);
+  await registry.executeTool('run_command', { command: 'node --test two.test.cjs' }, permissions);
+  await registry.executeTool('create_file', { path: 'new-file.cjs', content: 'module.exports = 1;' }, permissions);
+  assert.equal(requests, 0);
+  for (const command of ['git push', 'sudo node app.cjs', 'curl https://example.com', 'npm install', 'rm important.txt']) await assert.rejects(registry.executeTool('run_command', { command }, permissions), /rejected/);
+  await assert.rejects(registry.executeTool('delete_file', { path: 'important.txt' }, permissions), /rejected/);
+  await assert.rejects(registry.executeTool('read_web_page', { url: 'https://example.com' }, permissions), /rejected/);
+  registry.replaceTool(definition('run_command'), async () => ({ success: true }));
+  await assert.rejects(registry.executeTool('run_command', { command: 'node --test new.test.cjs' }, permissions), /rejected/);
+  permissions.clearSession();
+  assert.equal(permissions.shouldAutoApplyEdits(), false);
+  await assert.rejects(registry.executeTool('create_file', { path: 'another.cjs', content: 'module.exports = 2;' }, permissions), /rejected/);
+  assert.equal(requests, 9);
+});
+
+test('session grants cannot authorize Full Machine or survive a changed approval mode', () => {
+  const { AgentAccessPolicy } = require('../dist/agent/accessPolicy');
+  const policy = new AgentAccessPolicy();
+  const permissions = new PermissionManager();
+  permissions.setAccessPolicy(policy);
+  permissions.grantWorkspaceSession(['registration-1']);
+  permissions.setMode('always_ask');
+  assert.equal(permissions.hasWorkspaceSessionApproval(), false);
+  policy.setScope('machine');
+  assert.throws(() => permissions.grantWorkspaceSession(['registration-1']), /project workspace/);
+});
+
 test('destructive tool metadata requires explicit approval even in automatic modes', async () => {
   for (const mode of ['request_review', 'allow_safe_auto', 'always_proceed']) {
     let executions = 0;
@@ -55,18 +90,18 @@ test('PermissionManager blocks catastrophic shell commands', () => {
   assert.throws(() => pm.validateCommandSafety(':(){ :|:& };:'), /catastrophic/);
 });
 
-test('PermissionManager allows safe inspection and test commands in allow_safe_auto mode', async () => {
+test('PermissionManager allows file inspection but requires approval for repository-controlled test/build commands', async () => {
   const pm = new PermissionManager('allow_safe_auto');
-  assert.equal(pm.isSafeCommand('npm test'), true);
+  assert.equal(pm.isSafeCommand('npm test'), false);
   assert.equal(pm.isSafeCommand('git status'), true);
-  assert.equal(pm.isSafeCommand('cargo test'), true);
-  assert.equal(pm.isSafeCommand('npm run build'), true);
+  assert.equal(pm.isSafeCommand('cargo test'), false);
+  assert.equal(pm.isSafeCommand('npm run build'), false);
 
   const readAllowed = await pm.checkPermission('read_workspace_file', { path: 'src/index.ts' });
   assert.equal(readAllowed, true);
 
   const testCmdAllowed = await pm.checkPermission('run_command', { command: 'npm test' });
-  assert.equal(testCmdAllowed, true);
+  assert.equal(testCmdAllowed, false);
 });
 
 test('PermissionManager requests approval for execute tools when handler is set', async () => {

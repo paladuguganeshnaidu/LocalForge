@@ -1,23 +1,29 @@
 import { AgentMode } from '../agent/agentLoop';
+import { AgentEffort, isAgentEffort } from '../agent/effort';
 import { PermissionMode, isPermissionMode } from '../agent/permissionManager';
 import { AccessScope, isAccessScope } from '../agent/accessPolicy';
+import { normalizeEndpoint, parseCompatibleEndpoints } from '../providers/endpointConfiguration';
 
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
+  | { type: 'reindexWorkspace' }
   | { type: 'cancel' }
   | { type: 'clear' }
   | { type: 'connectRemote' }
   | { type: 'disconnectRemote' }
   | { type: 'configureRemote' }
   | { type: 'getRemoteStatus' }
+  | { type: 'openModels' }
+  | { type: 'getContextFiles' }
   | { type: 'selectModel'; model: string }
-  | { type: 'installModel'; model: string }
+  | { type: 'installModel'; model: string; targetId?: string }
   | { type: 'pauseModelInstall' }
   | { type: 'cancelModelInstall' }
   | { type: 'deleteModel'; modelId: string }
   | { type: 'setDefaultModel'; modelId: string }
   | { type: 'setMode'; mode: AgentMode }
+  | { type: 'setEffort'; effort: AgentEffort }
   | { type: 'setAccessScope'; scope: AccessScope }
   | {
       type: 'chat';
@@ -26,10 +32,12 @@ export type WebviewMessage =
       includeContext: boolean;
       includeWorkspace: boolean;
       agentMode: boolean;
+      files?: string[];
     }
   | { type: 'newSession' }
   | { type: 'loadSession'; sessionId: string }
   | { type: 'deleteSession'; sessionId: string }
+  | { type: 'renameSession'; sessionId: string }
   | { type: 'continueTask' }
   | { type: 'diagnose' }
   | { type: 'applyEdit'; proposalId: string; files?: string[] }
@@ -61,12 +69,15 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
   switch (msg.type) {
     case 'ready':
     case 'refresh':
+    case 'reindexWorkspace':
     case 'cancel':
     case 'clear':
     case 'connectRemote':
     case 'disconnectRemote':
     case 'configureRemote':
     case 'getRemoteStatus':
+    case 'openModels':
+    case 'getContextFiles':
     case 'pauseModelInstall':
     case 'cancelModelInstall':
     case 'newSession':
@@ -81,7 +92,8 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
       return typeof msg.model === 'string' &&
         msg.model.trim().length > 0 &&
         msg.model.length <= 128 &&
-        !/[\u0000-\u001f\u007f]/.test(msg.model);
+        !/[\u0000-\u001f\u007f]/.test(msg.model) &&
+        (msg.targetId === undefined || typeof msg.targetId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(msg.targetId));
 
     case 'deleteModel':
     case 'setDefaultModel':
@@ -92,6 +104,9 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
 
     case 'setMode':
       return msg.mode === 'ask' || msg.mode === 'plan' || msg.mode === 'agent';
+
+    case 'setEffort':
+      return typeof msg.effort === 'string' && isAgentEffort(msg.effort);
 
     case 'setAccessScope':
       return isAccessScope(msg.scope);
@@ -116,12 +131,14 @@ export function isWebviewMessage(value: unknown): value is WebviewMessage {
         typeof msg.model === 'string' &&
         typeof msg.includeContext === 'boolean' &&
         typeof msg.includeWorkspace === 'boolean' &&
-        typeof msg.agentMode === 'boolean'
+        typeof msg.agentMode === 'boolean' &&
+        (msg.files === undefined || Array.isArray(msg.files) && msg.files.length <= 10 && msg.files.every(file => typeof file === 'string' && isSafeRelativePath(file)))
       );
 
     case 'loadSession':
     case 'deleteSession':
-      return typeof msg.sessionId === 'string';
+    case 'renameSession':
+      return typeof msg.sessionId === 'string' && msg.sessionId.length > 0 && msg.sessionId.length <= 200;
 
     case 'applyEdit':
     case 'rejectEdit':
@@ -162,7 +179,14 @@ export const WEBVIEW_WRITABLE_SETTINGS: ReadonlySet<string> = new Set([
   'routing.completionModel',
   'agent.maxRounds',
   'ollama.contextWindow',
-  'ollama.maxOutputTokens'
+  'ollama.maxOutputTokens',
+  'chatMemory.enabled',
+  'chatMemory.scope',
+  'chatMemory.recentCharacters',
+  'chatMemory.retrievedCharacters',
+  'chatMemory.resultCount',
+  'context.maxIndexedFiles', 'context.maxFileBytes', 'context.maxIndexCharacters',
+  'ollama.baseUrl', 'providers.openAICompatibleUrls'
 ]);
 
 function isAllowedSettingsPayload(settings: unknown): boolean {
@@ -175,7 +199,17 @@ function isAllowedSettingsPayload(settings: unknown): boolean {
   }
   return entries.every(([key, value]) =>
     WEBVIEW_WRITABLE_SETTINGS.has(key) &&
-    (key === 'agent.maxRounds' ? Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 10000 :
+    (key === 'ollama.baseUrl' ? isEndpointValue(value) :
+      key === 'providers.openAICompatibleUrls' ? typeof value === 'string' && !parseCompatibleEndpoints(value).errors.length :
+      key === 'chatMemory.enabled' ? typeof value === 'boolean' :
+      key === 'chatMemory.scope' ? value === 'current' || value === 'all' :
+      key === 'chatMemory.recentCharacters' ? Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 32000 :
+      key === 'chatMemory.retrievedCharacters' ? Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 16000 :
+      key === 'chatMemory.resultCount' ? Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 20 :
+      key === 'context.maxIndexedFiles' ? Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 20000 :
+      key === 'context.maxFileBytes' ? Number.isInteger(value) && Number(value) >= 1024 && Number(value) <= 8388608 :
+      key === 'context.maxIndexCharacters' ? Number.isInteger(value) && Number(value) >= 100000 && Number(value) <= 64000000 :
+      key === 'agent.maxRounds' ? Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 10000 :
       key === 'ollama.contextWindow' ? Number.isInteger(value) && Number(value) >= 2048 && Number(value) <= 1048576 :
       key === 'ollama.maxOutputTokens' ? Number.isInteger(value) && Number(value) >= -1 && Number(value) <= 1048576 :
         typeof value === 'boolean' || (typeof value === 'string' && value.length <= 200))
@@ -188,6 +222,10 @@ export function isSafeRelativePath(input: string): boolean {
   if (!p || p.length > 1024 || p.includes('\0')) return false;
   if (p.startsWith('/') || p.startsWith('//') || /^[A-Za-z]:/.test(p)) return false;
   return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+
+function isEndpointValue(value: unknown): boolean {
+  try { return typeof value === 'string' && !!normalizeEndpoint(value); } catch { return false; }
 }
 
 function isFileSelection(files: unknown): boolean {

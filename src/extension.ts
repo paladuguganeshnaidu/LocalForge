@@ -61,26 +61,29 @@ export interface LocalForgeExtensionApi {
   viewProvider: LocalForgeViewProvider;
 }
 
-export function activate(context: vscode.ExtensionContext): LocalForgeExtensionApi {
+export async function activate(context: vscode.ExtensionContext): Promise<LocalForgeExtensionApi> {
   const ollamaUrl = vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434');
   const openAiUrls = vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '');
-  const firstOpenAi = openAiUrls ? openAiUrls.split(',')[0].trim() : undefined;
 
   const engine = new LocalForgeEngine(context, {
     ollamaEndpoint: ollamaUrl,
-    openAiEndpoint: firstOpenAi
+    openAiEndpoints: openAiUrls
   });
   engineInstance = engine;
+  await engine.initializeConversationHistory();
 
   const viewProvider = new LocalForgeViewProvider(engine.compositeProvider, context, engine);
   const modelCenterProvider = new ModelCenterViewProvider(engine.compositeProvider, async () => {
-    const models = await engine.modelRegistry.discoverAll();
-    const selectedModel = viewProvider.selectedModel;
-    if (selectedModel && selectedModel !== 'auto' && !models.some((model) => model.id === selectedModel || model.name === selectedModel)) {
-      viewProvider.setSelectedModel('auto');
-    }
+    await engine.modelRegistry.discoverAll();
     await viewProvider.refresh();
   });
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (!event.affectsConfiguration('localforge.ollama.baseUrl') && !event.affectsConfiguration('localforge.providers.openAICompatibleUrls')) return;
+    void engine.updateProviderConfiguration({
+      ollamaEndpoint: vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'),
+      openAiEndpoints: vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '')
+    }).then(() => viewProvider.refresh()).catch((error) => vscode.window.showErrorMessage(`Could not update providers: ${error instanceof Error ? error.message : 'Unknown provider error'}`));
+  }));
 
   const completionProvider = new LocalForgeCompletionProvider(
     engine.compositeProvider,
@@ -214,13 +217,13 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
     }),
 
     vscode.commands.registerCommand('localforge.newSession', async () => {
-      engine.sessionManager.createNewSession();
+      await viewProvider.startNewSession();
       await viewProvider.refresh();
       void vscode.window.showInformationMessage('Started new LOMVREN session.');
     }),
 
     vscode.commands.registerCommand('localforge.newConversation', async () => {
-      engine.sessionManager.createNewSession();
+      await viewProvider.startNewSession();
       await viewProvider.refresh();
       void vscode.window.showInformationMessage('Started new LOMVREN conversation.');
     }),
@@ -313,17 +316,18 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
         if (pick) modelId = pick.id;
       }
       if (modelId) {
-        viewProvider.setSelectedModel(modelId);
+        await viewProvider.setSelectedModel(modelId);
         void vscode.window.showInformationMessage(`Selected model: ${modelId}`);
       }
     }),
 
     vscode.commands.registerCommand('localforge.reindexWorkspace', async () => {
+      if (engine.accessPolicy.getState().scope === 'file') throw new Error('Workspace reindex is unavailable with File access.');
       if (engine.indexer) {
         await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: 'Re-indexing workspace context...' },
-          async () => {
-            const count = await engine.indexer!.indexWorkspace();
+          { location: vscode.ProgressLocation.Notification, title: 'Re-indexing workspace context...', cancellable: true },
+          async (_progress, token) => {
+            const count = await engine.indexer!.indexWorkspace(token);
             void vscode.window.showInformationMessage(`Indexed ${count} workspace files for LOMVREN.`);
           }
         );
@@ -339,8 +343,10 @@ export function activate(context: vscode.ExtensionContext): LocalForgeExtensionA
 
 export async function deactivate(): Promise<void> {
   if (engineInstance) {
-    void engineInstance.remoteManager.disconnect();
     engineInstance.cancelCurrentTask();
+    engineInstance.indexer?.dispose();
+    await Promise.allSettled([engineInstance.remoteManager.disconnect(), engineInstance.browserTool.dispose()]);
+    await engineInstance.terminalManager.stopAllProcesses();
     await engineInstance.flushActivityHistory();
   }
 }

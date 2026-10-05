@@ -34,7 +34,7 @@ export class ValidationEngine {
     const files = await this.listRootFiles(workspaceRoot);
 
     if (files.has('package.json')) {
-      let testCmd = 'npm test';
+      let testCmd = '';
       let buildCmd: string | undefined;
       let lintCmd: string | undefined;
       try {
@@ -54,8 +54,15 @@ export class ValidationEngine {
       return { type: 'rust', testCommand: 'cargo test', buildCommand: 'cargo build', lintCommand: 'cargo clippy' };
     }
 
-    if (files.has('pyproject.toml') || files.has('pytest.ini') || files.has('requirements.txt') || files.has('setup.py')) {
-      return { type: 'python', testCommand: 'pytest', lintCommand: 'flake8' };
+    if (files.has('pyproject.toml') || files.has('pytest.ini') || files.has('requirements.txt') || files.has('setup.py') || [...files].some(name => name.endsWith('.py'))) {
+      let pytestConfigured = files.has('pytest.ini');
+      for (const name of ['pyproject.toml', 'requirements.txt']) if (files.has(name)) {
+        try {
+          const content = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(workspaceRoot, name));
+          if (content.byteLength <= 256 * 1024 && /\bpytest\b/.test(new TextDecoder().decode(content))) pytestConfigured = true;
+        } catch {}
+      }
+      return { type: 'python', testCommand: pytestConfigured ? 'python -m pytest' : files.has('tests') ? 'python -m unittest discover -s tests -v' : [...files].some(name => /^test_.*\.py$/.test(name)) ? 'python -m unittest discover -v' : '' };
     }
 
     if (files.has('go.mod')) {
@@ -78,7 +85,7 @@ export class ValidationEngine {
       return { type: 'cpp', testCommand: 'make test', buildCommand: 'make' };
     }
 
-    return { type: 'unknown', testCommand: 'npm test' };
+    return { type: 'unknown', testCommand: '' };
   }
 
   /**

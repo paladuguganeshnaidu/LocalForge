@@ -3,6 +3,40 @@ const Module = require('node:module');
 const { test } = require('node:test');
 const vm = require('node:vm');
 const commands = [];
+
+test('targeted downloads require confirmation and keep the paused host pinned', async () => {
+  const calls = [];
+  const backend = {
+    id: 'composite', listModels: async () => [], detect: async () => true,
+    getDownloadTargets: async () => [{ id: 'ssh-gpu', label: 'GPU test host', source: 'remote' }, { id: 'ollama', label: 'Laptop', source: 'local' }],
+    pullModelToProvider: (target, name, progress, signal) => new Promise((resolve, reject) => {
+      calls.push({ target, name, resolve });
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
+  };
+  const center = new ModelCenterViewProvider(backend);
+  const view = attachView(center);
+  confirmation = undefined;
+  await view.send({ type: 'installModel', targetId: 'ssh-gpu', model: 'coder:test' });
+  assert.equal(calls.length, 0);
+  assert.equal(view.posts.at(-1).state, 'cancelled');
+  confirmation = 'Download model';
+  const installing = view.send({ type: 'installModel', targetId: 'ssh-gpu', model: 'coder:test' });
+  while (!calls.length) await new Promise(resolve => setImmediate(resolve));
+  await view.send({ type: 'pauseModelInstall' });
+  await installing;
+  assert.equal(view.posts.at(-1).targetId, 'ssh-gpu');
+  await view.send({ type: 'installModel', targetId: 'ollama', model: 'coder:test' });
+  assert.equal(calls.length, 1);
+  assert.equal(view.posts.at(-1).type, 'modelCenterNotice');
+  const resumed = view.send({ type: 'installModel', targetId: 'ssh-gpu', model: 'coder:test' });
+  while (calls.length < 2) await new Promise(resolve => setImmediate(resolve));
+  calls[1].resolve();
+  await resumed;
+  assert.equal(view.posts.at(-1).state, 'complete');
+  assert.ok(calls.every(call => call.target === 'ssh-gpu'));
+});
+
 const settings = new Map();
 let confirmation;
 const vscodeMock = {
@@ -28,6 +62,7 @@ test('Model Center renders a secure, syntactically valid management view', () =>
   const script = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
 
   assert.ok(script);
+  assert.equal(html.includes('\u0000'), false, 'HTML parsers replace NUL with U+FFFD and can break a regex that passed vm.Script');
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /Install from Ollama/);
   assert.match(html, /Search installed models/);
@@ -212,6 +247,7 @@ test('browser controls stay usable through notices, pause, and resume', () => {
     document: { getElementById: element },
     window: { addEventListener: (_, handler) => { receive = handler; } }
   });
+  element('downloadTarget').value = 'ollama';
   receive({ data: { type: 'modelCenterStatus', state: 'progress', model: 'qwen:test', progress: { status: 'Downloading' } } });
   assert.equal(element('install').disabled, true);
   assert.equal(element('pause').hidden, false);
@@ -226,6 +262,7 @@ test('browser controls stay usable through notices, pause, and resume', () => {
   element('install').handlers.click();
   assert.equal(sent.at(-1).type, 'installModel');
   assert.equal(sent.at(-1).model, 'qwen:test');
+  assert.equal(sent.at(-1).targetId, 'ollama');
   receive({ data: { type: 'modelCenterStatus', state: 'complete' } });
   assert.equal(element('install').disabled, false);
   assert.equal(element('modelName').disabled, false);

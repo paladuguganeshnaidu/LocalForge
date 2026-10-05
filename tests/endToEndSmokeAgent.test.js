@@ -33,7 +33,7 @@ test('End-to-End Smoke: Create Node.js hello program and run it in terminal', as
   try {
     const editEngine = new EditEngine();
     const terminalManager = new TerminalManager();
-    const permissionManager = new PermissionManager('allow_safe_auto');
+    const permissionManager = new PermissionManager('allow_safe_auto', async (request) => { assert.equal(request.toolName, 'run_command'); assert.equal(request.command, 'node src/hello.js'); return true; });
     const toolRegistry = new ToolRegistry();
 
     // Register write tool backed by proposal and auto-applied in test harness

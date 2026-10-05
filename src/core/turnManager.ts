@@ -8,6 +8,7 @@ export type ActivityCategory =
   | 'Searching'
   | 'Reading'
   | 'Working'
+  | 'Optimising'
   | 'Editing'
   | 'Running'
   | 'Browser'
@@ -47,6 +48,7 @@ export interface AgentTurn {
   turnId: string;
   turnNumber: number;
   conversationId: string;
+  historyEpoch?: string;
   modelId: string;
   mode: AgentMode;
   strategy: ExecutionStrategy;
@@ -67,6 +69,7 @@ export class TurnManager {
 
   public startTurn(params: {
     conversationId: string;
+    historyEpoch?: string;
     modelId: string;
     mode: AgentMode;
     strategy: ExecutionStrategy;
@@ -79,6 +82,7 @@ export class TurnManager {
       turnId,
       turnNumber,
       conversationId: params.conversationId,
+      historyEpoch: params.historyEpoch,
       modelId: params.modelId,
       mode: params.mode,
       strategy: params.strategy,
@@ -102,6 +106,12 @@ export class TurnManager {
   public getTurnsForConversation(conversationId: string): AgentTurn[] {
     const ids = this.conversationTurns.get(conversationId) || [];
     return ids.map((id) => this.turns.get(id)!).filter(Boolean);
+  }
+
+  public purgeConversation(conversationId: string): void {
+    for (const id of this.conversationTurns.get(conversationId) ?? []) this.turns.delete(id);
+    this.conversationTurns.delete(conversationId);
+    this.onChange?.();
   }
 
   public addActivity(
@@ -228,6 +238,7 @@ export class TurnManager {
         turnId: item.turnId.slice(0, 120),
         turnNumber: typeof item.turnNumber === 'number' ? item.turnNumber : restored.length + 1,
         conversationId: item.conversationId.slice(0, 200),
+        historyEpoch: typeof item.historyEpoch === 'string' ? item.historyEpoch.slice(0, 120) : undefined,
         modelId: item.modelId.slice(0, 200),
         mode: item.mode as AgentTurn['mode'],
         strategy: item.strategy as ExecutionStrategy,

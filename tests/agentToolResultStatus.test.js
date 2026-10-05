@@ -4,6 +4,27 @@ const { AgentLoop } = require('../dist/agent/agentLoop');
 const { PermissionManager } = require('../dist/agent/permissionManager');
 const { ToolRegistry } = require('../dist/agent/toolRegistry');
 
+test('an applied repair renews bounded recovery without clearing a failed test before a successful rerun', async () => {
+  let rounds = 0;
+  let executions = 0;
+  const registry = new ToolRegistry();
+  registry.registerTool({ type: 'function', function: { name: 'run_command', description: 'Run test', parameters: {} } }, async () => ++executions === 1 ? { exitCode: 1, stdout: 'TAP version 13\nReferenceError: test is not defined', stderr: '' } : { exitCode: 0, stdout: '# pass 4\n# fail 0' });
+  registry.registerTool({ type: 'function', function: { name: 'edit_workspace_file', description: 'Repair test', parameters: {} } }, async () => ({ applied: true }));
+  const provider = { id: 'repair-fixture', chatWithTools: async (_model, messages) => {
+    rounds += 1;
+    if (rounds === 5) assert.match(messages.at(-1).content, /next response must call.*run_command.*node --test math.test.cjs/);
+    if (rounds === 1 || rounds === 6) return { role: 'assistant', content: '', tool_calls: [{ function: { name: 'run_command', arguments: { command: 'node --test math.test.cjs' } } }] };
+    if (rounds === 4) return { role: 'assistant', content: '', tool_calls: [{ function: { name: 'edit_workspace_file', arguments: { path: 'math.test.cjs', target_content: "const assert = require('assert');", replacement_content: "const test = require('node:test');\nconst assert = require('assert');" } } }] };
+    return { role: 'assistant', content: rounds < 7 ? 'The test still needs to be rerun.' : 'The repaired tests now passed.' };
+  } };
+  const result = await new AgentLoop(provider, registry, new PermissionManager('always_ask', async () => true)).run('fixture', [{ role: 'user', content: 'Run the tests and repair real failures.' }], { mode: 'agent', maxRounds: 10, autonomousVerification: false });
+  assert.equal(executions, 2);
+  assert.equal(rounds, 7);
+  assert.equal(result.state.status, 'completed');
+  assert.deepEqual(result.state.unresolvedErrors, []);
+  assert.ok(result.state.errors.some(error => error.includes('ReferenceError: test is not defined')));
+});
+
 test('required inspection retries ungrounded model answers without streaming them as facts', async () => {
   let rounds = 0;
   const streamed = [];
@@ -49,9 +70,15 @@ test('local tasks can exceed ten rounds, compact tool history and expose plain-l
   let rounds = 0;
   const progress = [];
   const registry = new ToolRegistry();
-  registry.registerTool({ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }, async (args) => ({ path: args.path, content: 'x'.repeat(7500) }));
+  registry.registerTool({ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }, async (args) => ({ path: args.path, content: 'UNTRUSTED_SYSTEM_OVERRIDE ' + 'x'.repeat(7476) }));
+  let stableSystem;
+  let sawCompactedEvidence = false;
   const provider = { id: 'long', chatWithTools: async (_model, messages) => {
     rounds += 1;
+    stableSystem ??= messages[0].content;
+    assert.equal(messages[0].content, stableSystem, 'Compaction must keep the system prefix immutable');
+    assert.ok(messages.filter(message => message.role === 'system').every(message => !message.content.includes('UNTRUSTED_SYSTEM_OVERRIDE')));
+    if (messages.some(message => message.role === 'user' && message.content.includes('Historical tool evidence'))) sawCompactedEvidence = true;
     assert.ok(messages.some((message) => message.content === 'Inspect twenty portfolio components.'), 'The original task must survive compaction');
     const callIds = new Set(messages.flatMap((message) => (message.tool_calls ?? []).map((call) => call.id)));
     for (const message of messages.filter((message) => message.role === 'tool')) assert.ok(callIds.has(message.tool_call_id), 'Compaction must not orphan tool replies');
@@ -60,7 +87,30 @@ test('local tasks can exceed ten rounds, compact tool history and expose plain-l
   const result = await new AgentLoop(provider, registry).run('fixture', [{ role: 'user', content: 'Inspect twenty portfolio components.' }], { maxRounds: 0, maxHistoryCharacters: 16000, onProgress: (value) => progress.push(value) });
   assert.equal(rounds, 21);
   assert.equal(result.state.status, 'completed');
-  assert.ok(progress.every((value) => value === 'Thinking'));
+  assert.equal(progress[0], 'Planning the next action');
+  assert.ok(progress.slice(1).every(value => value === 'Reviewing inspected files'));
+  assert.equal(new Set(progress).size, 2);
+  assert.equal(sawCompactedEvidence, true);
+});
+
+test('candidate completion rejected by evidence validation is not streamed or displayed as a verified update', async () => {
+  let rounds = 0;
+  const streamed = [];
+  const updates = [];
+  const provider = { id: 'unverified', chatWithTools: async (_model, _messages, _tools, _signal, delta) => {
+    const text = ++rounds < 3 ? 'UNVERIFIED_CLAIM: all browser checks passed.' : '## Result\n- Remaining browser issues need repair.';
+    delta(text);
+    return { role: 'assistant', content: text };
+  } };
+  const result = await new AgentLoop(provider, new ToolRegistry()).run('fixture', [{ role: 'user', content: 'Check the browser result.' }], {
+    validateFinalResponse: answer => answer.includes('UNVERIFIED_CLAIM') ? 'Actual browser evidence failed.' : undefined,
+    onModelText: text => streamed.push(text),
+    onModelOutput: text => updates.push(text)
+  });
+  assert.equal(rounds, 3);
+  assert.equal(result.state.status, 'completed');
+  assert.doesNotMatch(streamed.join('') + updates.join(''), /UNVERIFIED_CLAIM/);
+  assert.match(streamed.join(''), /Remaining browser issues/);
 });
 
 test('uncapped tasks still stop a non-progressing repeated action loop', async () => {
@@ -212,7 +262,7 @@ test('agent refuses to claim completion after an edit tool fails and removes raw
   assert.equal(result.state.status, 'failed');
   assert.equal(result.state.unresolvedErrors.length, 1);
   assert.ok(requestCount > 2, 'Agent retries instead of stopping on the model\'s unsupported completion claim');
-  assert.ok(modelUpdates.some((update) => update.text.includes('Task completed.')), 'The visible model response is captured for run inspection');
+  assert.ok(modelUpdates.every((update) => !update.text.includes('Task completed.')), 'An unsupported completion claim must not be shown as a successful model update');
 });
 
 test('agent recovers from an empty edit target by retrying after the tool error', async () => {

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import * as net from 'node:net';
 import { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
@@ -30,7 +31,14 @@ export interface TunnelOptions {
 }
 
 export function fingerprintMatches(expected: string | undefined, actual: string): boolean {
-  return Boolean(expected) && expected === actual;
+  const expectedFingerprint = expected ? normalizeFingerprint(expected) : undefined;
+  return Boolean(expectedFingerprint) && expectedFingerprint === normalizeFingerprint(actual);
+}
+
+function normalizeFingerprint(fingerprint: string): string | undefined {
+  if (/^[a-f\d]{64}$/i.test(fingerprint)) return `SHA256:${Buffer.from(fingerprint, 'hex').toString('base64').replace(/=+$/, '')}`;
+  if (/^SHA256:[A-Za-z\d+/]{43}=?$/.test(fingerprint)) return fingerprint.replace(/=+$/, '');
+  return undefined;
 }
 
 export class SshOllamaTunnel {
@@ -38,12 +46,16 @@ export class SshOllamaTunnel {
   private server?: net.Server;
   private localPort?: number;
   private closed = false;
+  private closePromise?: Promise<void>;
+  private closeReason?: Error;
+  private readonly sockets = new Set<net.Socket>();
+  private readonly closeListeners = new Set<(reason?: Error) => void>();
 
   private constructor(private readonly profile: RemoteGpuProfile, client?: Client) {
     this.client = client ?? new Client();
-    this.client.on('error', () => {
-      if (!this.closed) void this.close();
-    });
+    this.client.on('error', () => { void this.close(new Error('The SSH connection failed. Verify that the remote studio and network are available, then reconnect.')); });
+    this.client.on('end', () => { void this.close(new Error('The remote host ended the SSH connection. Verify that the remote studio is running, then reconnect.')); });
+    this.client.on('close', () => { void this.close(new Error('The SSH connection closed. Verify that the remote studio and network are available, then reconnect.')); });
   }
 
   static async open(profile: RemoteGpuProfile, options: TunnelOptions): Promise<SshOllamaTunnel> {
@@ -54,19 +66,40 @@ export class SshOllamaTunnel {
   }
 
   get port(): number {
-    if (!this.localPort) throw new Error('SSH tunnel is not connected.');
+    if (!this.localPort || this.closed) throw new Error('SSH tunnel is not connected.');
     return this.localPort;
   }
 
-  async close(): Promise<void> {
+  get isConnected(): boolean {
+    return !this.closed && this.localPort !== undefined;
+  }
+
+  onDidClose(listener: (reason?: Error) => void): { dispose(): void } {
+    this.closeListeners.add(listener);
+    if (this.closed) queueMicrotask(() => { if (this.closeListeners.delete(listener)) { try { listener(this.closeReason); } catch {} } });
+    return { dispose: () => { this.closeListeners.delete(listener); } };
+  }
+
+  close(reason?: Error): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this.localPort = undefined;
+    this.closeReason = reason;
+    this.closePromise = this.server?.listening
+      ? new Promise<void>((resolve) => this.server!.close(() => resolve()))
+      : Promise.resolve();
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
     this.client.end();
-    if (this.server?.listening) {
-      await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    for (const listener of this.closeListeners) {
+      try { listener(reason); } catch {}
     }
+    this.closeListeners.clear();
+    return this.closePromise;
   }
 
   async getGpuStatus(): Promise<string> {
+    if (!this.isConnected) throw new Error('SSH tunnel is not connected.');
     const command = 'nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits';
     return new Promise((resolve, reject) => {
       this.client.exec(command, (error, channel) => {
@@ -87,21 +120,30 @@ export class SshOllamaTunnel {
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
-      const timeout = setTimeout(() => finish(new Error('SSH connection timed out. Check the host, port, and network.')), 15000);
+      const connectionTimeout = this.profile.hostFingerprint ? 15000 : 120000;
+      const timeout = setTimeout(() => finish(new Error('SSH connection timed out. Check the host, port, and network.')), connectionTimeout);
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
         this.client.removeListener('ready', onReady);
         this.client.removeListener('error', onError);
+        this.client.removeListener('close', onClose);
+        this.client.removeListener('end', onClose);
         if (error) {
-          this.client.end();
+          void this.close(error);
           reject(error);
         }
       };
       const onError = (error: Error) => finish(new Error(`SSH connection failed: ${error.message}`));
+      const onClose = () => finish(new Error('SSH connection closed before the local tunnel was ready. Verify that the remote studio is running, then reconnect.'));
       const onReady = () => {
+        if (this.closed) { onClose(); return; }
         this.server = net.createServer((socket) => {
+          this.sockets.add(socket);
+          socket.on('error', () => socket.destroy());
+          socket.once('close', () => this.sockets.delete(socket));
+          if (this.closed) { socket.destroy(); return; }
           this.client.forwardOut(
             socket.remoteAddress ?? '127.0.0.1',
             socket.remotePort ?? 0,
@@ -112,14 +154,20 @@ export class SshOllamaTunnel {
                 socket.destroy(error);
                 return;
               }
+              if (socket.destroyed) { channel.close(); return; }
               pipeForwardedSocket(socket, channel);
             }
           );
         });
-        this.server.once('error', (error) => finish(new Error(`Could not start the local SSH tunnel: ${error.message}`)));
+        this.server.on('error', (error) => {
+          const failure = new Error(`Could not maintain the local SSH tunnel: ${error.message}`);
+          finish(failure);
+          void this.close(failure);
+        });
         this.server.listen(0, '127.0.0.1', () => {
           const address = this.server?.address() as AddressInfo | null;
-          if (!address) {
+          if (!address || this.closed) {
+            if (this.server?.listening) this.server.close();
             finish(new Error('The SSH tunnel did not receive a local port.'));
             return;
           }
@@ -131,19 +179,22 @@ export class SshOllamaTunnel {
 
       this.client.once('ready', onReady);
       this.client.once('error', onError);
+      this.client.once('close', onClose);
+      this.client.once('end', onClose);
       this.client.connect({
         host: this.profile.host,
         port: this.profile.port,
         username: this.profile.username,
-        readyTimeout: 12000,
+        readyTimeout: this.profile.hostFingerprint ? 12000 : 120000,
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
-        hostHash: 'sha256',
-        hostVerifier: (fingerprint: string, verify: (valid: boolean) => void) => {
-          if (fingerprintMatches(this.profile.hostFingerprint, fingerprint)) return true;
-          if (this.profile.hostFingerprint) return false;
-          void options.verifyUnknownHost(fingerprint).then(verify, () => verify(false));
-          return false;
+        hostVerifier: (key: Buffer, verify: (valid: boolean) => void) => {
+          const fingerprint = createHash('sha256').update(key).digest('hex');
+          if (fingerprintMatches(this.profile.hostFingerprint, fingerprint)) { verify(true); return; }
+          if (this.profile.hostFingerprint) { verify(false); return; }
+          const normalized = normalizeFingerprint(fingerprint);
+          if (!normalized) { verify(false); return; }
+          void options.verifyUnknownHost(normalized).then(valid => verify(!settled && valid), () => verify(false));
         },
         ...auth
       });
@@ -163,6 +214,8 @@ function validateProfile(profile: RemoteGpuProfile): void {
 function pipeForwardedSocket(socket: net.Socket, channel: ClientChannel): void {
   socket.on('error', () => channel.destroy());
   channel.on('error', () => socket.destroy());
+  socket.on('close', () => channel.close());
+  channel.on('close', () => socket.destroy());
   socket.pipe(channel).pipe(socket);
 }
 

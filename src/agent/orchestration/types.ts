@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ModelCapabilities } from '../../providers/modelCapabilities';
 import { ModelToolDefinition } from '../../providers/modelProvider';
 import { ToolCategory } from '../permissionManager';
+import { EditRequestPolicy } from '../../editing/editRequestPolicy';
 
 export type AgentRole =
   | 'orchestrator'
@@ -76,6 +77,7 @@ export interface AgentContext {
   toolPermissions: ToolCategory[];
   budget: AgentBudget;
   signal?: AbortSignal;
+  editRequestPolicy?: EditRequestPolicy;
 }
 
 export interface PlannerHandoff {

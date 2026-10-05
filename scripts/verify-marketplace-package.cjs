@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
 const assert = require('assert');
+const { createHash } = require('node:crypto');
 
 const EXPECTED_IDENTITY = {
   name: 'localforge-vscode',
@@ -16,6 +17,19 @@ const EXPECTED_IDENTITY = {
   displayName: 'LOMVREN',
   icon: 'media/lomvren-icon.png'
 };
+
+function verifyCurrentBuildPayload(pkgJson, vsixPkg, filesListing, rootDir, readEntry) {
+  assert.deepStrictEqual(vsixPkg.contributes, pkgJson.contributes, 'FATAL: Packaged contributions differ from the current manifest');
+  const browserPayload = pkgJson.dependencies?.['playwright-core'] ? ['node_modules/playwright-core/package.json', 'node_modules/playwright-core/index.js', 'node_modules/playwright-core/lib/bootstrap.js', 'node_modules/playwright-core/lib/coreBundle.js'] : [];
+  for (const relativePath of [pkgJson.main.replace(/^\.\//, ''), pkgJson.icon, ...browserPayload]) {
+    const entry = `extension/${relativePath}`;
+    assert.strictEqual(filesListing.filter((file) => file === entry).length, 1, `FATAL: Duplicate or missing payload entry: ${entry}`);
+    const packaged = readEntry(entry);
+    const disk = fs.readFileSync(path.join(rootDir, relativePath));
+    const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+    assert.strictEqual(digest(packaged), digest(disk), `FATAL: Packaged ${relativePath} does not match the current build`);
+  }
+}
 
 function main() {
   console.log('=====================================================');
@@ -70,20 +84,20 @@ function main() {
   console.log(`  ✓ Icon path:       ${iconRelPath} (${iconStat.size} bytes)`);
   console.log(`  ✓ Icon dimensions: ${width}x${height} (PNG format verified)`);
 
-  console.log('\n[Step 3/6] Inspecting generated VSIX artifact in workspace...');
+  console.log('\n[Step 3/6] Inspecting the selected VSIX artifact...');
   const expectedVsixName = `${EXPECTED_IDENTITY.name}-${pkgJson.version}.vsix`;
-  const vsixPath = path.join(rootDir, expectedVsixName);
+  const vsixPath = process.argv[2] ? path.resolve(process.argv[2]) : path.join(rootDir, expectedVsixName);
   assert.ok(
     fs.existsSync(vsixPath),
     `FATAL: Expected VSIX bundle '${expectedVsixName}' was not found at ${vsixPath}. Run packaging first.`
   );
   const vsixStat = fs.statSync(vsixPath);
-  console.log(`  ✓ VSIX file: ${expectedVsixName} (${(vsixStat.size / (1024 * 1024)).toFixed(2)} MB)`);
+  console.log(`  ✓ VSIX file: ${vsixPath} (${(vsixStat.size / (1024 * 1024)).toFixed(2)} MB)`);
 
   console.log('\n[Step 4/6] Extracting internal manifest from VSIX...');
   let vsixPkgRaw = '';
   try {
-    vsixPkgRaw = cp.execSync(`tar -O -xf "${vsixPath}" extension/package.json`, {
+    vsixPkgRaw = cp.execFileSync('tar', ['-O', '-xf', vsixPath, 'extension/package.json'], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -120,7 +134,7 @@ function main() {
   );
 
   console.log('\n[Step 6/6] Verifying VSIX payload completeness...');
-  const filesListing = cp.execSync(`tar -tf "${vsixPath}"`, { encoding: 'utf8' }).split(/\r?\n/);
+  const filesListing = cp.execFileSync('tar', ['-tf', vsixPath], { encoding: 'utf8' }).split(/\r?\n/);
   const bundledEntry = `extension/${pkgJson.main.replace(/^\.\//, '')}`;
   assert.ok(
     filesListing.includes(bundledEntry),
@@ -135,8 +149,8 @@ function main() {
     `FATAL: VSIX is missing bundled icon: extension/${iconRelPath}`
   );
   assert.ok(
-    !filesListing.some((file) => file.startsWith('extension/node_modules/')),
-    'FATAL: VSIX contains node_modules despite using the self-contained runtime bundle'
+    !filesListing.some((file) => file.startsWith('extension/node_modules/') && !file.startsWith('extension/node_modules/playwright-core/')),
+    'FATAL: VSIX contains runtime dependencies outside the explicitly required Playwright driver'
   );
   const packagedJavaScript = filesListing.filter((file) => /^extension\/dist\/.*\.js$/i.test(file));
   assert.deepStrictEqual(
@@ -145,7 +159,7 @@ function main() {
     `FATAL: VSIX must contain only its declared bundled runtime JavaScript file, got: ${packagedJavaScript.join(', ')}`
   );
   const forbiddenPayload = filesListing.filter((file) =>
-    /(?:^|\/)(?:artifacts|coverage|docs|scripts|tests)\//i.test(file) ||
+    !file.startsWith('extension/node_modules/playwright-core/') && /(?:^|\/)(?:artifacts|coverage|docs|scripts|tests)\//i.test(file) ||
     /(?:test\.log|package-lock\.json|\.patch|\.zip)$/i.test(file)
   );
   assert.deepStrictEqual(
@@ -153,11 +167,18 @@ function main() {
     [],
     `FATAL: Development-only files leaked into VSIX: ${forbiddenPayload.join(', ')}`
   );
+  verifyCurrentBuildPayload(pkgJson, vsixPkg, filesListing, rootDir, (entry) => cp.execFileSync('tar', ['-O', '-xf', vsixPath, entry], { maxBuffer: 16 * 1024 * 1024 }));
   console.log(`  ✓ Bundled runtime entry ${bundledEntry} is present`);
-  console.log('  ✓ Runtime node_modules are excluded');
+  if (pkgJson.dependencies?.['playwright-core']) {
+    for (const entry of ['extension/node_modules/playwright-core/package.json', 'extension/node_modules/playwright-core/index.js', 'extension/node_modules/playwright-core/lib/bootstrap.js', 'extension/node_modules/playwright-core/lib/coreBundle.js']) assert.ok(filesListing.includes(entry), `FATAL: Browser driver is missing: ${entry}`);
+    const driver = JSON.parse(cp.execFileSync('tar', ['-O', '-xf', vsixPath, 'extension/node_modules/playwright-core/package.json'], { encoding: 'utf8' }));
+    assert.strictEqual(driver.version, pkgJson.dependencies['playwright-core'], 'FATAL: Browser driver version does not match the exact runtime dependency');
+  }
+  console.log('  ✓ Only the declared browser driver is allowed outside the bundle');
   console.log('  ✓ extension/package.json is present');
   console.log(`  ✓ extension/${iconRelPath} is present`);
   console.log('  ✓ Development reports, test artifacts, logs, and lockfile are excluded');
+  console.log('  ✓ Packaged runtime, icon and contributions match the current build');
 
   console.log('\n=====================================================');
   console.log('  PACKAGE IDENTITY AND CONTENT CHECKS PASSED');
@@ -165,10 +186,13 @@ function main() {
   console.log('=====================================================\n');
 }
 
-try {
-  main();
-} catch (err) {
-  console.error('\n❌ RELEASE VERIFICATION FAILED:');
-  console.error(err.message || err);
-  process.exit(1);
+module.exports = { verifyCurrentBuildPayload };
+
+if (require.main === module) {
+  try { main(); }
+  catch (err) {
+    console.error('\n❌ RELEASE VERIFICATION FAILED:');
+    console.error(err.message || err);
+    process.exitCode = 1;
+  }
 }

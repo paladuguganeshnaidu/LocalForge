@@ -5,6 +5,19 @@ const { AgentLoop } = require('../dist/agent/agentLoop.js');
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 const { PermissionManager } = require('../dist/agent/permissionManager.js');
 
+test('unchanged missing-file failures are dispatched only three times, with creation recovery guidance', async () => {
+  let dispatched=0;
+  const registry=new ToolRegistry();
+  registry.registerTool({type:'function',function:{name:'read_file',description:'Read a file',parameters:{type:'object',properties:{path:{type:'string'}}}}},async()=>{dispatched+=1;throw new Error('ENOENT: no such file package.json');});
+  const histories=[];
+  const provider={id:'fixture',chatWithTools:async(_model,messages)=>{histories.push(structuredClone(messages));return {role:'assistant',content:'',tool_calls:[{id:'read-'+histories.length,function:{name:'read_file',arguments:'{"path":"package.json"}'}}]};}};
+  const result=await new AgentLoop(provider,registry).run('fixture',[{role:'user',content:'Build a landing website in this empty workspace.'}],{mode:'agent',maxRounds:20});
+  assert.equal(dispatched,3);
+  assert.equal(result.state.status,'failed');
+  assert.match(result.response,/unchanged failed action/);
+  assert.ok(histories.some(messages=>messages.some(message=>message.content.includes('create_file or write_file and actual file content'))));
+});
+
 test('AgentLoop honors maxRounds step limits without infinite loops', async () => {
   let calls = 0;
   const provider = {
@@ -85,7 +98,8 @@ test('AgentLoop captures structured errors when tool execution fails', async () 
   const registry = new ToolRegistry();
   registry.registerTool(
     { type: 'function', function: { name: 'failing_tool', description: 'Fails', parameters: {} } },
-    async () => { throw new Error('Disk full'); }
+    async () => { throw new Error('Disk full'); },
+    { category: 'read', riskLevel: 'read_only', requiresApproval: false, source: 'builtin' }
   );
 
   const loop = new AgentLoop(provider, registry);

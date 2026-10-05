@@ -30,26 +30,28 @@ export function routeModelWithReason(
   // 1. Explicit task configuration preference
   const configured = preferences[task];
   if (configured) {
-    const model = models.find(
-      (m) => m.id === configured || m.name === configured || m.providerId === configured
-    );
+    const exact = models.filter((model) => model.id === configured || model.name === configured);
+    const model = exact.length === 1 ? exact[0] : exact.length === 0 ? models.find((entry) => entry.providerId === configured) : undefined;
     if (model) {
       return {
         model,
         reason: `Configured preference for ${task}: ${model.id || model.name}`
       };
     }
+    return undefined;
   }
 
   // 2. Explicit user selection (when not 'auto')
   if (userSelection && userSelection.toLowerCase() !== 'auto') {
-    const model = models.find((m) => m.id === userSelection || m.name === userSelection);
+    const matches = models.filter((model) => model.id === userSelection || model.name === userSelection);
+    const model = matches.length === 1 ? matches[0] : undefined;
     if (model) {
       return {
         model,
         reason: `User selected: ${model.id || model.name}`
       };
     }
+    return undefined;
   }
 
   // 3. Auto capability-based and GPU-aware routing
@@ -64,7 +66,10 @@ export function routeModelWithReason(
           reason: `Auto selected ${remoteGpu.displayName || remoteGpu.name}: tool-calling enabled, remote GPU connected`
         };
       }
-      const coders = capable.filter((m) => m.capabilities?.codeCompletion || /coder|code/i.test(m.name || m.id || ''));
+      const balanced = capable.filter(model => model.size !== undefined && model.size >= 1.8 * 1024 ** 3 && model.size <= 6 * 1024 ** 3);
+      const nonThinking = balanced.filter(model => model.capabilities?.reasoning !== true);
+      const candidates = nonThinking.length ? nonThinking : balanced.length ? balanced : capable;
+      const coders = candidates.filter((m) => /coder|code/i.test(m.name || m.id || ''));
       if (coders.length) {
         const bestCoder = [...coders].sort((a, b) => (a.size || 0) - (b.size || 0))[0];
         return {
@@ -72,7 +77,7 @@ export function routeModelWithReason(
           reason: `Auto selected ${bestCoder.displayName || bestCoder.name}: tool-calling capability verified (specialized coding model)`
         };
       }
-      const smallest = [...capable].sort((a, b) => (a.size || 0) - (b.size || 0))[0];
+      const smallest = [...candidates].sort((a, b) => (a.size || 0) - (b.size || 0))[0];
       return {
         model: smallest,
         reason: `Auto selected ${smallest.displayName || smallest.name}: tool-calling capability verified`
@@ -126,6 +131,9 @@ export class ModelRouter {
     preferences?: ModelPreferences
   ): { modelId: string; reason: string; model?: LocalModel } {
     const models = this.getModelsFn();
+    if (userSelection && userSelection.toLowerCase() !== 'auto' && models.filter((model) => model.id === userSelection || model.name === userSelection).length !== 1) {
+      return { modelId: userSelection, reason: `Explicitly selected model "${userSelection}" is unavailable. Select another model.`, model: undefined };
+    }
     const res = routeModelWithReason(models, task, preferences, userSelection);
     if (!res && userSelection && userSelection.toLowerCase() !== 'auto') {
       return {

@@ -1,5 +1,19 @@
 export type CapabilityConfidence = 'high' | 'medium' | 'inferred';
 
+export interface RuntimeModelMetadata {
+  capabilities?: string[];
+  template?: string;
+  model_info?: Record<string, unknown>;
+}
+
+export function advertisedContextWindow(metadata?: RuntimeModelMetadata): number | undefined {
+  const info = metadata?.model_info;
+  const architecture = info?.['general.architecture'];
+  if (!info || Array.isArray(info) || typeof architecture !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(architecture)) return undefined;
+  const context = info[`${architecture}.context_length`];
+  return typeof context === 'number' && Number.isInteger(context) && context >= 512 && context <= 1048576 ? context : undefined;
+}
+
 export interface ModelCapabilities {
   chat: boolean;
   streaming: boolean;
@@ -97,20 +111,24 @@ export function getToolCallingStatus(capabilities: ModelCapabilities): {
 export function evaluateRuntimeCapabilities(
   name: string,
   size?: number,
-  runtimeMetadata?: {
-    capabilities?: string[];
-    template?: string;
-  }
+  runtimeMetadata?: RuntimeModelMetadata
 ): ModelCapabilities {
   const base = inferModelCapabilities(name, size);
 
   if (runtimeMetadata) {
+    const context = advertisedContextWindow(runtimeMetadata);
+    if (context !== undefined) {
+      base.contextWindow = context;
+      base.confidence = { ...base.confidence, contextWindow: 'high' };
+    }
     if (Array.isArray(runtimeMetadata.capabilities)) {
       const hasTools = runtimeMetadata.capabilities.includes('tools');
       base.toolCalling = hasTools;
+      base.reasoning = runtimeMetadata.capabilities.includes('thinking');
       base.confidence = {
         ...base.confidence,
-        toolCalling: 'high'
+        toolCalling: 'high',
+        reasoning: 'high'
       };
     } else if (runtimeMetadata.template) {
       const hasToolsInTemplate =
@@ -127,4 +145,3 @@ export function evaluateRuntimeCapabilities(
 
   return base;
 }
-

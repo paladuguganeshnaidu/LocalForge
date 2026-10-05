@@ -16,11 +16,16 @@ import { PermissionMode, PermissionRequest } from '../agent/permissionManager';
 import { formatToolInput } from '../core/activityDetails';
 import { renderChatMarkdown } from './chatMarkdown';
 import { normalizeAssistantMarkdown } from '../core/responseFormatting';
+import { SessionManager } from '../core/sessionManager';
+import { classifyTaskIntent, conversationalMessages } from '../agent/taskIntent';
+import { chatStyles } from './chatStyles';
+import { canAttachWorkspaceContext } from '../context/accessBoundary';
+import { defaultCompatibleEndpoints } from '../providers/endpointConfiguration';
 
 export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private models: LocalModel[] = [];
-  private readonly conversations = new Map<string, ChatMessage[]>();
+  private sessionManager: SessionManager;
   private busy = false;
   private activeInteraction?: symbol;
   private activeChat?: AbortController;
@@ -30,6 +35,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   public activeStrategy: ExecutionStrategy = 'planning';
   private engine?: LocalForgeEngine;
   private currentProposal?: EditProposal;
+  private providerEvents?: vscode.Disposable;
   private pendingPermissionRequests = new Map<string, {
     resolve: (allowed: boolean) => void;
     request: PermissionRequest;
@@ -44,26 +50,38 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     engine?: LocalForgeEngine
   ) {
     this.engine = engine;
+    this.sessionManager = engine?.sessionManager ?? new SessionManager(context.workspaceState);
     if (this.engine) {
       this.initPermissionHandler();
-    }
-    const saved = this.context.workspaceState.get<Record<string, ChatMessage[]>>('localforge.conversations', {});
-    if (saved && typeof saved === 'object') {
-      for (const [key, msgs] of Object.entries(saved)) {
-        if (Array.isArray(msgs)) {
-          this.conversations.set(key, msgs.filter((m) => m && typeof m.content === 'string' && typeof m.role === 'string'));
-        }
-      }
     }
   }
 
   public setEngine(engine: LocalForgeEngine): void {
     this.engine = engine;
+    this.sessionManager = engine.sessionManager;
     this.initPermissionHandler();
   }
 
   private initPermissionHandler(): void {
     if (!this.engine) return;
+    this.providerEvents?.dispose();
+    const engine = this.engine;
+    const subagentProgress = (message: string) => {
+      if (this.busy && engine.isBusy()) this.post({ type: 'status', state: 'running', message });
+    };
+    const changed = () => {
+      this.postProviderStatus();
+      if (!engine.getProviderConfigurationStatus().pending) void this.refresh();
+    };
+    const remoteDisconnected = (reason?: Error) => {
+      this.setRemoteSession(undefined);
+      if (reason) this.post({ type: 'controlError', message: reason.message });
+    };
+    engine.events?.on('providersChanged', changed);
+    engine.events?.on('subagentProgress', subagentProgress);
+    engine.events?.on('remoteDisconnected', remoteDisconnected);
+    this.providerEvents = { dispose: () => { engine.events?.off('providersChanged', changed); engine.events?.off('subagentProgress', subagentProgress); engine.events?.off('remoteDisconnected', remoteDisconnected); } };
+    this.context.subscriptions.push(this.providerEvents);
     this.engine.permissionManager.setApprovalHandler(async (request) => {
       if (request.signal?.aborted) return false;
       return new Promise<boolean>((resolve) => {
@@ -84,6 +102,16 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         this.postPermissionRequest(request);
       });
     });
+    if (this.engine.events) {
+      const listener = () => this.postIndexStatus();
+      this.engine.events.on('indexStatus', listener);
+      const events = this.engine.events;
+      this.context.subscriptions?.push({ dispose: () => events.off('indexStatus', listener) });
+    }
+  }
+
+  private postIndexStatus(): void {
+    this.post({ type: 'indexStatus', status: this.engine?.indexer?.getStats() ?? null, scope: this.engine?.accessPolicy.getState().scope ?? 'workspace' });
   }
 
   private postPermissionRequest(request: PermissionRequest): void {
@@ -93,9 +121,12 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         id: request.id,
         toolName: request.toolName,
         category: request.category,
+        policy: request.policy,
         commandCategory: request.commandCategory,
         description: request.description,
         command: request.command,
+        scriptPreview: request.args?.expandedScripts ? formatToolInput(request.toolName, { expandedScripts: request.args.expandedScripts }) : undefined,
+        workspaceSessionAvailable: this.engine?.accessPolicy.getState().scope === 'workspace',
         path: request.path
       }
     });
@@ -131,8 +162,18 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     if (pending.request.signal?.aborted) decision = 'cancelled';
     if (decision === 'cancelled') this.post({ type: 'permissionCancelled', requestId });
 
-    if (decision === 'allow_session') this.setPermissionMode('ask_once_per_session');
+    try {
+      if (decision === 'allow_session') {
+        this.setPermissionMode('ask_once_per_session');
+        this.engine?.permissionManager.grantWorkspaceSession(this.engine.toolRegistry.getAllTools().filter(tool => tool.source === 'builtin').map(tool => tool.authorizationId));
+        this.post({ type: 'permissionMode', mode: 'ask_once_per_session', workspaceSession: true });
+      }
+    } catch (error) {
+      decision = 'deny';
+      this.post({ type: 'error', message: error instanceof Error ? error.message : 'Could not grant workspace session access.' });
+    }
 
+    try {
     if (pending.activityId && pending.turnId && this.engine) {
       const turn = this.engine.turnManager.getTurn(pending.turnId);
       if (turn) {
@@ -150,8 +191,12 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         if (activity) this.post({ type: 'activity', activity });
       }
     }
-
-    pending.resolve(decision === 'allow' || decision === 'allow_session');
+    } catch (error) {
+      console.error('[LocalForge] Approval activity update failed:', error instanceof Error ? error.message : String(error));
+    } finally {
+      pending.resolve(decision === 'allow' || decision === 'allow_session');
+      this.post({ type: 'permissionDecision', requestId, decision });
+    }
   }
 
   private setPermissionMode(mode: PermissionMode): void {
@@ -168,7 +213,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       agent: configuration.get<string>('agentModel', ''),
       completion: configuration.get<string>('completionModel', '')
     };
-    return routeModel(this.models, task, preferences, this.selectedModel)?.id || routeModel(this.models, task, preferences, this.selectedModel)?.name;
+    const model = routeModel(this.models, task, preferences, this.selectedModel);
+    return model?.id || model?.name || preferences[task] || this.selectedModel;
   }
 
   public setRemoteSession(session?: { tunnel: SshOllamaTunnel; providerId: string; profileName: string }): void {
@@ -177,29 +223,55 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async postRemoteStatus(): Promise<void> {
-    if (!this.remoteSession) {
+    const session = this.remoteSession;
+    if (!session || !session.tunnel.isConnected) {
       this.post({ type: 'remoteStatus', connected: false });
       return;
     }
     let gpuInfo = '';
     try {
-      gpuInfo = await this.remoteSession.tunnel.getGpuStatus();
+      gpuInfo = await session.tunnel.getGpuStatus();
     } catch {
       gpuInfo = 'Connected via SSH tunnel';
     }
+    if (this.remoteSession !== session || !session.tunnel.isConnected) return;
     this.post({
       type: 'remoteStatus',
       connected: true,
-      profileName: this.remoteSession.profileName,
+      profileName: session.profileName,
       gpuInfo
     });
   }
 
-  public setSelectedModel(model: string): void {
+  public async setSelectedModel(model: string): Promise<void> {
+    await this.sessionManager.initialize();
+    await this.sessionManager.updateSession(this.sessionManager.getActiveSession().id, { model });
     this.selectedModel = model;
     this.post({ type: 'selectedModel', model });
-    this.post({ type: 'history', messages: this.conversations.get(model) ?? [] });
-    this.postActivityHistory();
+    this.postSessions(false);
+  }
+
+  public async startNewSession(): Promise<void> {
+    if (this.busy || this.engine?.isBusy()) throw new Error('Wait for the task or cancel it before starting another chat.');
+    const session = await this.sessionManager.createNewSession();
+    this.engine?.permissionManager.clearSession();
+    this.activeMode = session.mode;
+    this.activeStrategy = session.strategy;
+    this.selectedModel = session.model ?? 'auto';
+    this.post({ type: 'selectedModel', model: this.selectedModel });
+    this.postSessions();
+  }
+
+  private postSessions(includeHistory = true): void {
+    const session = this.sessionManager.getActiveSession();
+    this.post({ type: 'sessions', activeSessionId: session.id, sessions: this.sessionManager.getSessions().map(({ messages, ...metadata }) => ({ ...metadata, messageCount: messages.length, preview: messages.at(-1)?.content.slice(0, 160) ?? '' })) });
+    this.post({ type: 'mode', mode: session.mode });
+    this.post({ type: 'strategy', strategy: session.strategy });
+    this.post({ type: 'effort', effort: session.effort ?? 'medium' });
+    if (includeHistory) {
+      this.post({ type: 'history', messages: session.messages });
+      this.postActivityHistory();
+    }
   }
 
   private postActivityHistory(): void {
@@ -257,13 +329,6 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'activeEditor', path: relPath });
   }
 
-  private saveConversations(): void {
-    const obj: Record<string, ChatMessage[]> = {};
-    for (const [key, value] of this.conversations.entries()) {
-      obj[key] = value.slice(-40).map((m) => ({ role: m.role, content: m.content }));
-    }
-    void this.context.workspaceState.update('localforge.conversations', obj);
-  }
 
   public resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -274,6 +339,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = getHtml(view.webview, this.context.extensionUri);
 
     view.webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+      try {
       const message = (rawMessage && typeof rawMessage === 'object') ? { ...(rawMessage as Record<string, unknown>) } : rawMessage;
       if (message && typeof message === 'object' && (message as Record<string, unknown>).type === 'chat') {
         const chatMsg = message as Record<string, unknown>;
@@ -292,7 +358,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (!isWebviewMessage(message)) {
-        console.warn('[LocalForge] Received unrecognized webview message:', message);
+        if (message && typeof message === 'object' && 'type' in message && message.type === 'updateSettings') this.post({ type: 'error', message: 'Invalid settings values. Endpoint URLs require HTTP(S) without credentials, query parameters or fragments. No settings were saved.' });
+        console.warn('[LocalForge] Received unrecognized webview message; payload omitted.');
         return;
       }
 
@@ -301,20 +368,36 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (message.type === 'setMode') {
+        await this.sessionManager.updateSession(this.sessionManager.getActiveSession().id, { mode: message.mode });
         this.activeMode = message.mode;
         this.post({ type: 'mode', mode: this.activeMode });
       }
 
       if (message.type === 'setStrategy') {
+        await this.sessionManager.updateSession(this.sessionManager.getActiveSession().id, { strategy: message.strategy });
         this.activeStrategy = message.strategy;
         this.post({ type: 'strategy', strategy: this.activeStrategy });
       }
 
+      if (message.type === 'setEffort') {
+        try {
+          if (this.busy || this.engine?.isBusy()) throw new Error('Wait for the task or cancel it before changing effort.');
+          await this.sessionManager.updateSession(this.sessionManager.getActiveSession().id, { effort: message.effort });
+        } catch (error) {
+          this.post({ type: 'controlError', message: error instanceof Error ? error.message : String(error) });
+        } finally {
+          this.post({ type: 'effort', effort: this.sessionManager.getActiveSession().effort ?? 'medium' });
+        }
+      }
+
       if (message.type === 'selectModel') {
-        this.selectedModel = message.model;
-        const history = this.conversations.get(this.selectedModel ?? '') ?? [];
-        this.post({ type: 'history', messages: history });
-        this.postActivityHistory();
+        await this.setSelectedModel(message.model);
+      }
+      if (message.type === 'reindexWorkspace') {
+        if (!this.engine?.indexer) throw new Error('Open a trusted project workspace before rebuilding its index.');
+        if (this.engine.accessPolicy.getState().scope === 'file') throw new Error('Workspace reindex is unavailable with File access.');
+        await this.engine.indexer.indexWorkspace();
+        this.postIndexStatus();
       }
 
       if (message.type === 'setAccessScope' && this.engine) {
@@ -339,7 +422,24 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: 'error', message: error instanceof Error ? error.message : 'Could not change access.' });
         } finally {
           this.post({ type: 'accessScope', ...this.engine.accessPolicy.getState() });
+          this.postIndexStatus();
         }
+      }
+
+      if (message.type === 'openModels') await vscode.commands.executeCommand('localforge.modelsView.focus');
+      if (message.type === 'getContextFiles') {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const files: string[] = [];
+        if (root && vscode.workspace.isTrusted !== false) {
+          const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(root, '**/*'), '**/{node_modules,.git,dist,build,.next,.venv}/**', 1000);
+          for (const uri of uris) {
+            const filePath = relative(root.fsPath, uri.fsPath).replace(/\\/g, '/');
+            if (!await canAttachWorkspaceContext(uri)) continue;
+            try { this.engine?.accessPolicy.assertFile(filePath); } catch { continue; }
+            files.push(filePath);
+          }
+        }
+        this.post({ type: 'contextFiles', files: files.sort() });
       }
 
       if (message.type === 'getRemoteStatus') {
@@ -367,50 +467,66 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (message.type === 'clear') {
-        if (this.selectedModel) {
-          this.conversations.delete(this.selectedModel);
-          this.saveConversations();
-        }
-        this.post({ type: 'history', messages: [] });
+        if (this.busy || this.engine?.isBusy()) throw new Error('Wait for the task or cancel it before clearing chat.');
+        const id = this.sessionManager.getActiveSession().id;
+        if (this.engine) await this.engine.clearConversation(id);
+        else await this.sessionManager.clearSession(id);
+        this.postSessions();
       }
 
       if (message.type === 'newSession') {
-        if (this.engine) {
-          this.engine.sessionManager.createNewSession();
-          this.engine.permissionManager.clearSession();
-        }
-        if (this.selectedModel) {
-          this.conversations.delete(this.selectedModel);
-          this.saveConversations();
-        }
-        await this.refresh();
-        this.post({ type: 'history', messages: [] });
+        await this.startNewSession();
       }
 
       if (message.type === 'loadSession') {
-        if (this.engine && message.sessionId) {
-          await this.engine.sessionManager.setActiveSession(message.sessionId);
-          this.engine.permissionManager.clearSession();
-          await this.refresh();
-        }
+        if (this.busy || this.engine?.isBusy()) throw new Error('Wait for the task or cancel it before switching chat.');
+        const session = await this.sessionManager.setActiveSession(message.sessionId);
+        if (!session) throw new Error('This chat is unavailable.');
+        this.selectedModel = session.model;
+        this.activeMode = session.mode;
+        this.activeStrategy = session.strategy;
+        this.engine?.permissionManager.clearSession();
+        await this.refresh();
       }
 
       if (message.type === 'deleteSession') {
-        if (this.engine && message.sessionId) {
-          this.engine.sessionManager.deleteSession(message.sessionId);
-          this.engine.permissionManager.clearSession();
-          await this.refresh();
-        }
+        if (this.busy || this.engine?.isBusy()) throw new Error('Wait for the task or cancel it before deleting chat.');
+        const session = this.sessionManager.getSessions().find((session) => session.id === message.sessionId);
+        if (!session) return;
+        const choice = await vscode.window.showWarningMessage(`Delete chat "${session.title}"? Its messages will be removed. Workspace files and edit recovery backups are kept.`, { modal: true }, 'Delete chat');
+        if (choice !== 'Delete chat') return;
+        if (this.engine) await this.engine.deleteConversation(message.sessionId);
+        else await this.sessionManager.deleteSession(message.sessionId);
+        this.engine?.permissionManager.clearSession();
+        this.selectedModel = this.sessionManager.getActiveSession().model;
+        await this.refresh();
+      }
+
+      if (message.type === 'renameSession') {
+        const session = this.sessionManager.getSessions().find((session) => session.id === message.sessionId);
+        if (!session) throw new Error('This chat is unavailable.');
+        const title = await vscode.window.showInputBox({ title: 'Rename chat', value: session.title, validateInput: (value) => !value.trim() || value.length > 120 ? 'Enter 1–120 characters.' : undefined });
+        if (title !== undefined) await this.sessionManager.renameSession(session.id, title);
+        this.postSessions(false);
       }
 
       if (message.type === 'updateSettings') {
         if (message.settings && typeof message.settings === 'object') {
           const config = vscode.workspace.getConfiguration('localforge');
+          if (Object.keys(message.settings).some((key) => key.startsWith('chatMemory.') || key.startsWith('context.')) && !vscode.workspace.workspaceFolders?.length) throw new Error('Open a workspace before changing workspace memory/index settings.');
+          if (message.settings['chatMemory.scope'] === 'all' && config.get<string>('chatMemory.scope', 'current') !== 'all') {
+            const choice = await vscode.window.showWarningMessage('Allow retrieval from all chats in this workspace? Retrieved messages can be sent to the selected model endpoint. Current chat only is the private default.', { modal: true }, 'Allow all-chat memory');
+            if (choice !== 'Allow all-chat memory') { this.postAgentSettings(); return; }
+          }
           for (const [key, val] of Object.entries(message.settings)) {
-            await config.update(key, val, vscode.ConfigurationTarget.Global);
+            await config.update(key, val, key.startsWith('chatMemory.') || key.startsWith('context.') ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global);
           }
         }
         this.postAgentSettings();
+        if (this.engine && ('ollama.baseUrl' in message.settings || 'providers.openAICompatibleUrls' in message.settings)) {
+          await this.engine.updateProviderConfiguration({ ollamaEndpoint: vscode.workspace.getConfiguration('localforge.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'), openAiEndpoints: vscode.workspace.getConfiguration('localforge.providers').get<string>('openAICompatibleUrls', '') });
+          await this.refresh();
+        }
       }
 
       if (message.type === 'cancel') {
@@ -560,11 +676,19 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'chat') {
         await this.handleChatMessage(message);
       }
+      } catch (error) {
+        this.post({ type: 'error', message: error instanceof Error ? error.message : 'Could not update chat.' });
+      }
     });
   }
 
   public async refresh(): Promise<void> {
     try {
+      await this.sessionManager.initialize();
+      const session = this.sessionManager.getActiveSession();
+      this.selectedModel = session.model ?? this.selectedModel;
+      this.activeMode = session.mode;
+      this.activeStrategy = session.strategy;
       if (this.engine) {
         let models = this.engine.modelRegistry.getModels();
         if (models.length === 0) {
@@ -589,9 +713,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         selectedModel: this.selectedModel
       });
 
-      const history = this.conversations.get(this.selectedModel ?? '') ?? [];
-      this.post({ type: 'history', messages: history });
-      this.postActivityHistory();
+      this.postSessions();
       await this.postRemoteStatus();
 
       if (vscode.window.activeTextEditor) {
@@ -603,9 +725,11 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         state: 'ready',
         message: `${this.models.length} model(s) available`
       });
-      this.post({ type: 'permissionMode', mode: this.engine?.permissionManager.getMode() ?? 'always_ask' });
+      this.post({ type: 'permissionMode', mode: this.engine?.permissionManager.getMode() ?? 'always_ask', workspaceSession: this.engine?.permissionManager.hasWorkspaceSessionApproval() ?? false });
       this.post({ type: 'accessScope', ...(this.engine?.accessPolicy.getState() ?? { scope: 'workspace' }) });
       this.postAgentSettings();
+      this.postIndexStatus();
+      this.postProviderStatus();
       for (const pending of this.pendingPermissionRequests.values()) {
         if (!pending.request.signal?.aborted) this.postPermissionRequest(pending.request);
       }
@@ -619,6 +743,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   }
 
   public cancelActiveChat(): void {
+    this.activeInteraction = undefined;
     if (this.activeChat) {
       this.activeChat.abort();
       this.activeChat = undefined;
@@ -642,7 +767,15 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 
   private postAgentSettings(): void {
     const configuration = vscode.workspace.getConfiguration('localforge');
-    this.post({ type: 'agentSettings', maxRounds: configuration.get<number>('agent.maxRounds', 80), contextWindow: configuration.get<number>('ollama.contextWindow', 8192), maxOutputTokens: configuration.get<number>('ollama.maxOutputTokens', -1) });
+    this.post({ type: 'agentSettings', maxRounds: configuration.get<number>('agent.maxRounds', 80), contextWindow: configuration.get<number>('ollama.contextWindow', 8192), maxOutputTokens: configuration.get<number>('ollama.maxOutputTokens', -1),
+      chatMemory: { enabled: configuration.get('chatMemory.enabled', true), scope: configuration.get('chatMemory.scope', 'current'), recentCharacters: configuration.get('chatMemory.recentCharacters', 6000), retrievedCharacters: configuration.get('chatMemory.retrievedCharacters', 3000), resultCount: configuration.get('chatMemory.resultCount', 4) },
+      workspaceIndex: { maxIndexedFiles: configuration.get('context.maxIndexedFiles', 2000), maxFileBytes: configuration.get('context.maxFileBytes', 262144), maxIndexCharacters: configuration.get('context.maxIndexCharacters', 8000000) },
+      endpoints: { ollama: configuration.get('ollama.baseUrl', 'http://127.0.0.1:11434'), compatible: configuration.get('providers.openAICompatibleUrls', defaultCompatibleEndpoints) } });
+  }
+
+  private postProviderStatus(): void {
+    const health = this.engine?.modelRegistry.getHealthReport?.() ?? [];
+    this.post({ type: 'providerStatus', ...this.engine?.getProviderConfigurationStatus?.(), providers: (this.engine?.modelRegistry.getProviders?.() ?? []).map((provider) => ({ ...provider, ...health.find((entry) => entry.id === provider.id) })) });
   }
 
   public async sendUserPrompt(prompt: string, options: { includeContext?: boolean; mode?: AgentMode; strategy?: ExecutionStrategy } = {}): Promise<void> {
@@ -672,6 +805,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     includeContext?: boolean;
     includeWorkspace?: boolean;
     agentMode?: boolean;
+    files?: string[];
   }): Promise<void> {
     if (this.busy) {
       console.warn('[LocalForge] Cancelling prior in-flight task for incoming prompt.');
@@ -685,13 +819,26 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       ? message.model
       : (this.selectedModel && this.selectedModel !== 'auto' ? this.selectedModel : '');
     const mode = this.activeMode;
-    const history = this.conversations.get(modelName) ?? [];
+    const session = this.sessionManager.getActiveSession();
+    const history = session.messages;
     let finalStatusMessage = 'Ready';
 
     this.post({ type: 'status', state: 'thinking', message: 'Analyzing task...' });
     this.post({ type: 'userMessage', content: message.prompt });
 
     try {
+      await this.sessionManager.initialize();
+      if (this.activeInteraction !== interaction) return;
+      if (message.files?.length) {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (!root || vscode.workspace.isTrusted === false) throw new Error('Open a trusted workspace to attach files.');
+        for (const filePath of message.files) {
+          validateRelativeWorkspacePath(filePath);
+          this.engine?.accessPolicy.assertFile(filePath);
+          if (!await canAttachWorkspaceContext(vscode.Uri.joinPath(root, filePath))) throw new Error(`Cannot attach ${filePath}: outside workspace or sensitive file.`);
+        }
+        message = { ...message, prompt: message.prompt + '\n' + message.files.map(filePath => '@file:' + JSON.stringify(filePath)).join(' ') };
+      }
       if (this.engine) {
         const summary = await this.engine.executeTask(
           message.prompt,
@@ -706,10 +853,10 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
               if (this.activeInteraction === interaction) this.post({ type: 'chunk', content: token });
             },
             onActivity: (activity: TurnActivity) => {
-              this.post({ type: 'activity', activity });
+              if (this.activeInteraction === interaction) this.post({ type: 'activity', activity });
             },
             onArtifact: (artifact: Artifact) => {
-              this.post({ type: 'artifact', artifact });
+              if (this.activeInteraction === interaction) this.post({ type: 'artifact', artifact });
             }
           }
         );
@@ -729,17 +876,15 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
           finalStatusMessage = 'Cancelled';
         }
 
-        history.push({ role: 'user', content: message.prompt });
-        history.push({ role: 'assistant', content: summary.response });
-        this.conversations.set(modelName, history);
-        this.saveConversations();
+        if (!this.engine.sessionManager) await this.sessionManager.appendMessages(session.id, [{ role: 'user', content: message.prompt }, { role: 'assistant', content: summary.response, model: modelName }]);
+        this.postSessions(this.engine.referenceResolver?.parseSlashCommand(message.prompt).command === 'clear');
 
         this.post({ type: 'done', fullResponse: summary.response });
       } else {
         // Fallback direct provider streaming
         this.activeChat = new AbortController();
         let full = '';
-        const messages: ChatMessage[] = [
+        const messages: ChatMessage[] = classifyTaskIntent(message.prompt) === 'conversation' ? conversationalMessages(message.prompt) : [
           ...history.slice(-8),
           { role: 'user', content: message.prompt }
         ];
@@ -756,10 +901,8 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
         );
         if (this.activeInteraction !== interaction) return;
 
-        history.push({ role: 'user', content: message.prompt });
-        history.push({ role: 'assistant', content: full });
-        this.conversations.set(modelName, history);
-        this.saveConversations();
+        await this.sessionManager.appendMessages(session.id, [{ role: 'user', content: message.prompt }, { role: 'assistant', content: full, model: modelName }], { model: modelName, mode: this.activeMode, strategy: this.activeStrategy }, { epoch: session.historyEpoch });
+        this.postSessions(false);
 
         this.post({ type: 'done', fullResponse: full });
       }
@@ -785,9 +928,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   const nonce = randomBytes(16).toString('hex');
   const cspSource = webview.cspSource;
-  const logoUri = extensionUri && typeof webview.asWebviewUri === 'function'
-    ? webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'lomvren-icon.png')).toString()
-    : '';
+
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -795,859 +936,60 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <style>
-    :root {
-      --bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
-      --editor-bg: var(--vscode-editor-background, #1e1e1e);
-      --fg: var(--vscode-foreground, #cccccc);
-      --border: var(--vscode-panel-border, var(--vscode-widget-border, rgba(128,128,128,0.2)));
-      --accent: var(--vscode-button-background, #1a73e8);
-      --accent-fg: var(--vscode-button-foreground, #ffffff);
-      --input-bg: var(--vscode-input-background, #252526);
-      --input-fg: var(--vscode-input-foreground, #cccccc);
-      --subtle: var(--vscode-descriptionForeground, #888888);
-      --card-bg: var(--vscode-editor-inactiveSelectionBackground, rgba(128,128,128,0.08));
-      --badge-bg: var(--vscode-badge-background, #4d4d4d);
-      --badge-fg: var(--vscode-badge-foreground, #ffffff);
-      --success: #34a853;
-      --warning: #fbbc04;
-      --error: #ea4335;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--fg);
-      font: 12.5px/1.5 var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      overflow: hidden;
-      user-select: none;
-    }
-    button:focus-visible, select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible {
-      outline: 2px solid var(--vscode-focusBorder, #1a73e8);
-      outline-offset: 2px;
-    }
-    .msg-user, .msg-assistant, .artifact-body, .permission-command, textarea { user-select: text; }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        scroll-behavior: auto !important;
-        transition-duration: 0.01ms !important;
-      }
-    }
-
-    /* SVG Icons */
-    .icon {
-      width: 14px;
-      height: 14px;
-      fill: none;
-      stroke: currentColor;
-      stroke-width: 1.5;
-      stroke-linecap: round;
-      stroke-linejoin: round;
-      flex-shrink: 0;
-    }
-
-    /* Top Header */
-    .header {
-      display: flex;
-      flex-direction: column;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg);
-      flex-shrink: 0;
-      padding: 10px 12px;
-      gap: 8px;
-    }
-    .header-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .header-title {
-      font-weight: 600;
-      font-size: 12px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      letter-spacing: -0.2px;
-    }
-    .header-actions {
-      display: flex;
-      align-items: center;
-      gap: 2px;
-    }
-    .icon-btn {
-      background: transparent;
-      border: 0;
-      color: var(--subtle);
-      cursor: pointer;
-      padding: 4px;
-      border-radius: 8px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s, color 0.15s;
-    }
-    .icon-btn:hover {
-      color: var(--fg);
-      background: var(--card-bg);
-    }
-
-    /* Model Chip & Selector */
-    .model-chip {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 6px 10px;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      font-size: 11.5px;
-      cursor: pointer;
-      color: var(--fg);
-    }
-    .model-chip:hover { border-color: var(--accent); }
-    .model-info-left {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-    }
-    .model-badge {
-      font-size: 10px;
-      padding: 1px 4px;
-      border-radius: 3px;
-      background: var(--badge-bg);
-      color: var(--badge-fg);
-      text-transform: uppercase;
-    }
-    .model-badge.remote {
-      background: #0284c7;
-      color: #ffffff;
-    }
-
-    /* Segmented Mode Selector */
-    .mode-bar {
-      display: flex;
-      padding: 8px 12px;
-      background: var(--bg);
-      gap: 6px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .mode-btn {
-      flex: 1;
-      border: 1px solid transparent;
-      padding: 6px 8px;
-      font-size: 11px;
-      font-weight: 500;
-      background: transparent;
-      color: var(--subtle);
-      border-radius: 8px;
-      cursor: pointer;
-      text-align: center;
-      transition: all 0.12s;
-    }
-    .mode-btn:hover { color: var(--fg); }
-    .mode-btn.active {
-      background: var(--card-bg);
-      color: var(--fg);
-      border-color: var(--border);
-      font-weight: 600;
-    }
-    .strategy-toggle {
-      display: flex;
-      border-left: 1px solid var(--border);
-      padding-left: 6px;
-      gap: 3px;
-      align-items: center;
-    }
-    .strat-btn {
-      border: 1px solid transparent;
-      background: transparent;
-      color: var(--subtle);
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 3px;
-      cursor: pointer;
-    }
-    .strat-btn.active {
-      background: var(--card-bg);
-      border-color: var(--border);
-      color: var(--fg);
-      font-weight: 600;
-    }
-
-    /* Conversation & Activity Area */
-    .conversation-area {
-      flex: 1;
-      min-height: 0;
-      position: relative;
-      display: flex;
-    }
-    .main-scroll {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      user-select: text;
-    }
-    .jump-latest {
-      position: absolute;
-      right: 18px;
-      bottom: 12px;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 6px 11px;
-      color: var(--fg);
-      background: var(--card-bg);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
-      cursor: pointer;
-      z-index: 2;
-    }
-    .jump-latest[hidden] { display: none; }
-    .jump-latest:hover { border-color: var(--accent); }
-
-    /* Timeline & Activity */
-    .timeline {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      border-left: 2px solid var(--border);
-      margin-left: 6px;
-      padding-left: 10px;
-    }
-    .timeline-row {
-      display: flex;
-      align-items: flex-start;
-      gap: 6px;
-      font-size: 11.5px;
-      color: var(--subtle);
-      padding: 4px 0;
-      width: 100%;
-      overflow-wrap: anywhere;
-    }
-    .timeline-row[data-status="running"] .activity-symbol { color: var(--accent); }
-    .timeline-row[data-status="error"] .activity-symbol { color: var(--error); }
-    .activity-symbol { width: 14px; flex-shrink: 0; color: var(--subtle); }
-    .activity-duration { color: var(--subtle); font-size: 10px; white-space: nowrap; }
-    .timeline-row details pre { font-family: var(--vscode-editor-font-family, monospace); }
-    .timeline-cat {
-      font-weight: 600;
-      color: var(--fg);
-      min-width: 60px;
-    }
-    .timeline-details { margin-top: 3px; font-size: 10.5px; }
-    .timeline-details summary { cursor: pointer; color: var(--subtle); }
-    .timeline-details div { padding: 5px 7px; margin-top: 3px; border-left: 2px solid var(--border); }
-    .timeline-details pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; font: inherit; max-height: 260px; overflow: auto; }
-    .timeline-text {
-      flex: 1;
-      word-break: break-word;
-    }
-    .timeline-status {
-      font-size: 10px;
-      padding: 1px 5px;
-      border-radius: 3px;
-      text-transform: uppercase;
-      font-weight: 600;
-      white-space: nowrap;
-    }
-    .timeline-status.started, .timeline-status.running {
-      background: var(--card-bg);
-      color: var(--accent);
-    }
-    .timeline-status.success {
-      background: rgba(46, 160, 67, 0.15);
-      color: var(--success);
-    }
-    .timeline-status.warning {
-      background: rgba(210, 153, 34, 0.15);
-      color: #d29922;
-    }
-    .timeline-status.error, .timeline-status.failed {
-      background: rgba(248, 81, 73, 0.15);
-      color: var(--error);
-    }
-    .timeline-status.cancelled { background: var(--card-bg); color: var(--subtle); }
-    .timeline-status.waiting_for_approval {
-      background: rgba(210, 153, 34, 0.15);
-      color: #d29922;
-    }
-    .msg-assistant.streaming::after {
-      content: ' ▌';
-      animation: blink 1s step-start infinite;
-      color: var(--accent);
-    }
-    @keyframes blink { 50% { opacity: 0; } }
-
-    /* Message Cards */
-    .msg-user {
-      align-self: flex-end;
-      background: var(--card-bg);
-      color: var(--fg);
-      padding: 8px 12px;
-      border-radius: 8px;
-      max-width: 90%;
-      word-break: break-word;
-      font-size: 12.5px;
-    }
-    .msg-assistant {
-      align-self: flex-start;
-      background: transparent;
-      color: var(--fg);
-      padding: 4px 0;
-      border-radius: 0;
-      border: 0;
-      max-width: 100%;
-      min-width: 0;
-      width: 100%;
-      word-break: break-word;
-      font-size: 12px;
-      line-height: 1.55;
-    }
-    .msg-assistant p { margin: 0 0 8px; }
-    .msg-assistant p:last-child { margin-bottom: 0; }
-    .msg-assistant h1, .msg-assistant h2 { margin: 16px 0 8px; font-size: 15px; }
-    .msg-assistant h3, .msg-assistant h4, .msg-assistant h5, .msg-assistant h6 { margin: 12px 0 6px; font-size: 13px; }
-    .msg-assistant ul, .msg-assistant ol { margin: 8px 0; padding-left: 22px; }
-    .msg-assistant li { margin: 5px 0; line-height: 1.6; }
-    .msg-assistant blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--border); color: var(--subtle); }
-    .msg-assistant pre { overflow-x: auto; padding: 8px; margin: 6px 0; background: var(--input-bg); border-radius: 8px; }
-    .msg-assistant code { font-family: var(--vscode-editor-font-family, Consolas, monospace); }
-    .msg-assistant p code { padding: 1px 3px; background: var(--input-bg); border-radius: 3px; }
-    .msg-assistant.thinking-bubble {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      font-style: italic;
-      color: var(--subtle);
-      border: 1px dashed var(--border);
-      background: var(--card-bg);
-      padding: 8px 12px;
-      font-size: 12px;
-    }
-    .thinking-spinner {
-      width: 14px;
-      height: 14px;
-      border: 2px solid var(--border);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: lf-spin 0.8s linear infinite;
-      display: inline-block;
-      flex-shrink: 0;
-    }
-    @keyframes lf-spin {
-      to { transform: rotate(360deg); }
-    }
-
-    /* Interactive Artifact Card */
-    .artifact-card {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: var(--bg);
-      padding: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    .artifact-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-weight: 600;
-      font-size: 12px;
-    }
-    .artifact-title {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .artifact-body {
-      font-size: 11.5px;
-      color: var(--fg);
-      max-height: 200px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      font-family: inherit;
-      background: var(--card-bg);
-      padding: 8px;
-      border-radius: 8px;
-    }
-    .artifact-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      align-items: center;
-    }
-    .action-btn {
-      background: var(--accent);
-      color: var(--accent-fg);
-      border: 0;
-      border-radius: 8px;
-      padding: 4px 10px;
-      font-size: 11px;
-      font-weight: 500;
-      cursor: pointer;
-      min-height: 28px;
-      transition: filter 0.15s, background 0.15s;
-    }
-    .action-btn:hover:not(:disabled), .send-btn:hover:not(:disabled) { filter: brightness(1.08); }
-    .action-btn.secondary {
-      background: transparent;
-      border: 1px solid var(--border);
-      color: var(--fg);
-    }
-    .action-btn.secondary:hover { background: var(--card-bg); }
-
-    /* Permission Request Card */
-    .permission-card {
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--accent);
-      border-radius: 12px;
-      background: var(--card-bg);
-      padding: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      font-size: 11.5px;
-    }
-    .permission-title {
-      font-weight: 600;
-      color: var(--fg);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .permission-desc {
-      color: var(--subtle);
-      font-family: monospace;
-      font-size: 11px;
-      word-break: break-all;
-      background: var(--bg);
-      padding: 4px 6px;
-      border-radius: 6px;
-    }
-    .permission-command {
-      margin: 0;
-      padding: 7px;
-      max-height: 160px;
-      overflow: auto;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: var(--fg);
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      font: 11px var(--vscode-editor-font-family, monospace);
-    }
-    .permission-actions {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      margin-top: 4px;
-    }
-
-    /* Bottom Utility Toolbar */
-    .toolbar-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 4px 12px;
-      background: var(--bg);
-      border-top: 1px solid var(--border);
-      font-size: 11px;
-      color: var(--subtle);
-      flex-shrink: 0;
-    }
-    .toolbar-items {
-      display: flex;
-      gap: 8px;
-    }
-    .toolbar-btn {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      background: transparent;
-      border: 0;
-      color: var(--subtle);
-      font-size: 11px;
-      cursor: pointer;
-      padding: 2px 4px;
-      border-radius: 8px;
-    }
-    .toolbar-btn:hover {
-      color: var(--fg);
-      background: var(--card-bg);
-    }
-    .toolbar-count {
-      font-weight: 600;
-      padding: 0 4px;
-      background: var(--badge-bg);
-      color: var(--badge-fg);
-      border-radius: 3px;
-      font-size: 10px;
-    }
-
-    /* Composer */
-    .composer {
-      padding: 8px 12px 10px;
-      background: var(--bg);
-      border-top: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      flex-shrink: 0;
-    }
-    .ref-chips {
-      display: flex;
-      gap: 4px;
-      overflow-x: auto;
-      padding-bottom: 2px;
-    }
-    .chip {
-      font-size: 10.5px;
-      color: var(--subtle);
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 2px 6px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .chip:hover {
-      color: var(--fg);
-      border-color: var(--accent);
-    }
-    .composer-input-box {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: var(--input-bg);
-      padding: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      position: relative;
-    }
-    .composer-input-box:focus-within {
-      border-color: var(--accent);
-    }
-    textarea {
-      width: 100%;
-      border: 0;
-      outline: 0;
-      background: transparent;
-      color: var(--input-fg);
-      font-family: inherit;
-      font-size: 12.5px;
-      resize: none;
-      min-height: 44px;
-      max-height: 160px;
-      line-height: 1.4;
-    }
-    .composer-bottom {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding-top: 4px;
-      border-top: 1px solid rgba(128,128,128,0.1);
-    }
-    .composer-bottom-left {
-      font-size: 11px;
-      color: var(--subtle);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .send-btn {
-      background: var(--accent);
-      color: var(--accent-fg);
-      border: 0;
-      border-radius: 8px;
-      padding: 4px 12px;
-      font-size: 11.5px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: filter 0.15s;
-    }
-    .send-btn:disabled { opacity: 0.5; cursor: default; }
-
-    /* Slash Auto-complete Popup */
-    .slash-popup {
-      position: absolute;
-      bottom: 100%;
-      left: 0;
-      right: 0;
-      background: var(--input-bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-      display: none;
-      flex-direction: column;
-      margin-bottom: 4px;
-      overflow: hidden;
-      z-index: 50;
-    }
-    .slash-popup.open { display: flex; }
-    .slash-item {
-      padding: 6px 10px;
-      font-size: 11.5px;
-      display: flex;
-      justify-content: space-between;
-      cursor: pointer;
-      color: var(--fg);
-    }
-    .slash-item:hover, .slash-item.selected {
-      background: var(--accent);
-      color: var(--accent-fg);
-    }
-
-    /* Drawers (Review Changes, Terminal, Settings) */
-    .drawer {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: var(--bg);
-      z-index: 100;
-      display: none;
-      flex-direction: column;
-      overflow-y: auto;
-      padding: 12px;
-      gap: 12px;
-    }
-    .drawer.open { display: flex; }
-    .drawer-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 8px;
-    }
-    .drawer-title {
-      font-weight: 600;
-      font-size: 13px;
-    }
-    .diff-list {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .diff-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 6px 8px;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      font-size: 11.5px;
-      font-family: monospace;
-      cursor: pointer;
-    }
-    .diff-item:hover { border-color: var(--accent); }
-    .diff-stats {
-      font-size: 11px;
-      display: flex;
-      gap: 6px;
-    }
-    .stat-add { color: var(--success); font-weight: 600; }
-    .stat-del { color: var(--error); font-weight: 600; }
-
-    /* Model Picker Modal */
-    .modal-overlay {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0,0,0,0.5);
-      z-index: 200;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-    }
-    .modal-overlay.open { display: flex; }
-    .modal-box {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      width: 100%;
-      max-width: 380px;
-      max-height: 80vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-    }
-    .modal-header {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-weight: 600;
-      font-size: 12px;
-    }
-    .model-list {
-      overflow-y: auto;
-      padding: 6px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .model-option {
-      padding: 8px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      border: 1px solid transparent;
-    }
-    .model-option:hover {
-      background: var(--card-bg);
-      border-color: var(--border);
-    }
-    .model-option.selected {
-      background: var(--card-bg);
-      border-color: var(--accent);
-    }
-    .model-opt-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-weight: 600;
-      font-size: 12px;
-    }
-    .model-opt-meta {
-      font-size: 11px;
-      color: var(--subtle);
-      display: flex;
-      gap: 8px;
-    }
-
-    /* Terminal Output Container */
-    .terminal-box {
-      background: var(--editor-bg);
-      color: var(--fg);
-      font-family: monospace;
-      font-size: 11px;
-      padding: 8px;
-      border-radius: 4px;
-      max-height: 250px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-    }
-  </style>
+  <style>${chatStyles}</style>
 </head>
 <body>
-  <!-- Header -->
-  <div class="header">
+  <header class="header">
     <div class="header-top">
-      <div class="header-title" style="display:flex; align-items:center; gap:7px;">
-        ${logoUri ? `<img src="${logoUri}" alt="LOMVREN" style="width:18px; height:18px; border-radius:4px; object-fit:contain;" />` : ''}
-        <span>LOMVREN</span>
-        <span id="sessionTitle" style="color:var(--subtle); font-weight:normal;"></span>
-      </div>
+      <div class="header-title"><span>Chat</span><span id="sessionTitle"></span></div>
       <div class="header-actions">
-        <button class="icon-btn" id="newChatBtn" title="New Session">
+        <button class="icon-btn" id="newChatBtn" title="New chat" aria-label="New chat">
           <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
         </button>
-        <button class="icon-btn" id="refreshBtn" title="Refresh Models">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        </button>
-        <button class="icon-btn" id="diagnoseBtn" title="Diagnose Installation">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        </button>
-        <button class="icon-btn" id="settingsBtn" title="Settings">
-          <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <details id="chatHistory">
+          <summary title="Chat history" aria-label="Chat history"><svg class="icon" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 6.4M3 4v7h7M12 7v5l3 2"/></svg></summary>
+          <div class="history-panel">
+            <input id="chatFilter" aria-label="Filter chats" placeholder="Search chats" />
+            <button id="clearChatBtn" title="Clear current chat">Clear current chat</button>
+            <div id="chatList"></div>
+          </div>
+        </details>
+        <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="18" r="2"/></svg>
         </button>
       </div>
     </div>
-    <!-- Model Chip -->
-    <div class="model-chip" id="modelChipBtn" title="Click to choose model">
-      <div class="model-info-left">
-        <span id="activeModelLabel">Auto</span>
-        <span class="model-badge" id="activeModelBadge">Local</span>
-        <span id="remoteGpuStatus" style="font-size:10.5px; color:var(--subtle);"></span>
+  </header>
+  <main class="conversation-area">
+    <div class="main-scroll" id="mainScroll" role="region" aria-label="Conversation and actual tool activity" tabindex="0">
+      <div class="msg-assistant welcome">
+        <span class="welcome-label">LOMVREN</span>
+        <strong>What would you like to build?</strong>
+        <p>Ask about your code, plan a change, or let the agent work. You review the edits.</p>
       </div>
-      <svg class="icon" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
-    </div>
-  </div>
-
-  <!-- Mode Selector -->
-  <div class="mode-bar">
-    <button class="mode-btn" data-mode="ask" id="modeAsk">Ask</button>
-    <button class="mode-btn" data-mode="plan" id="modePlan">Plan</button>
-    <button class="mode-btn active" data-mode="agent" id="modeAgent">Agent</button>
-    <div class="strategy-toggle">
-      <button class="strat-btn" id="stratFast" title="Direct execution for small tasks">Fast</button>
-      <button class="strat-btn active" id="stratPlanning" title="Plan and verify major changes">Planning</button>
-    </div>
-  </div>
-
-  <!-- Conversation & Activity Scroll Area -->
-  <div class="conversation-area">
-    <div class="main-scroll" id="mainScroll">
-    <div class="msg-assistant welcome" style="display:flex; gap:10px; align-items:center;">
-      ${logoUri ? `<img src="${logoUri}" alt="LOMVREN Logo" style="width:34px; height:34px; border-radius:6px; object-fit:contain; flex-shrink:0;" />` : ''}
-      <div>
-        <strong>LOMVREN</strong><br>
-        <span style="font-size:11px; opacity:0.85;">Local AI coding agent · chat, plans, and reviewable changes.</span>
-      </div>
-    </div>
-    <div class="timeline" id="timelineContainer" style="display:none;"></div>
+      <div class="timeline" id="timelineContainer" style="display:none;"></div>
     </div>
     <button class="jump-latest" id="jumpToLatest" type="button" hidden aria-label="Jump to latest activity">↓ Latest</button>
-  </div>
-  <div style="display:flex; align-items:center; gap:8px; padding:4px 12px 8px;">
-    <label for="accessScopeSelect" style="color:var(--subtle); font-size:11px;">Access</label>
-    <select id="accessScopeSelect" style="min-width:0; flex:1; background:transparent; color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:4px;" aria-label="Agent access scope">
-      <option value="workspace">Project workspace</option>
-      <option value="file">File</option>
-      <option value="machine">Full Machine</option>
-    </select>
-  </div>
-
-  <!-- Bottom Utility Toolbar -->
-  <div class="toolbar-bar">
-    <div class="toolbar-items">
-      <button class="toolbar-btn" id="openChangesBtn">
-        <svg class="icon" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7M6 9v12"/></svg>
-        <span>Changes</span>
-        <span class="toolbar-count" id="changesBadge">0</span>
-      </button>
-      <button class="toolbar-btn" id="openTerminalBtn">
-        <svg class="icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-        <span>Terminal</span>
-        <span class="toolbar-count" id="terminalBadge">0</span>
-      </button>
-    </div>
-    <div id="footerStatusText">Ready</div>
-  </div>
-
-  <!-- Composer Area -->
-  <div class="composer">
-    <div class="ref-chips">
-      <span class="chip" data-ref="@file">@file</span>
-      <span class="chip" data-ref="@selection">@selection</span>
-      <span class="chip" data-ref="@terminal">@terminal</span>
-      <span class="chip" data-ref="@diagnostics">@diagnostics</span>
-      <span class="chip" data-ref="@git">@git</span>
-    </div>
+  </main>
+  <section class="composer" aria-label="Message composer">
     <div class="composer-input-box">
-      <!-- Slash Command Autocomplete Popup -->
+      <div class="context-row">
+        <details id="filePicker">
+          <summary>Add context <span id="fileCount"></span></summary>
+          <div class="context-panel">
+            <div class="ref-chips">
+              <button class="chip" type="button" data-ref="@selection">Selection</button>
+              <button class="chip" type="button" data-ref="@terminal">Terminal</button>
+              <button class="chip" type="button" data-ref="@diagnostics">Diagnostics</button>
+              <button class="chip" type="button" data-ref="@git">Git</button>
+            </div>
+            <input id="fileFilter" type="search" placeholder="Search workspace files" aria-label="Filter workspace files" />
+            <div id="fileList">Open to load available files.</div>
+          </div>
+        </details>
+        <span id="activeFileName"></span>
+      </div>
+      <div id="selectedFiles" aria-label="Attached files"></div>
       <div class="slash-popup" id="slashPopup">
         <div class="slash-item" data-cmd="/plan"><span>/plan</span><span style="color:var(--subtle);">Architecture & plan</span></div>
         <div class="slash-item" data-cmd="/diff"><span>/diff</span><span style="color:var(--subtle);">Inspect pending edits</span></div>
@@ -1659,18 +1001,39 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         <div class="slash-item" data-cmd="/remote"><span>/remote</span><span style="color:var(--subtle);">SSH remote GPU</span></div>
         <div class="slash-item" data-cmd="/clear"><span>/clear</span><span style="color:var(--subtle);">Clear conversation</span></div>
       </div>
-      <textarea id="promptInput" placeholder="Type a task, question, or / for commands..."></textarea>
+      <textarea id="promptInput" aria-label="Message to LOMVREN" placeholder="Ask anything, or describe what to build…" rows="3"></textarea>
       <div class="composer-bottom">
-        <div class="composer-bottom-left">
-          <span id="activeFileName"></span>
+        <select id="modeSelect" aria-label="Conversation mode">
+          <option value="agent">Agent</option><option value="ask">Ask</option><option value="plan">Plan</option>
+        </select>
+        <div class="model-chip">
+          <select id="modelSelect" aria-label="Select model"><option value="auto">Auto</option></select>
+          <span id="activeModelLabel">Automatic routing</span>
+          <span class="model-badge" id="activeModelBadge" title="Model execution location">Auto</span>
         </div>
+        <select id="effortSelect" aria-label="Agent effort" title="Low: shorter budgets. Medium: balanced. High: larger configured budgets. Ultra: configured maximum context and no round cap; hardware limits still apply.">
+          <option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="ultra">Ultra</option>
+        </select>
         <button type="button" class="send-btn" id="sendBtn">Send</button>
       </div>
     </div>
-  </div>
+    <div class="toolbar-bar">
+      <div class="toolbar-items">
+        <button class="toolbar-btn" id="openChangesBtn" title="Review changes">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7M6 9v12"/></svg>
+          <span>Changes</span><span class="toolbar-count" id="changesBadge">0</span>
+        </button>
+        <button class="toolbar-btn" id="openTerminalBtn" title="Actual terminal activity">
+          <svg class="icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          <span>Terminal</span><span class="toolbar-count" id="terminalBadge">0</span>
+        </button>
+      </div>
+      <div id="footerStatusText" role="status" aria-live="polite">Ready</div>
+    </div>
+  </section>
 
   <!-- Review Changes Drawer -->
-  <div class="drawer" id="changesDrawer">
+  <div class="drawer" id="changesDrawer" role="dialog" aria-modal="true" aria-label="Review Changes" tabindex="-1">
     <div class="drawer-header">
       <div class="drawer-title">Review Changes</div>
       <button class="icon-btn" id="closeChangesBtn">
@@ -1691,7 +1054,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   </div>
 
   <!-- Terminal Drawer -->
-  <div class="drawer" id="terminalDrawer">
+  <div class="drawer" id="terminalDrawer" role="dialog" aria-modal="true" aria-label="Terminal" tabindex="-1">
     <div class="drawer-header">
       <div class="drawer-title">Terminal Activity</div>
       <button class="icon-btn" id="closeTerminalBtn">
@@ -1703,7 +1066,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   </div>
 
   <!-- Settings Drawer -->
-  <div class="drawer" id="settingsDrawer">
+  <div class="drawer" id="settingsDrawer" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1">
     <div class="drawer-header">
       <div class="drawer-title">LOMVREN Settings</div>
       <button class="icon-btn" id="closeSettingsBtn">
@@ -1711,11 +1074,30 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       </button>
     </div>
     <div style="display:flex; flex-direction:column; gap:8px;">
-      <span style="font-size:11px; text-transform:uppercase; color:var(--subtle); font-weight:600;">Endpoints</span>
-      <div style="background:var(--card-bg); padding:8px; border-radius:4px; font-size:11.5px; display:flex; justify-content:space-between;">
-        <span>Ollama Endpoint</span>
-        <span style="font-family:monospace; color:var(--subtle);">http://127.0.0.1:11434</span>
+      <label for="accessScopeSelect">Agent access</label>
+      <select id="accessScopeSelect" aria-label="Agent access scope">
+        <option value="workspace">Project workspace</option><option value="file">File</option><option value="machine">Full Machine</option>
+      </select>
+      <label>Execution strategy</label>
+      <div class="strategy-toggle" role="group" aria-label="Execution strategy">
+        <button class="strat-btn" id="stratFast" title="Direct execution for small tasks">Fast</button>
+        <button class="strat-btn active" id="stratPlanning" title="Plan and verify major changes">Planning</button>
       </div>
+      <span id="remoteGpuStatus"></span>
+      <div class="settings-actions">
+        <button class="action-btn secondary" id="refreshBtn">Refresh models</button>
+        <button class="action-btn secondary" id="diagnoseBtn">Diagnose installation</button>
+      </div>
+      <button class="action-btn" id="openModelsBtn">Download & manage models</button>
+      <p style="color:var(--subtle);margin:0;">Choose this machine or a connected SSH host in Models. Downloads use that host's Ollama service; GPU inference depends on its available VRAM and runtime.</p>
+      <span style="font-size:11px; text-transform:uppercase; color:var(--subtle); font-weight:600;">Endpoints</span>
+      <label for="ollamaEndpointInput">Ollama base URL (user settings)</label>
+      <input id="ollamaEndpointInput" type="url" required maxlength="2048" style="width:100%;box-sizing:border-box;" />
+      <label for="compatibleEndpointsInput">Compatible API base URLs (user settings)</label>
+      <textarea id="compatibleEndpointsInput" maxlength="16384" rows="3" style="width:100%;box-sizing:border-box;" aria-describedby="providerPrivacy"></textarea>
+      <div id="providerPrivacy" style="font-size:11px;color:var(--subtle);">One base URL per line or comma. Remote/API endpoints receive the prompts and context you send to their models. Changes wait for active work to finish.</div>
+      <button class="action-btn secondary" id="saveProviderSettings">Save endpoints</button>
+      <div id="providerStatus" role="status" style="font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;">Checking endpoints…</div>
       <div style="background:var(--card-bg); padding:8px; border-radius:4px; font-size:11.5px; display:flex; justify-content:space-between; align-items:center;">
         <span>Remote GPU Host (SSH)</span>
         <button class="action-btn secondary" id="sshConnectBtn" style="padding:2px 8px;">Connect SSH</button>
@@ -1743,20 +1125,25 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       <label for="ollamaOutputInput">Local output tokens (-1 = no extension cap)</label>
       <input id="ollamaOutputInput" type="number" min="-1" max="1048576" value="-1" />
       <button class="action-btn secondary" id="saveAgentSettings">Save limits</button>
+      <label><input id="chatMemoryEnabled" type="checkbox" /> Retrieve older chat messages locally</label>
+      <label for="chatMemoryScope">Chat memory scope (workspace setting)</label>
+      <select id="chatMemoryScope"><option value="current">Current chat only (default)</option><option value="all">All chats in this workspace</option></select>
+      <label for="recentChatBudget">Recent chat characters</label>
+      <input id="recentChatBudget" type="number" min="0" max="32000" />
+      <label for="retrievedChatBudget">Retrieved older-chat characters</label>
+      <input id="retrievedChatBudget" type="number" min="0" max="16000" />
+      <label for="chatMemoryCount">Retrieved message limit</label>
+      <input id="chatMemoryCount" type="number" min="1" max="20" />
+      <button class="action-btn secondary" id="saveChatMemorySettings">Save chat memory</button>
+      <label>Workspace index (workspace settings)</label>
+      <div id="workspaceIndexStatus" role="status" style="font-size:11px; color:var(--subtle);">Index status unavailable</div>
+      <button class="action-btn secondary" id="rebuildWorkspaceIndex">Rebuild workspace index</button>
+      <label for="maxIndexedFiles">Maximum indexed files</label><input id="maxIndexedFiles" type="number" min="1" max="20000" />
+      <label for="maxFileBytes">Maximum bytes per file</label><input id="maxFileBytes" type="number" min="1024" max="8388608" />
+      <label for="maxIndexCharacters">Maximum retained source characters</label><input id="maxIndexCharacters" type="number" min="100000" max="64000000" />
+      <button class="action-btn secondary" id="saveWorkspaceIndexSettings">Save index limits</button>
+      <div style="font-size:11px; color:var(--subtle);">Changes apply to the next request. File access and greetings exclude chat memory. Use /search chat &lt;query&gt; and /context to inspect evidence. Clearing/deleting chat removes its retrievable messages.</div>
       <div style="font-size:11px; color:var(--subtle);">Local inference has no publisher token quota. Context, RAM/VRAM and model capability remain finite. Commands are not OS-sandboxed. Internet page reads and recognized network commands require approval.</div>
-    </div>
-  </div>
-
-  <!-- Model Picker Modal -->
-  <div class="modal-overlay" id="modelModal">
-    <div class="modal-box">
-      <div class="modal-header">
-        <span>Select Model</span>
-        <button class="icon-btn" id="closeModelModalBtn">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
-      </div>
-      <div class="model-list" id="modelModalList"></div>
     </div>
   </div>
 
@@ -1783,9 +1170,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     const promptInput = document.getElementById('promptInput');
     const sendBtn = document.getElementById('sendBtn');
     const slashPopup = document.getElementById('slashPopup');
-    const modelChipBtn = document.getElementById('modelChipBtn');
-    const modelModal = document.getElementById('modelModal');
-    const modelModalList = document.getElementById('modelModalList');
+    const modelSelect = document.getElementById('modelSelect');
+    const effortSelect = document.getElementById('effortSelect');
+    effortSelect.addEventListener('change', () => vscode.postMessage({ type: 'setEffort', effort: effortSelect.value }));
     const activeModelLabel = document.getElementById('activeModelLabel');
     const activeModelBadge = document.getElementById('activeModelBadge');
     const remoteGpuStatus = document.getElementById('remoteGpuStatus');
@@ -1796,11 +1183,34 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     const changesDrawer = document.getElementById('changesDrawer');
     const terminalDrawer = document.getElementById('terminalDrawer');
     const settingsDrawer = document.getElementById('settingsDrawer');
+    const ollamaEndpointInput = document.getElementById('ollamaEndpointInput');
+    const compatibleEndpointsInput = document.getElementById('compatibleEndpointsInput');
+    document.getElementById('saveProviderSettings').addEventListener('click', () => {
+      if (!ollamaEndpointInput.reportValidity()) return;
+      vscode.postMessage({ type: 'updateSettings', settings: { 'ollama.baseUrl': ollamaEndpointInput.value.trim(), 'providers.openAICompatibleUrls': compatibleEndpointsInput.value } });
+    });
     const permissionModeSelect = document.getElementById('permissionModeSelect');
     const accessScopeSelect = document.getElementById('accessScopeSelect');
     const agentRoundsInput = document.getElementById('agentRoundsInput');
     const ollamaContextInput = document.getElementById('ollamaContextInput');
     const ollamaOutputInput = document.getElementById('ollamaOutputInput');
+    const chatMemoryEnabled = document.getElementById('chatMemoryEnabled');
+    const chatMemoryScope = document.getElementById('chatMemoryScope');
+    const recentChatBudget = document.getElementById('recentChatBudget');
+    const retrievedChatBudget = document.getElementById('retrievedChatBudget');
+    const chatMemoryCount = document.getElementById('chatMemoryCount');
+    const maxIndexedFiles = document.getElementById('maxIndexedFiles');
+    const maxFileBytes = document.getElementById('maxFileBytes');
+    const maxIndexCharacters = document.getElementById('maxIndexCharacters');
+    document.getElementById('rebuildWorkspaceIndex').addEventListener('click', () => vscode.postMessage({ type: 'reindexWorkspace' }));
+    document.getElementById('saveWorkspaceIndexSettings').addEventListener('click', () => {
+      if (![maxIndexedFiles, maxFileBytes, maxIndexCharacters].every(input => input.value !== '' && input.reportValidity())) return;
+      vscode.postMessage({ type: 'updateSettings', settings: { 'context.maxIndexedFiles': Number(maxIndexedFiles.value), 'context.maxFileBytes': Number(maxFileBytes.value), 'context.maxIndexCharacters': Number(maxIndexCharacters.value) } });
+    });
+    document.getElementById('saveChatMemorySettings').addEventListener('click', () => {
+      if (![recentChatBudget, retrievedChatBudget, chatMemoryCount].every(input => input.value !== '' && input.reportValidity())) return;
+      vscode.postMessage({ type: 'updateSettings', settings: { 'chatMemory.enabled': chatMemoryEnabled.checked, 'chatMemory.scope': chatMemoryScope.value, 'chatMemory.recentCharacters': Number(recentChatBudget.value), 'chatMemory.retrievedCharacters': Number(retrievedChatBudget.value), 'chatMemory.resultCount': Number(chatMemoryCount.value) } });
+    });
     accessScopeSelect.addEventListener('change', () => vscode.postMessage({ type: 'setAccessScope', scope: accessScopeSelect.value }));
     document.getElementById('saveAgentSettings').addEventListener('click', () => {
       if (![agentRoundsInput, ollamaContextInput, ollamaOutputInput].every(input => input.value !== '' && input.reportValidity())) return;
@@ -1811,22 +1221,47 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     const terminalOutput = document.getElementById('terminalOutput');
     const terminalCommandLabel = document.getElementById('terminalCommandLabel');
 
+    let drawerOpener = null;
+    function openDrawer(drawer) {
+      drawerOpener = document.activeElement;
+      document.querySelectorAll('#filePicker, #chatHistory').forEach(picker => { picker.open = false; });
+      [settingsDrawer, changesDrawer, terminalDrawer].forEach(item => item.classList.remove('open'));
+      drawer.classList.add('open');
+      Array.from(document.body.children).forEach(item => { item.inert = item !== drawer; });
+      drawer.focus();
+    }
+    function closeDrawer(drawer) {
+      drawer.classList.remove('open');
+      Array.from(document.body.children).forEach(item => { item.inert = false; });
+      drawerOpener?.focus();
+    }
+    document.addEventListener('keydown', event => {
+      const drawer = [settingsDrawer, changesDrawer, terminalDrawer].find(item => item.classList.contains('open'));
+      if (!drawer) return;
+      if (event.key === 'Escape') { event.preventDefault(); closeDrawer(drawer); }
+      if (event.key === 'Tab') {
+        const controls = Array.from(drawer.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary')).filter(item => item.getClientRects().length);
+        const first = controls[0], last = controls.at(-1);
+        if (!first) { event.preventDefault(); drawer.focus(); return; }
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === drawer)) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || document.activeElement === drawer)) { event.preventDefault(); first.focus(); }
+      }
+    });
+    document.getElementById('openModelsBtn').addEventListener('click', () => vscode.postMessage({ type: 'openModels' }));
+
     let currentMode = 'agent';
     let currentStrategy = 'planning';
     let isBusy = false;
+    let cancellationRequested = false;
+    let displayedBusy;
     let availableModels = [];
     let selectedModelId = 'auto';
     let activeProposal = null;
 
-    // Mode Buttons
-    ['ask', 'plan', 'agent'].forEach(mode => {
-      const btn = document.getElementById('mode' + mode.charAt(0).toUpperCase() + mode.slice(1));
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentMode = mode;
-        vscode.postMessage({ type: 'setMode', mode });
-      });
+    const modeSelect = document.getElementById('modeSelect');
+    modeSelect.addEventListener('change', () => {
+      currentMode = modeSelect.value;
+      vscode.postMessage({ type: 'setMode', mode: currentMode });
     });
 
     // Strategy Buttons
@@ -1854,13 +1289,42 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       vscode.postMessage({ type: 'diagnose' });
     });
     document.getElementById('settingsBtn').addEventListener('click', () => {
-      settingsDrawer.classList.add('open');
+      openDrawer(settingsDrawer);
     });
+    let chats = [];
+    let activeSessionId = '';
+    function renderChats() {
+      const list = document.getElementById('chatList');
+      list.replaceChildren();
+      const query = document.getElementById('chatFilter').value.trim().toLowerCase();
+      chats.filter(chat => (chat.title + ' ' + chat.preview).toLowerCase().includes(query)).forEach(chat => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:4px;align-items:center;padding:3px 0;';
+        const open = document.createElement('button');
+        open.className = 'icon-btn';
+        open.style.cssText = 'flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        open.textContent = (chat.id === activeSessionId ? '• ' : '') + chat.title;
+        open.title = chat.preview || chat.title;
+        open.setAttribute('aria-current', chat.id === activeSessionId ? 'true' : 'false');
+        open.addEventListener('click', () => vscode.postMessage({ type: 'loadSession', sessionId: chat.id }));
+        row.appendChild(open);
+        for (const action of [{ label: 'Rename', type: 'renameSession' }, { label: 'Delete', type: 'deleteSession' }]) {
+          const button = document.createElement('button');
+          button.className = 'icon-btn';
+          button.textContent = action.label;
+          button.addEventListener('click', () => vscode.postMessage({ type: action.type, sessionId: chat.id }));
+          row.appendChild(button);
+        }
+        list.appendChild(row);
+      });
+    }
+    document.getElementById('chatFilter').addEventListener('input', renderChats);
+    document.getElementById('clearChatBtn').addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
     permissionModeSelect.addEventListener('change', () => {
       vscode.postMessage({ type: 'setPermissionMode', mode: permissionModeSelect.value });
     });
     document.getElementById('closeSettingsBtn').addEventListener('click', () => {
-      settingsDrawer.classList.remove('open');
+      closeDrawer(settingsDrawer);
     });
     document.getElementById('sshConnectBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'connectRemote' });
@@ -1874,80 +1338,141 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
     // Toolbar Drawers
     document.getElementById('openChangesBtn').addEventListener('click', () => {
-      changesDrawer.classList.add('open');
+      openDrawer(changesDrawer);
     });
     document.getElementById('closeChangesBtn').addEventListener('click', () => {
-      changesDrawer.classList.remove('open');
+      closeDrawer(changesDrawer);
     });
     document.getElementById('openTerminalBtn').addEventListener('click', () => {
-      terminalDrawer.classList.add('open');
+      openDrawer(terminalDrawer);
     });
     document.getElementById('closeTerminalBtn').addEventListener('click', () => {
-      terminalDrawer.classList.remove('open');
+      closeDrawer(terminalDrawer);
     });
 
     // Proposal Actions
     document.getElementById('acceptAllBtn').addEventListener('click', () => {
       if (activeProposal) {
         vscode.postMessage({ type: 'applyEdit', proposalId: activeProposal.id });
-        changesDrawer.classList.remove('open');
+        closeDrawer(changesDrawer);
       }
     });
     document.getElementById('rejectAllBtn').addEventListener('click', () => {
       if (activeProposal) {
         vscode.postMessage({ type: 'rejectEdit', proposalId: activeProposal.id });
-        changesDrawer.classList.remove('open');
+        closeDrawer(changesDrawer);
       }
     });
 
-    // Model Picker Modal
-    modelChipBtn.addEventListener('click', () => {
+    modelSelect.addEventListener('change', () => {
+      selectedModelId = modelSelect.value;
       renderModelList();
-      modelModal.classList.add('open');
+      vscode.postMessage({ type: 'selectModel', model: selectedModelId });
     });
-    document.getElementById('closeModelModalBtn').addEventListener('click', () => {
-      modelModal.classList.remove('open');
-    });
-
     function renderModelList() {
-      modelModalList.innerHTML = '';
-
-      // Auto Option
-      const autoDiv = document.createElement('div');
-      autoDiv.className = 'model-option' + (selectedModelId === 'auto' ? ' selected' : '');
-      autoDiv.innerHTML = '<div class="model-opt-header"><span>Auto</span><span class="model-badge">Smart</span></div>' +
-        '<div class="model-opt-meta"><span>Capability-based task router</span></div>';
-      autoDiv.addEventListener('click', () => {
-        selectedModelId = 'auto';
-        activeModelLabel.textContent = 'Auto';
-        activeModelBadge.textContent = 'Local';
-        activeModelBadge.className = 'model-badge';
-        modelModal.classList.remove('open');
-        vscode.postMessage({ type: 'selectModel', model: 'auto' });
+      modelSelect.replaceChildren(new Option('Automatic routing', 'auto'));
+      availableModels.forEach(model => {
+        const origin = model.source === 'remote' ? 'SSH / Remote' : model.source === 'local' || model.providerId === 'ollama' ? 'Local' : 'API';
+        modelSelect.add(new Option((model.displayName || model.name) + ' · ' + origin, model.id || model.name));
       });
-      modelModalList.appendChild(autoDiv);
+      const found = availableModels.find(model => (model.id || model.name) === selectedModelId);
+      if (!found && selectedModelId !== 'auto') modelSelect.add(new Option('Unavailable: ' + selectedModelId, selectedModelId));
+      modelSelect.value = selectedModelId;
+      activeModelLabel.textContent = found ? found.displayName || found.name : 'Automatic routing';
+      activeModelBadge.textContent = selectedModelId === 'auto' ? 'Auto' : !found ? 'Unavailable' : found.source === 'remote' ? 'Remote' : found.source === 'local' || found.providerId === 'ollama' ? 'Local' : 'API';
+      activeModelBadge.className = 'model-badge';
+    }
 
-      availableModels.forEach(m => {
-        const div = document.createElement('div');
-        const id = m.id || m.name;
-        div.className = 'model-option' + (selectedModelId === id ? ' selected' : '');
-        const isRemote = m.source === 'remote';
-        div.innerHTML = '<div class="model-opt-header"><span>' + escapeHtml(m.displayName || m.name) + '</span>' +
-          '<span class="model-badge' + (isRemote ? ' remote' : '') + '">' + (isRemote ? 'Remote' : 'Local') + '</span></div>' +
-          '<div class="model-opt-meta"><span>' + escapeHtml(m.providerId) + '</span>' +
-          (m.capabilities?.toolCalling ? '<span>Tools</span>' : '') +
-          (m.capabilities?.codeCompletion ? '<span>Fast Coder</span>' : '') +
-          '</div>';
-        div.addEventListener('click', () => {
-          selectedModelId = id;
-          activeModelLabel.textContent = m.displayName || m.name;
-          activeModelBadge.textContent = isRemote ? 'Remote' : 'Local';
-          activeModelBadge.className = 'model-badge' + (isRemote ? ' remote' : '');
-          modelModal.classList.remove('open');
-          vscode.postMessage({ type: 'selectModel', model: id });
+    let contextFiles = [];
+    const attachedFiles = new Set();
+    const filePicker = document.getElementById('filePicker');
+    const fileFilter = document.getElementById('fileFilter');
+    const chatHistory = document.getElementById('chatHistory');
+    [filePicker, chatHistory].forEach(picker => {
+      picker.addEventListener('toggle', () => {
+        if (picker.open) [filePicker, chatHistory].filter(other => other !== picker).forEach(other => { other.open = false; });
+      });
+    });
+    document.addEventListener('click', event => {
+      [filePicker, chatHistory].forEach(picker => { if (!picker.contains(event.target)) picker.open = false; });
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      const picker = [filePicker, chatHistory].find(item => item.open);
+      if (picker) { event.preventDefault(); picker.open = false; picker.querySelector('summary').focus(); }
+    });
+    filePicker.addEventListener('toggle', () => {
+      if (filePicker.open) vscode.postMessage({ type: 'getContextFiles' });
+    });
+    fileFilter.addEventListener('input', renderFiles);
+    function renderFiles() {
+      const root = document.getElementById('fileList');
+      root.replaceChildren();
+      const filtered = contextFiles.filter(path => path.toLowerCase().includes(fileFilter.value.toLowerCase()));
+      if (!filtered.length) root.textContent = 'No eligible workspace files. Refresh or open a trusted workspace.';
+      filtered.forEach(path => {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.dataset.path = path;
+        checkbox.checked = attachedFiles.has(path);
+        checkbox.disabled = isBusy || (!checkbox.checked && attachedFiles.size >= 10);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) attachedFiles.add(path); else attachedFiles.delete(path);
+          renderAttachments();
+          updateFileAvailability();
         });
-        modelModalList.appendChild(div);
+        label.append(checkbox, document.createTextNode(path));
+        root.appendChild(label);
       });
+      renderAttachments();
+    }
+    function updateFileAvailability() {
+      document.querySelectorAll('#fileList input').forEach(checkbox => {
+        checkbox.disabled = isBusy || (!attachedFiles.has(checkbox.dataset.path) && attachedFiles.size >= 10);
+      });
+      document.querySelectorAll('#selectedFiles button').forEach(button => { button.disabled = isBusy; });
+    }
+    function renderAttachments() {
+      const selected = document.getElementById('selectedFiles');
+      selected.replaceChildren();
+      attachedFiles.forEach(path => {
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = path + ' ×';
+        remove.setAttribute('aria-label', 'Remove attached file ' + path);
+        remove.disabled = isBusy;
+        remove.addEventListener('click', () => {
+          attachedFiles.delete(path);
+          const checkbox = Array.from(document.querySelectorAll('#fileList input')).find(input => input.dataset.path === path);
+          if (checkbox) checkbox.checked = false;
+          renderAttachments();
+          updateFileAvailability();
+          (selected.querySelector('button') || promptInput).focus();
+        });
+        selected.appendChild(remove);
+      });
+      document.getElementById('fileCount').textContent = attachedFiles.size ? '(' + attachedFiles.size + ')' : '';
+    }
+    function syncBusyControls() {
+      if (!isBusy) cancellationRequested = false;
+      if (sendBtn.disabled !== cancellationRequested) sendBtn.disabled = cancellationRequested;
+      if (displayedBusy === isBusy) return;
+      displayedBusy = isBusy;
+      modelSelect.disabled = isBusy;
+      effortSelect.disabled = isBusy;
+      modeSelect.disabled = isBusy;
+      accessScopeSelect.disabled = isBusy;
+      document.querySelectorAll('.strat-btn, #newChatBtn, #clearChatBtn').forEach(button => { button.disabled = isBusy; });
+      updateFileAvailability();
+    }
+    function requestCancellation() {
+      if (!isBusy || cancellationRequested) return;
+      cancellationRequested = true;
+      sendBtn.textContent = 'Stopping…';
+      footerStatusText.textContent = 'Cancellation requested…';
+      syncBusyControls();
+      vscode.postMessage({ type: 'cancel' });
     }
 
     // Ref Chips
@@ -1981,7 +1506,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     // Send Message
     function sendMessage() {
       const text = promptInput.value.trim();
-      if (!text) return;
+      if (!text || isBusy) return;
       promptInput.value = '';
       slashPopup.classList.remove('open');
 
@@ -1996,18 +1521,21 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       const thinkingIndicator = document.createElement('div');
       thinkingIndicator.className = 'msg-assistant thinking-bubble';
       thinkingIndicator.id = 'active-thinking-indicator';
-      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>Planning your request...</span>';
+      thinkingIndicator.innerHTML = '<span class="thinking-spinner"></span><span>Sending request…</span>';
       mainScroll.appendChild(thinkingIndicator);
       scrollToLatest(true);
 
       isBusy = true;
       sendBtn.textContent = 'Cancel';
-      footerStatusText.textContent = 'Analyzing task...';
+      footerStatusText.textContent = 'Sending request…';
+      filePicker.open = false;
+      syncBusyControls();
 
       vscode.postMessage({
         type: 'chat',
         model: selectedModelId || 'auto',
         prompt: text,
+        files: Array.from(attachedFiles),
         includeContext: true,
         includeWorkspace: true,
         agentMode: currentMode === 'agent'
@@ -2022,13 +1550,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
     sendBtn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if (sendBtn.textContent === 'Cancel') {
-        vscode.postMessage({ type: 'cancel' });
-        isBusy = false;
-        sendBtn.textContent = 'Send';
-        removeThinkingIndicator();
+      if (isBusy) {
+        requestCancellation();
       } else {
-        isBusy = false;
         sendMessage();
       }
     });
@@ -2042,17 +1566,30 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       if (e.key === 'Escape') {
         if (slashPopup.classList.contains('open')) {
           slashPopup.classList.remove('open');
-        } else if (sendBtn.textContent === 'Cancel') {
-          vscode.postMessage({ type: 'cancel' });
-          isBusy = false;
-          sendBtn.textContent = 'Send';
-          removeThinkingIndicator();
+        } else if (isBusy) {
+          requestCancellation();
         }
       }
     });
 
     let streamingBubble = null;
     let streamingText = '';
+    let streamingFrame = null;
+    function flushStreamingRender() {
+      if (streamingFrame !== null) cancelAnimationFrame(streamingFrame);
+      streamingFrame = null;
+      if (streamingBubble) streamingBubble.innerHTML = renderMarkdown(streamingText);
+    }
+    function queueStreamingRender() {
+      if (streamingFrame !== null) return;
+      streamingFrame = requestAnimationFrame(() => {
+        streamingFrame = null;
+        if (streamingBubble) {
+          streamingBubble.innerHTML = renderMarkdown(streamingText);
+          scrollToLatest(false);
+        }
+      });
+    }
     let followingLatest = true;
 
     function scrollToLatest(force) {
@@ -2077,6 +1614,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       let row = act.id ? document.getElementById('act-row-' + act.id) : null;
       if (!row) {
         if (!historical && act.toolName && streamingBubble) {
+          flushStreamingRender();
           streamingBubble.classList.remove('streaming');
           streamingBubble = null;
           streamingText = '';
@@ -2110,34 +1648,30 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       const msg = event.data;
 
       if (msg.type === 'models') {
-        availableModels = msg.models || [];
-        if (msg.selectedModel) {
-          selectedModelId = msg.selectedModel;
-          const found = availableModels.find(m => (m.id || m.name) === selectedModelId);
-          if (found) {
-            activeModelLabel.textContent = found.displayName || found.name;
-            activeModelBadge.textContent = found.source === 'remote' ? 'Remote' : 'Local';
-            activeModelBadge.className = 'model-badge' + (found.source === 'remote' ? ' remote' : '');
-          }
-        }
+        availableModels = Array.isArray(msg.models) ? msg.models : [];
+        if (msg.selectedModel) selectedModelId = msg.selectedModel;
         renderModelList();
       }
-
       if (msg.type === 'selectedModel') {
         selectedModelId = msg.model || 'auto';
-        const found = availableModels.find(m => (m.id || m.name) === selectedModelId);
-        activeModelLabel.textContent = found ? found.displayName || found.name : 'Auto';
-        activeModelBadge.textContent = found?.source === 'remote' ? 'Remote' : 'Local';
-        activeModelBadge.className = 'model-badge' + (found?.source === 'remote' ? ' remote' : '');
         renderModelList();
       }
-
+      if (msg.type === 'contextFiles') {
+        contextFiles = Array.isArray(msg.files) ? msg.files : [];
+        renderFiles();
+      }
 
       if (msg.type === 'mode') {
         currentMode = msg.mode;
-        document.querySelectorAll('.mode-btn').forEach(b => {
-          b.classList.toggle('active', b.getAttribute('data-mode') === currentMode);
-        });
+        modeSelect.value = currentMode;
+      }
+
+      if (msg.type === 'effort') {
+        effortSelect.value = ['low', 'medium', 'high', 'ultra'].includes(msg.effort) ? msg.effort : 'medium';
+      }
+
+      if (msg.type === 'controlError') {
+        footerStatusText.textContent = msg.message;
       }
 
       if (msg.type === 'strategy') {
@@ -2147,6 +1681,9 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       }
 
       if (msg.type === 'history') {
+        flushStreamingRender();
+        streamingBubble = null;
+        streamingText = '';
         timelineContainer.innerHTML = '';
         timelineContainer.style.display = 'none';
         const oldMessages = mainScroll.querySelectorAll('.msg-user, .msg-assistant:not(.welcome), .artifact-card, .permission-card, .timeline-row');
@@ -2175,17 +1712,19 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       }
 
       if (msg.type === 'status') {
-        footerStatusText.textContent = msg.message || 'Ready';
+        footerStatusText.textContent = cancellationRequested ? 'Cancellation requested…' : msg.message || 'Ready';
         if (msg.state === 'running' || msg.state === 'thinking') {
           isBusy = true;
-          sendBtn.textContent = 'Cancel';
+          sendBtn.textContent = cancellationRequested ? 'Stopping…' : 'Cancel';
           const indicator = document.getElementById('active-thinking-indicator');
           if (indicator && msg.message) {
             const span = indicator.querySelector('span:last-child');
             if (span) span.textContent = msg.message;
           }
         } else {
+          flushStreamingRender();
           isBusy = false;
+          footerStatusText.textContent = msg.message || 'Ready';
           sendBtn.textContent = 'Send';
           removeThinkingIndicator();
           if (streamingBubble) {
@@ -2198,6 +1737,14 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
       if (msg.type === 'permissionMode' && permissionModeSelect) {
         permissionModeSelect.value = msg.mode;
+        permissionModeSelect.title = msg.workspaceSession ? 'Workspace commands and edits allowed for this chat. Internet, sensitive, destructive and privileged actions still need separate approval. Change this setting to revoke.' : '';
+      }
+      if (msg.type === 'sessions') {
+        chats = Array.isArray(msg.sessions) ? msg.sessions : [];
+        activeSessionId = msg.activeSessionId;
+        const active = chats.find(chat => chat.id === activeSessionId);
+        document.getElementById('sessionTitle').textContent = active?.title || '';
+        renderChats();
       }
 
       if (msg.type === 'accessScope') {
@@ -2205,9 +1752,31 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         accessScopeSelect.title = msg.filePath ? 'Restricted to ' + msg.filePath : msg.scope === 'machine' ? 'Outside-workspace reads need approval; workspace diffs remain workspace-only' : 'Workspace file tools; commands require separate approval';
       }
       if (msg.type === 'agentSettings') {
+        if (msg.endpoints) { ollamaEndpointInput.value = msg.endpoints.ollama; compatibleEndpointsInput.value = msg.endpoints.compatible; }
+        if (msg.workspaceIndex) {
+          maxIndexedFiles.value = String(msg.workspaceIndex.maxIndexedFiles);
+          maxFileBytes.value = String(msg.workspaceIndex.maxFileBytes);
+          maxIndexCharacters.value = String(msg.workspaceIndex.maxIndexCharacters);
+        }
+        if (msg.chatMemory) {
+          chatMemoryEnabled.checked = msg.chatMemory.enabled;
+          chatMemoryScope.value = msg.chatMemory.scope;
+          recentChatBudget.value = String(msg.chatMemory.recentCharacters);
+          retrievedChatBudget.value = String(msg.chatMemory.retrievedCharacters);
+          chatMemoryCount.value = String(msg.chatMemory.resultCount);
+        }
         agentRoundsInput.value = String(msg.maxRounds);
         ollamaContextInput.value = String(msg.contextWindow);
         ollamaOutputInput.value = String(msg.maxOutputTokens);
+      }
+      if (msg.type === 'providerStatus') {
+        document.getElementById('providerStatus').textContent = (msg.pending ? 'Endpoint changes pending until active work finishes.\\n' : '') + (msg.errors || []).join('\\n') + ((msg.errors || []).length ? '\\n' : '') + (msg.providers || []).map(provider => (provider.endpoint || provider.id) + ' · ' + (provider.isReachable === true ? 'Ready' : provider.isReachable === false ? 'Unavailable' : 'Checking') + ' · ' + (provider.modelCount || 0) + ' model(s)' + (provider.error ? ' · ' + provider.error : '')).join('\\n');
+      }
+      if (msg.type === 'indexStatus') {
+        const status = msg.status;
+        const restricted = msg.scope === 'file';
+        document.getElementById('workspaceIndexStatus').textContent = restricted ? 'File access: workspace retrieval is disabled' : !status ? 'No workspace index available' : status.state + ' · ' + status.fileCount + ' files / ' + status.chunkCount + ' chunks' + (status.limitReached ? ' · Partial coverage: limit reached' : '') + (status.lastIndexed ? ' · Updated ' + new Date(status.lastIndexed).toLocaleTimeString() : '') + (status.error ? ' · ' + status.error : '');
+        document.getElementById('rebuildWorkspaceIndex').disabled = restricted || !status || status.state === 'indexing' || status.state === 'updating';
       }
 
       if (msg.type === 'activityHistory') {
@@ -2238,8 +1807,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           streamingText = '';
         }
         streamingText += msg.content;
-        streamingBubble.innerHTML = renderMarkdown(streamingText);
-        scrollToLatest(false);
+        queueStreamingRender();
       }
 
       if (msg.type === 'proposal') {
@@ -2287,7 +1855,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         const reviewBtn = document.getElementById('review-diff-' + activeProposal.id);
         if (reviewBtn) {
           reviewBtn.addEventListener('click', () => {
-            changesDrawer.classList.add('open');
+            openDrawer(changesDrawer);
             if (activeProposal.files.length > 0) {
               vscode.postMessage({ type: 'showDiff', proposalId: displayedProposal.id, filePath: displayedProposal.files[0].path });
             }
@@ -2349,6 +1917,10 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         document.getElementById('perm-' + msg.requestId)?.remove();
       }
 
+      if (msg.type === 'permissionDecision') {
+        document.getElementById('perm-' + msg.requestId)?.remove();
+      }
+
       if (msg.type === 'permissionRequest') {
         const req = msg.request;
         document.getElementById('perm-' + req.id)?.remove();
@@ -2359,26 +1931,25 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
           (req.command ? '<div class="permission-desc">' + escapeHtml(req.commandCategory || 'Command') + ' · runs in the current workspace</div><pre class="permission-command">' + escapeHtml(req.command) + '</pre>' :
             req.path ? '<div class="permission-desc">File: ' + escapeHtml(req.path) + '</div>' :
               '<div class="permission-desc">' + escapeHtml(req.description || req.category || 'Review this action before allowing it.') + '</div>') +
+          (req.scriptPreview ? '<div class="permission-desc">Declared package lifecycle scripts (may execute arbitrary code)</div><pre class="permission-command">' + escapeHtml(req.scriptPreview) + '</pre>' : '') +
           '<div class="permission-actions">' +
           '<button class="action-btn" id="allow-' + req.id + '">Allow</button>' +
           '<button class="action-btn secondary" id="deny-' + req.id + '">Deny</button>' +
-          '<button class="action-btn secondary" id="allow-session-' + req.id + '">Allow for Session</button>' +
+          (req.workspaceSessionAvailable ? '<button class="action-btn secondary" type="button" id="allow-session-' + req.id + '">Allow commands & edits for this chat</button>' : '') +
+          (req.workspaceSessionAvailable ? '<div class="permission-desc">Project commands can execute arbitrary code as your OS user. Internet, sensitive reads, destructive and privileged actions still need separate approval. New chat or changed scope revokes this grant.</div>' : '') +
           '</div>';
         mainScroll.appendChild(card);
         scrollToLatest(true);
 
-        document.getElementById('allow-' + req.id)?.addEventListener('click', () => {
-          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'allow' });
-          card.remove();
-        });
-        document.getElementById('deny-' + req.id)?.addEventListener('click', () => {
-          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'deny' });
-          card.remove();
-        });
-        document.getElementById('allow-session-' + req.id)?.addEventListener('click', () => {
-          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision: 'allow_session' });
-          card.remove();
-        });
+        const decide = (event, decision) => {
+          event.preventDefault();
+          event.stopPropagation();
+          card.querySelectorAll('button').forEach(button => { button.disabled = true; });
+          vscode.postMessage({ type: 'permissionResolved', requestId: req.id, decision });
+        };
+        document.getElementById('allow-' + req.id)?.addEventListener('click', event => decide(event, 'allow'));
+        document.getElementById('deny-' + req.id)?.addEventListener('click', event => decide(event, 'deny'));
+        document.getElementById('allow-session-' + req.id)?.addEventListener('click', event => decide(event, 'allow_session'));
       }
 
       if (msg.type === 'artifact') {
@@ -2451,6 +2022,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       }
 
       if (msg.type === 'done') {
+        flushStreamingRender();
         isBusy = false;
         sendBtn.textContent = 'Send';
         removeThinkingIndicator();
@@ -2469,6 +2041,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
       }
 
       if (msg.type === 'error') {
+        flushStreamingRender();
         isBusy = false;
         sendBtn.textContent = 'Send';
         removeThinkingIndicator();
@@ -2488,6 +2061,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
         mainScroll.appendChild(card);
         scrollToLatest(false);
       }
+      syncBusyControls();
     });
 
     function escapeHtml(str) {

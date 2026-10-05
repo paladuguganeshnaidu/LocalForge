@@ -7,10 +7,10 @@ test('PermissionManager rejects shell chaining and redirection in safe operation
   const pm = new PermissionManager('allow_safe_auto');
 
   // Direct safe commands are allowed
-  assert.equal(pm.isSafeCommand('npm test'), true);
+  assert.equal(pm.isSafeCommand('npm test'), false);
   assert.equal(pm.isSafeCommand('git status'), true);
-  assert.equal(pm.isSafeCommand('cargo test'), true);
-  assert.equal(pm.isSafeCommand('npm run build'), true);
+  assert.equal(pm.isSafeCommand('cargo test'), false);
+  assert.equal(pm.isSafeCommand('npm run build'), false);
 
   // Chained commands must be rejected in auto-safe mode
   assert.equal(pm.isSafeCommand('npm test && rm -rf dist'), false);

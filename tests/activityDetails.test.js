@@ -2,10 +2,19 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { formatCommandLabel, formatToolInput, formatToolOutput } = require('../dist/core/activityDetails.js');
 
+test('failed commands retain their actual stdout and stderr alongside redacted error details', () => {
+  const rendered = formatToolOutput({ command: 'node --test math.test.cjs', exitCode: 1, stdout: 'TAP version 13\nReferenceError: test is not defined', stderr: '' }, 'Command exited with code 1');
+  assert.match(rendered, /Error.*Command exited with code 1/s);
+  assert.match(rendered, /ReferenceError: test is not defined/);
+  assert.match(rendered, /node --test math.test.cjs/);
+});
+
 test('command titles show the exact test command and redact secret arguments', () => {
   assert.equal(formatCommandLabel('run_test', {}), 'npm test');
   assert.equal(formatCommandLabel('run_test', { test_filter: 'tests/sample.test.js' }), 'npm test -- "tests/sample.test.js"');
   assert.equal(formatCommandLabel('run_command', { command: 'npm test --token secret-value' }), 'npm test --token [REDACTED]');
+  assert.equal(formatCommandLabel('start_dev_server', { command: 'python3 -m http.server 8080' }), 'python3 -m http.server 8080 --bind 127.0.0.1');
+  assert.equal(formatCommandLabel('start_dev_server', { command: 'invalid server command' }), 'invalid server command');
 });
 
 test('activity input shows commands while masking credential arguments', () => {

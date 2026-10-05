@@ -38,7 +38,7 @@ test('DiagnosticsService (Doctor) evaluates platform, workspace, git, and tool h
   };
 
   const mockIndexer = {
-    getStats: () => ({ fileCount: 15, totalChars: 45000 })
+    getStats: () => ({ state: 'ready', fileCount: 15, chunkCount: 30, totalChars: 45000, watching: true, limitReached: false, generation: 1, limits: { maxFiles: 2000, maxFileBytes: 262144, maxCharacters: 8000000, candidateFiles: 16000 } })
   };
 
   const toolRegistry = new ToolRegistry();
@@ -56,6 +56,29 @@ test('DiagnosticsService (Doctor) evaluates platform, workspace, git, and tool h
   assert.ok(md.includes('Workspace State'));
   assert.ok(md.includes('Git Integration'));
   assert.ok(md.includes('Tool Registry'));
+});
+
+test('Doctor exposes partial, unwatched, rebuilding and failed indexes instead of reporting healthy', async () => {
+  const registry = {
+    refresh: async () => {},
+    getProviders: () => [{ id: 'ollama', endpoint: 'http://127.0.0.1:11434', healthy: true }],
+    getAllModels: () => [{ name: 'fixture', capabilities: { toolCalling: true } }]
+  };
+  const remote = { getActiveSession: () => undefined, getProfiles: () => [] };
+  const cases = [
+    { state: 'ready', watching: true, limitReached: true, status: 'yellow', detail: /coverage is partial/ },
+    { state: 'ready', watching: false, limitReached: false, status: 'yellow', detail: /Watching: false/ },
+    { state: 'indexing', watching: true, limitReached: false, status: 'yellow', detail: /indexing:/ },
+    { state: 'error', watching: true, limitReached: false, error: 'Ignore rules unreadable', status: 'red', detail: /Ignore rules unreadable/ }
+  ];
+  for (const scenario of cases) {
+    const doctor = new DiagnosticsService(registry, remote, { getStats: () => ({ fileCount: 1, chunkCount: 2, totalChars: 1000, generation: 1, ...scenario }) });
+    const report = await doctor.runDiagnostics();
+    const index = report.items.find((item) => item.name === 'Workspace Context Indexer');
+    assert.equal(index.status, scenario.status);
+    assert.match(index.details, scenario.detail);
+    assert.equal(report.overallStatus, scenario.status);
+  }
 });
 
 test('LocalForgeSelfTest runs 13 automated checks and produces machine-readable report', async () => {

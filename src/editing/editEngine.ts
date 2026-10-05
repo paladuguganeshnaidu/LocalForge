@@ -9,6 +9,7 @@ import {
   computeFileHash
 } from './patchService';
 import { EditJournal, RecoverySummary } from './editJournal';
+import { EditRequestError, EditRequestPolicy } from './editRequestPolicy';
 
 export type EditStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'stale' | 'failed' | 'reverted';
 
@@ -64,6 +65,8 @@ export interface EditApplyResult {
   appliedFiles: string[];
   errors: Array<{ path: string; error: string }>;
   recoveryId?: string;
+  editorChanged?: boolean;
+  savedFiles?: string[];
 }
 
 export interface EditRollbackResult {
@@ -80,10 +83,28 @@ export class EditEngine {
   private applyingProposals = new Set<string>();
   private originalBytes = new Map<string, Map<string, Uint8Array>>();
   private mutationActive = false;
+  private requestPolicy?: EditRequestPolicy;
+  private fileChangeListeners = new Set<(uris: vscode.Uri[]) => void>();
   private readonly journal: EditJournal;
 
   constructor(storage?: vscode.Memento, recoveryDirectory?: string) {
     this.journal = new EditJournal(storage, recoveryDirectory);
+  }
+
+  public get requiresReview(): boolean {
+    return this.requestPolicy?.reviewOnly === true;
+  }
+  public onDidChangeFiles(listener: (uris: vscode.Uri[]) => void): vscode.Disposable {
+    this.fileChangeListeners.add(listener);
+    return { dispose: () => { this.fileChangeListeners.delete(listener); } };
+  }
+  private notifyFilesChanged(uris: vscode.Uri[]): void { for (const listener of this.fileChangeListeners) listener(uris); }
+
+  public async withRequestPolicy<Result>(policy: EditRequestPolicy, action: () => Promise<Result>): Promise<Result> {
+    if (this.requestPolicy) throw new Error('Another file-edit request is still running.');
+    this.requestPolicy = policy;
+    try { return await action(); }
+    finally { this.requestPolicy = undefined; }
   }
 
   public getRecoveryHistory(): RecoverySummary[] {
@@ -123,6 +144,14 @@ export class EditEngine {
       const segments = validateWorkspaceRelativePath(edit.path);
       const relativePath = segments.join('/');
       const normalizedPath = workspaceRoot.scheme === 'file' && process.platform === 'win32' ? relativePath.toLowerCase() : relativePath;
+      if (this.requestPolicy?.onlyPath) {
+        const requestedPath = validateWorkspaceRelativePath(this.requestPolicy.onlyPath).join('/');
+        const normalizedRequest = workspaceRoot.scheme === 'file' && process.platform === 'win32' ? requestedPath.toLowerCase() : requestedPath;
+        if (normalizedPath !== normalizedRequest) throw new EditRequestError(`Only ${requestedPath} was requested. No change to ${relativePath} was proposed.`);
+      }
+      if (this.requestPolicy?.creationOnly && (edit.operation === 'delete' || edit.moveSourcePath || edit.moveDestinationPath)) {
+        throw new EditRequestError('This request allows creating a missing file only, not deleting or moving files.');
+      }
       if (targetPaths.has(normalizedPath)) throw new Error('An edit proposal cannot contain duplicate file paths.');
       targetPaths.add(normalizedPath);
       const uri = vscode.Uri.joinPath(workspaceRoot, ...segments);
@@ -151,7 +180,7 @@ export class EditEngine {
         originals.set(edit.path, new Uint8Array());
       }
 
-      if (edit.operation === 'create' && originalState !== 'missing') throw new Error(`File ${edit.path} already exists. No creation was proposed.`);
+      if ((edit.operation === 'create' || this.requestPolicy?.creationOnly) && originalState !== 'missing') throw new EditRequestError(`File ${edit.path} already exists. I stopped without changing it or proposing an overwrite.`);
       if (edit.operation === 'delete' && originalState !== 'present') throw new Error(`File ${edit.path} does not exist. No deletion was proposed.`);
       if (edit.expectedOriginalHash !== undefined && hash !== edit.expectedOriginalHash) throw new Error(`File ${edit.path} changed while the edit was prepared. Read it again before retrying.`);
 
@@ -176,7 +205,7 @@ export class EditEngine {
         additions: diff.stats.additions,
         deletions: diff.stats.deletions,
         status: 'pending',
-        operation: edit.operation ?? 'write',
+        operation: this.requestPolicy?.creationOnly ? 'create' : edit.operation ?? 'write',
         moveSourcePath: edit.moveSourcePath,
         moveDestinationPath: edit.moveDestinationPath,
         binary
@@ -206,8 +235,8 @@ export class EditEngine {
 
     const proposal: EditProposal = {
       id: proposalId,
-      conversationId: metadata?.conversationId,
-      turnId: metadata?.turnId,
+      conversationId: metadata?.conversationId ?? this.requestPolicy?.conversationId,
+      turnId: metadata?.turnId ?? this.requestPolicy?.turnId,
       summary,
       createdAt: Date.now(),
       status: 'pending',
@@ -274,12 +303,15 @@ export class EditEngine {
     selectedPaths?: string[],
     signal?: AbortSignal
   ): Promise<EditApplyResult> {
+    if (this.requiresReview) throw new EditRequestError('You requested a proposed change for approval. No file edit was applied. Review it in Changes after this turn finishes.');
     if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before applying file edits.');
     if (this.applyingProposals.has(proposalId) || this.mutationActive) throw new Error('An edit operation is already in progress.');
     this.mutationActive = true;
     this.applyingProposals.add(proposalId);
     try {
-      return await this.applyValidatedProposal(proposalId, selectedPaths, signal);
+      const result = await this.applyValidatedProposal(proposalId, selectedPaths, signal);
+      if (result.editorChanged) this.notifyFilesChanged(this.proposals.get(proposalId)!.files.filter((file) => !selectedPaths || selectedPaths.includes(file.path)).map((file) => file.uri));
+      return result;
     } finally {
       this.applyingProposals.delete(proposalId);
       this.mutationActive = false;
@@ -317,6 +349,8 @@ export class EditEngine {
       failedCount: 0,
       staleCount: 0,
       appliedFiles: [],
+      editorChanged: false,
+      savedFiles: [],
       errors: []
     };
 
@@ -326,6 +360,7 @@ export class EditEngine {
       signal?.throwIfAborted();
       if (file.uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, file.uri.fsPath, file.originalState === 'missing');
       await this.assertRegularFileTarget(file.uri, file.originalState === 'missing');
+      await this.assertWritableTarget(file.uri);
       this.assertNoUnsavedChanges(file.uri);
       const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
       file.currentHash = validation.currentHash;
@@ -395,6 +430,7 @@ export class EditEngine {
         signal?.throwIfAborted();
         if (file.uri.scheme === 'file') await assertWorkspaceFilePath(root.fsPath, file.uri.fsPath, file.originalState === 'missing');
         await this.assertRegularFileTarget(file.uri, file.originalState === 'missing');
+        await this.assertWritableTarget(file.uri);
         this.assertNoUnsavedChanges(file.uri);
         const validation = await validateFileState(file.uri, file.originalState, file.originalHash);
         if (!validation.valid) throw new Error(`The file ${file.path} changed while its recovery snapshot was saved. No edits were submitted.`);
@@ -404,6 +440,7 @@ export class EditEngine {
       const applied = await vscode.workspace.applyEdit(workspaceEdit);
       if (!applied) throw new Error('VS Code declined the edit transaction. No direct file-write fallback was attempted.');
       nativeApplied = true;
+      result.editorChanged = true;
 
       const committed: Array<{ path: string; expectedHash: string }> = [];
       for (const file of filesToApply) {
@@ -411,6 +448,7 @@ export class EditEngine {
           const expectedHash = recovery.files.find((candidate) => candidate.path === file.path)!.expectedHash;
           if (await computeFileHash(file.uri) !== expectedHash) throw new Error(`The file operation for ${file.path} did not produce the expected state. Inspect the retained recovery record.`);
           committed.push({ path: file.path, expectedHash });
+          result.savedFiles!.push(file.path);
           await this.journal.update(recovery.id, 'prepared', [{ path: file.path, expectedHash }]);
           continue;
         }
@@ -418,13 +456,14 @@ export class EditEngine {
         if (file.originalState === 'present') {
           const document = await vscode.workspace.openTextDocument(file.uri);
           if (document.isDirty && !await document.save()) {
-            throw new Error(`Changes were applied in the editor, but ${file.path} could not be saved. Inspect the modified documents before continuing.`);
+            throw new Error(`VS Code could not save ${file.path}. The editor may contain the proposed text, but a saved edit is not verified. Check its unsaved tab and try saving manually; resolve any permissions, file locks or save-provider error before retrying. The recovery snapshot was retained.`);
           }
           if (typeof document.getText === 'function') expectedText = document.getText();
         }
         const bytes = await vscode.workspace.fs.readFile(file.uri);
         if (new TextDecoder().decode(bytes) !== expectedText) throw new Error(`The applied content of ${file.path} changed unexpectedly. Inspect it before attempting recovery.`);
         committed.push({ path: file.path, expectedHash: computeContentHash(bytes) });
+        result.savedFiles!.push(file.path);
         await this.journal.update(recovery.id, 'prepared', [committed[committed.length - 1]]);
       }
       await this.journal.update(recovery.id, 'applied', committed);
@@ -444,10 +483,14 @@ export class EditEngine {
         catch (journalError) { result.errors.push({ path: 'recovery', error: `The prepared recovery snapshot was retained, but finalization failed: ${journalError instanceof Error ? journalError.message : String(journalError)}` }); }
       }
       if (nativeApplied) {
-        result.appliedCount = filesToApply.length;
-        result.appliedFiles = filesToApply.map((file) => file.path);
+        result.appliedFiles = [...result.savedFiles!];
+        result.appliedCount = result.appliedFiles.length;
       }
       result.failedCount = filesToApply.length;
+      for (const file of filesToApply) {
+        file.status = result.savedFiles!.includes(file.path) ? 'applied' : 'failed';
+        if (file.status === 'failed') file.error = error.message || String(error);
+      }
       result.errors.push({ path: 'transaction', error: error.message || String(error) });
       result.success = false;
     }
@@ -456,6 +499,7 @@ export class EditEngine {
   }
 
   public async rollbackChanges(recoveryId: string, selectedPaths?: string[], signal?: AbortSignal): Promise<EditRollbackResult> {
+    if (this.requiresReview || this.requestPolicy?.creationOnly) throw new EditRequestError('This request does not authorize restoring or deleting recorded files. No rollback was submitted.');
     if (this.mutationActive) throw new Error('An edit operation is already in progress.');
     if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before restoring file changes.');
     this.mutationActive = true;
@@ -508,6 +552,7 @@ export class EditEngine {
           result.conflicts.push({ path: 'transaction', error: 'VS Code declined the rollback transaction. No direct file-write fallback was attempted.' });
           return result;
         }
+        this.notifyFilesChanged(targets.map((target) => target.uri));
         for (const { file, uri } of targets) {
           if (await computeFileHash(uri) === file.originalHash) result.restoredFiles.push(file.path);
           else result.conflicts.push({ path: file.path, error: 'Rollback did not restore the exact original file state. Inspect the file and retained recovery snapshot.' });
@@ -525,6 +570,16 @@ export class EditEngine {
       return result;
     } finally {
       this.mutationActive = false;
+    }
+  }
+
+  private async assertWritableTarget(uri: vscode.Uri): Promise<void> {
+    if (vscode.workspace.fs.isWritableFileSystem?.(uri.scheme) === false) throw new Error(`The ${uri.scheme} filesystem is read-only. No edit was submitted.`);
+    try {
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.permissions !== undefined && (stat.permissions & vscode.FilePermission.Readonly) !== 0) throw new Error('This file is read-only. No edit was submitted; check its permissions before accepting changes.');
+    } catch (error) {
+      if (!['ENOENT', 'FileNotFound'].includes((error as { code?: string }).code ?? '')) throw error;
     }
   }
 

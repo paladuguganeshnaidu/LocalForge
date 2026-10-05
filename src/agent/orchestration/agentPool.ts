@@ -7,6 +7,7 @@ export interface RunningAgentInstance {
   taskId: string;
   controller: AbortController;
   startedAt: number;
+  detachParent?: () => void;
 }
 
 export class AgentPool {
@@ -14,6 +15,7 @@ export class AgentPool {
   private readonly maxConcurrency: number;
 
   constructor(maxConcurrency: number = 4) {
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 16) throw new Error('Subagent concurrency must be an integer from 1 to 16.');
     this.maxConcurrency = maxConcurrency;
   }
 
@@ -21,7 +23,12 @@ export class AgentPool {
     return this.activeAgents.size < this.maxConcurrency;
   }
 
+  public getAvailableSlots(): number {
+    return Math.max(0, this.maxConcurrency - this.activeAgents.size);
+  }
+
   public acquire(agentId: string, role: AgentRole, taskId: string, parentSignal?: AbortSignal): AbortController {
+    if (this.activeAgents.has(agentId)) throw new Error(`Subagent ${agentId} is already running.`);
     if (this.activeAgents.size >= this.maxConcurrency) {
       throw new AgentError({
         message: `Agent pool capacity exceeded (max ${this.maxConcurrency} concurrent agents).`,
@@ -30,12 +37,13 @@ export class AgentPool {
     }
 
     const controller = new AbortController();
+    const abortFromParent = () => controller.abort(parentSignal?.reason);
 
     if (parentSignal) {
       if (parentSignal.aborted) {
         controller.abort();
       } else {
-        parentSignal.addEventListener('abort', () => controller.abort(), { once: true });
+        parentSignal.addEventListener('abort', abortFromParent, { once: true });
       }
     }
 
@@ -44,13 +52,15 @@ export class AgentPool {
       role,
       taskId,
       controller,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      detachParent: parentSignal ? () => parentSignal.removeEventListener('abort', abortFromParent) : undefined
     });
 
     return controller;
   }
 
   public release(agentId: string): void {
+    this.activeAgents.get(agentId)?.detachParent?.();
     this.activeAgents.delete(agentId);
   }
 
@@ -58,7 +68,6 @@ export class AgentPool {
     const inst = this.activeAgents.get(agentId);
     if (inst) {
       inst.controller.abort();
-      this.activeAgents.delete(agentId);
       return true;
     }
     return false;
@@ -68,7 +77,6 @@ export class AgentPool {
     for (const inst of this.activeAgents.values()) {
       inst.controller.abort();
     }
-    this.activeAgents.clear();
   }
 
   public getActiveCount(): number {

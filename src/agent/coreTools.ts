@@ -4,12 +4,16 @@ import { exec, execFile } from 'node:child_process';
 import { ModelToolDefinition } from '../providers/modelProvider';
 import { ToolRegistry } from './toolRegistry';
 import { EditEngine, EditProposal } from '../editing/editEngine';
+import { editToolResult } from '../editing/editToolResult';
 import { computeContentHash } from '../editing/patchService';
 import { TerminalManager } from '../terminal/terminalManager';
 import { ArtifactManager } from '../core/artifactManager';
 import { BrowserTool } from '../browser/browserTool';
 import { findRelevantSnippets } from '../context/workspaceContext';
 import { canAttachWorkspaceContext } from '../context/accessBoundary';
+import { registerProjectTools } from './projectTools';
+import { taskPlanDefinition, validateTaskPlan } from './taskPlan';
+import { materializeFileContent } from './fileContent';
 
 const maximumReadBytes = 256 * 1024;
 const maximumWriteBytes = 512 * 1024;
@@ -23,6 +27,17 @@ export interface CoreToolContext {
 }
 
 export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolContext): void {
+  registry.registerTool(taskPlanDefinition, async args => validateTaskPlan(args));
+  registry.registerTool({ type: 'function', function: {
+    name: 'discover_tools', description: 'Find additional registered tools by a keyword or exact name. Their executable schemas become available on the next turn. This never grants extra permissions.',
+    parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 200 } }, required: ['query'], additionalProperties: false }
+  } }, async args => {
+    const query = getString(args.query, 'query', 200).toLowerCase();
+    const words = query.split(/[\s,]+/).filter(Boolean);
+    const tools = registry.getDefinitions().filter(tool => tool.function.name !== 'discover_tools' && words.some(word => `${tool.function.name} ${tool.function.description}`.toLowerCase().includes(word))).sort((left, right) => Number(right.function.name === query) - Number(left.function.name === query)).slice(0, 6);
+    return { tools, message: tools.length ? 'These registered tools are available subject to the current mode, access scope and approval policy.' : 'No registered tool matched. Try an operation keyword such as directory, lint, stop, git or diagnostics.' };
+  });
+  registerProjectTools(registry, context.terminalManager);
   if (context.editEngine) {
     const editEngine = context.editEngine;
     registry.registerTool({
@@ -30,7 +45,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         name: 'get_edit_recovery', description: 'List local edit recovery metadata and IDs without exposing source backups.',
         parameters: { type: 'object', properties: {}, additionalProperties: false }
       }
-    }, async () => editEngine.getRecoveryHistory(), { category: 'read', riskLevel: 'read_only' });
+    }, async () => editEngine.getRecoveryHistory());
     registry.registerTool({
       type: 'function', function: {
         name: 'rollback_changes', description: 'Restore a recorded edit to its exact original file state, deleting newly created files. Requires explicit approval and refuses changed files.',
@@ -44,7 +59,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     }, async (args, execution) => {
       if (args.files !== undefined && (!Array.isArray(args.files) || !args.files.every((path) => typeof path === 'string'))) throw new Error('Rollback files must be an array of recorded relative paths.');
       return editEngine.rollbackChanges(getString(args.recoveryId, 'recoveryId', 100), args.files as string[] | undefined, execution.signal);
-    }, { category: 'edit', riskLevel: 'destructive', requiresApproval: true });
+    });
   }
   // 1. read_file
   registry.registerTool(
@@ -86,8 +101,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         return { path: vscode.workspace.asRelativePath(uri), totalLines: lines.length, content: window };
       }
       return { path: vscode.workspace.asRelativePath(uri), content: text };
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 2. read_files
@@ -129,8 +143,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
       return { files: results };
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 3. write_file
@@ -139,28 +152,28 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       type: 'function',
       function: {
         name: 'write_file',
-        description: 'Create or overwrite a file in the workspace.',
+        description: 'Create or overwrite a workspace file. For .json files prefer the json object argument; the tool serializes it without nested file-text escaping.',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: 'Relative path to file' },
-            content: { type: 'string', description: 'File content' }
+            content: { type: 'string', description: 'Complete file text; omit when using json' },
+            json: { type: 'object', additionalProperties: true, description: 'Actual JSON object for a .json file; omit content when using this' }
           },
-          required: ['path', 'content'],
+          required: ['path'],
           additionalProperties: false
         }
       }
     },
     async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
-      const content = getFileContent(args.content, 'content');
+      const content = materializeFileContent(args, maximumWriteBytes);
       await resolveWorkspaceUri(relPath, true);
       execution.signal.throwIfAborted();
       const editEngine = requireEditEngine(context);
       const proposal = await editEngine.proposeEdits(getWorkspaceRootUri(), [{ path: relPath, newContent: content }], `Write ${relPath}`, undefined, execution.signal);
       return submitFileProposal(context, proposal, { path: relPath }, execution.signal);
-    },
-    { category: 'edit', riskLevel: 'low_risk' }
+    }
   );
 
   // 4. create_file
@@ -169,29 +182,29 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       type: 'function',
       function: {
         name: 'create_file',
-        description: 'Create a new file only if it does not already exist.',
+        description: 'Create a new file only if absent. For .json files prefer the json object argument; the tool serializes it correctly. Existing-file refusal and edit review still apply.',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: 'Relative path to new file' },
-            content: { type: 'string', description: 'Initial file content' }
+            content: { type: 'string', description: 'Complete initial file text; omit when using json' },
+            json: { type: 'object', additionalProperties: true, description: 'Actual JSON object for a .json file; omit content when using this' }
           },
-          required: ['path', 'content'],
+          required: ['path'],
           additionalProperties: false
         }
       }
     },
     async (args, execution) => {
       const relPath = getString(args.path, 'path', 500);
-      const content = getFileContent(args.content, 'content');
+      const content = materializeFileContent(args, maximumWriteBytes);
       await resolveWorkspaceUri(relPath, true);
       execution.signal.throwIfAborted();
       const proposal = await requireEditEngine(context).proposeEdits(getWorkspaceRootUri(), [
         { path: relPath, newContent: content, operation: 'create' }
       ], `Create ${relPath}`, undefined, execution.signal);
       return submitFileProposal(context, proposal, { path: relPath, operation: 'create' }, execution.signal);
-    },
-    { category: 'edit', riskLevel: 'low_risk' }
+    }
   );
 
   // 5. replace_range
@@ -241,8 +254,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         { path: relPath, newContent: updated, expectedOriginalHash: computeContentHash(bytes) }
       ], `Replace lines ${startLine}-${endLine} in ${relPath}`, undefined, execution.signal);
       return submitFileProposal(context, proposal, { path: relPath, replacedLines: endLine - startLine + 1 }, execution.signal);
-    },
-    { category: 'edit', riskLevel: 'low_risk' }
+    }
   );
 
   // 6. delete_file
@@ -270,8 +282,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         { path: relPath, newContent: '', operation: 'delete' }
       ], `Delete ${relPath}`, undefined, execution.signal);
       return submitFileProposal(context, proposal, { path: relPath, operation: 'delete' }, execution.signal);
-    },
-    { category: 'edit', riskLevel: 'destructive', requiresApproval: true }
+    }
   );
 
   // 7. move_file / rename_file
@@ -300,8 +311,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       execution.signal.throwIfAborted();
       const proposal = await requireEditEngine(context).proposeMove(getWorkspaceRootUri(), srcPath, dstPath, execution.signal);
       return submitFileProposal(context, proposal, { from: srcPath, to: dstPath, operation: 'move' }, execution.signal);
-    },
-    { category: 'edit', riskLevel: 'destructive', requiresApproval: true }
+    }
   );
 
   // 8. list_directory
@@ -336,8 +346,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }))
         .filter((e) => !e.name.startsWith('.git') && e.name !== 'node_modules')
         .slice(0, 100);
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 9. search_text
@@ -363,8 +372,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       const maxResults = typeof args.max_results === 'number' ? Math.min(20, Math.max(1, args.max_results)) : 8;
       const snippets = await findRelevantSnippets(query, { maxFiles: maxResults, maxChars: 12000 });
       return { matches: snippets.map((s) => ({ path: s.path, line: s.startLine, snippet: s.text })) };
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 10. search_files
@@ -390,8 +398,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       const maxResults = typeof args.max_results === 'number' ? Math.min(50, Math.max(1, args.max_results)) : 20;
       const uris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', maxResults);
       return { files: uris.map((u) => vscode.workspace.asRelativePath(u)) };
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 11. git_status
@@ -411,8 +418,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           resolve({ status: (stdout || stderr || '').trim(), error: err ? err.message : undefined });
         });
       });
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 12. git_diff
@@ -439,8 +445,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           resolve({ diff: (stdout || stderr || '').slice(0, 50000), error: err ? err.message : undefined });
         });
       });
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 13. git_log
@@ -467,8 +472,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           resolve({ log: (stdout || stderr || '').trim(), error: err ? err.message : undefined });
         });
       });
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 14. git_commit
@@ -500,8 +504,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           });
         });
       });
-    },
-    { category: 'execute', riskLevel: 'low_risk', requiresApproval: true }
+    }
   );
 
   // 15. run_command
@@ -553,8 +556,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           });
         });
       });
-    },
-    { category: 'execute', riskLevel: 'low_risk', requiresApproval: true }
+    }
   );
 
   // 16. run_test
@@ -606,8 +608,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           });
         });
       });
-    },
-    { category: 'execute', riskLevel: 'low_risk' }
+    }
   );
 
   // 17. get_diagnostics
@@ -644,8 +645,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         }
       }
       return { diagnostics: results.slice(0, 30) };
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 18. get_editor_context
@@ -669,8 +669,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         cursorLine: editor.selection.active.line + 1,
         selectedText: editor.document.getText(editor.selection).slice(0, 5000)
       };
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 19. inspect_project
@@ -700,8 +699,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       } catch {
         return { type: 'generic', message: 'No package.json found.' };
       }
-    },
-    { category: 'read', riskLevel: 'read_only' }
+    }
   );
 
   // 20. create_artifact
@@ -738,8 +736,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         return { success: true, artifactId: art.id, title: art.title };
       }
       return { success: true, title, message: 'Artifact created in memory.' };
-    },
-    { category: 'edit', riskLevel: 'low_risk' }
+    }
   );
 }
 
@@ -756,9 +753,9 @@ function getFileContent(value: unknown, name: string): string {
 
 async function submitFileProposal(context: CoreToolContext, proposal: EditProposal, details: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
   signal.throwIfAborted();
-  if (typeof context.autoApply === 'function' ? context.autoApply() : context.autoApply) {
+  if (!requireEditEngine(context).requiresReview && (typeof context.autoApply === 'function' ? context.autoApply() : context.autoApply)) {
     const result = await requireEditEngine(context).applyProposal(proposal.id, undefined, signal);
-    return { ...details, success: result.success, applied: result.appliedCount > 0, proposalId: proposal.id, recoveryId: result.recoveryId, errors: result.errors };
+    return editToolResult(result, details);
   }
   return { ...details, success: true, proposed: true, proposalId: proposal.id, message: 'Awaiting review in Changes. No file operation has been applied.' };
 }

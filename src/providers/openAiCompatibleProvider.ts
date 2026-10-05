@@ -1,4 +1,5 @@
 import { ChatMessage, LocalModel, ModelProvider, ModelToolDefinition } from './modelProvider';
+import { normalizeEndpoint } from './endpointConfiguration';
 
 interface ModelsResponse {
   data?: Array<{ id?: string }>;
@@ -29,7 +30,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
   constructor(id: string, baseUrl: string) {
     this.id = id;
-    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.baseUrl = normalizeEndpoint(baseUrl);
     let loopback = false;
     try {
       const url = new URL(this.baseUrl);
@@ -40,7 +41,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
   async detect(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(1000) });
+      const response = await fetch(`${this.baseUrl}/models`, { redirect: 'error', signal: AbortSignal.timeout(5000) });
       return response.ok;
     } catch {
       return false;
@@ -48,7 +49,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
   }
 
   async listModels(): Promise<LocalModel[]> {
-    const response = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(2500) });
+    const response = await fetch(`${this.baseUrl}/models`, { redirect: 'error', signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error(`${this.id} returned HTTP ${response.status} while listing models.`);
     const data = await response.json() as ModelsResponse;
     return (data.data ?? []).flatMap((model) => model.id ? [{ name: model.id, source: this.source }] : []);
@@ -56,6 +57,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
   async streamChat(model: string, messages: ChatMessage[], onToken: (token: string) => void, signal?: AbortSignal): Promise<void> {
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      redirect: 'error',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages, stream: true }),
@@ -92,6 +94,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
       let responseStarted = false;
       try {
         const response = await fetch(`${this.baseUrl}/chat/completions`, {
+          redirect: 'error',
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model, messages, tools, stream: true }),
@@ -123,6 +126,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        redirect: 'error',
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, messages, tools, stream: false }),
@@ -152,6 +156,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
 
     // Fallback: standard chat without native tools parameter
     const fallbackResponse = await fetch(`${this.baseUrl}/chat/completions`, {
+      redirect: 'error',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages, stream: false }),

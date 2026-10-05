@@ -1,6 +1,7 @@
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ModelToolDefinition } from '../providers/modelProvider';
+import { findBrowserExecutable, RenderedBrowser } from './renderedBrowser';
 
 const execAsync = promisify(exec);
 
@@ -8,18 +9,22 @@ export const BROWSER_TOOL_DEFINITION: ModelToolDefinition = {
   type: 'function',
   function: {
     name: 'browser_action',
-    description: 'Inspect local web applications or verify local web endpoints with local browser automation.',
+    description: 'Verify loopback web apps. render opens a real isolated Chrome/Edge page; inspect reports DOM, forms, links, viewport, browser console and network failures; click/fill interact; viewport tests responsive sizes; close ends the session. navigate/read only fetch HTML and do NOT verify JavaScript or rendering. Non-loopback resources and WebSockets are blocked; use local assets and a production preview for testing.',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['open', 'navigate', 'read'],
+          enum: ['open', 'navigate', 'read', 'render', 'inspect', 'click', 'fill', 'viewport', 'close'],
           description: 'The browser action to perform'
         },
+        selector: { type: 'string', description: 'Exact unique CSS selector for click/fill, taken from the page inspection.' },
+        value: { type: 'string', description: 'Text entered by fill.' },
+        width: { type: 'integer', minimum: 320, maximum: 2560, description: 'Optional for render, required for viewport; inspect never resizes. Provide height too.' },
+        height: { type: 'integer', minimum: 240, maximum: 1600, description: 'Optional for render, required for viewport; always provide together with width.' },
         url: {
           type: 'string',
-          description: 'The URL to open or navigate to (e.g., http://localhost:3000)'
+          description: 'Actual running localhost URL; required for render/open/navigate. Use the server process result, never an assumed port.'
         }
       },
       required: ['action'],
@@ -39,12 +44,14 @@ export interface BrowserActionResult {
 }
 
 export class BrowserTool {
+  private readonly rendered = new RenderedBrowser();
   private activeUrl?: string;
   private consoleErrors: string[] = [];
   private available?: boolean;
 
   public async isAvailable(): Promise<boolean> {
     if (this.available !== undefined) return this.available;
+    if (await findBrowserExecutable()) { this.available = true; return true; }
     try {
       // Check for Chrome or Edge executable locally
       if (process.platform === 'win32') {
@@ -155,8 +162,9 @@ export class BrowserTool {
     return [...this.consoleErrors];
   }
 
-  public async execute(args: { action: string; url?: string }, signal?: AbortSignal): Promise<BrowserActionResult> {
+  public async execute(args: { action: string; url?: string; selector?: string; value?: string; width?: number; height?: number }, signal?: AbortSignal): Promise<any> {
     signal?.throwIfAborted();
+    if (['render', 'inspect', 'click', 'fill', 'viewport', 'close'].includes(args.action)) return this.rendered.execute(args as unknown as Record<string, unknown>, signal);
     if (args.action === 'open') {
       return this.open(args.url || 'http://localhost:3000', signal);
     }
@@ -172,6 +180,8 @@ export class BrowserTool {
       error: `Unknown browser action "${args.action}".`
     };
   }
+
+  public async dispose(): Promise<void> { await this.rendered.close(); }
 }
 
 export function validateLocalBrowserUrl(input: string): string {

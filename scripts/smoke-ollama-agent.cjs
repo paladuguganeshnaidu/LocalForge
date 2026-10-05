@@ -43,7 +43,7 @@ async function main() {
 
   const permissions = new PermissionManager('always_ask', async (request) => {
     permissionRequests.push(request);
-    console.log(`Approval requested for: ${request.command || request.toolName}`);
+    console.log(`Approval requested for ${request.toolName}: ${request.command || JSON.stringify(request.args)}`);
     return request.command === expectedCommand;
   });
 
@@ -56,6 +56,7 @@ async function main() {
   }], {
     mode: 'agent',
     maxRounds: 4,
+    signal: AbortSignal.timeout(180000),
     onProgress: (message) => { progress.push(message); console.log(`Agent: ${message}`); },
     onModelOutput: (text, round, tools) => visibleModelUpdates.push({ text, round, tools })
   });
@@ -66,7 +67,8 @@ async function main() {
   assert.equal(result.state.status, 'completed', `Agent run did not complete: ${result.state.unresolvedErrors.join('; ')}`);
   assert.equal(result.state.steps.flatMap((step) => step.toolCalls).filter((call) => call.status === 'success').length, 1);
   assert.match(result.response, /LOCALFORGE_COMMAND_OK/);
-  assert.ok(progress.some((item) => item.includes('Model working')), 'Agent should emit live model-step status.');
+  assert.ok(progress.filter((item) => item === 'Thinking').length >= 2, 'Agent must report thinking before tool selection and after receiving the command result.');
+  assert.ok(progress.every((item) => !/model\s+\d+\s*\/\s*\d+/i.test(item)), 'User-visible progress must not expose model round counters.');
 
   console.log(`Real Ollama agent tool-use passed with ${model}.`);
   console.log(`Approved real command calls: ${commandInvocations}; permission prompts: ${permissionRequests.length}.`);

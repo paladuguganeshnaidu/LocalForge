@@ -5,6 +5,22 @@ const { CompositeProvider } = require('../dist/providers/compositeProvider.js');
 const { OpenAiCompatibleProvider } = require('../dist/providers/openAiCompatibleProvider.js');
 const { routeModel } = require('../dist/providers/modelRouter.js');
 
+test('explicit downloads route to the selected reachable host without a local fallback', async () => {
+  const calls = [];
+  const local = { id: 'ollama', source: 'local', detect: async () => true, pullModel: async name => calls.push(['local', name]) };
+  const remote = { id: 'ssh-ollama-gpu', source: 'remote', detect: async () => true, pullModel: async name => calls.push(['remote', name]) };
+  const composite = new CompositeProvider([local, remote]);
+  assert.deepEqual((await composite.getDownloadTargets()).map(target => target.id), ['ollama', 'ssh-ollama-gpu']);
+  await composite.pullModelToProvider('ssh-ollama-gpu', 'coder:test', () => {});
+  assert.deepEqual(calls, [['remote', 'coder:test']]);
+  remote.detect = async () => false;
+  await assert.rejects(composite.pullModelToProvider('ssh-ollama-gpu', 'coder:test', () => {}), /unavailable/);
+  composite.removeProvider(remote.id);
+  await assert.rejects(composite.pullModelToProvider('ssh-ollama-gpu', 'coder:test', () => {}), /unavailable/);
+  assert.equal(calls.length, 1);
+});
+
+
 let server;
 let baseUrl;
 
@@ -171,5 +187,6 @@ test('model routing honors a task preference and falls back to the explicit sele
   ];
   assert.equal(routeModel(models, 'edit', { edit: 'lmstudio' }, 'ollama:qwen').name, 'lmstudio:codestral');
   assert.equal(routeModel(models, 'chat', {}, 'ollama:qwen').name, 'ollama:qwen');
-  assert.equal(routeModel(models, 'completion', {}, 'missing').name, 'ollama:qwen');
+  assert.equal(routeModel(models, 'completion', {}, 'missing'), undefined, 'An unavailable explicit selection must not silently send context to another provider');
+  assert.equal(routeModel(models, 'completion', {}, 'auto').name, 'ollama:qwen');
 });

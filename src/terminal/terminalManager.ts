@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
+import { join, resolve } from 'node:path';
 
 export type ProcessStatus = 'queued' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'timed_out';
 
@@ -23,13 +24,46 @@ export class TerminalManager {
   private activeChildren = new Map<string, ChildProcess>();
   private stopReasons = new Map<string, 'stopped' | 'timed_out'>();
   private completions = new Map<string, Promise<void>>();
+  private backgroundStarts = new Map<string, Promise<ManagedProcess>>();
+  private treeTerminations = new Map<string, Promise<void>>();
+  private terminationFailures = new Map<string, string>();
 
-  private killChildTree(child: ChildProcess): void {
+  public async startBackgroundCommand(command: string, cwd: string, signal?: AbortSignal): Promise<ManagedProcess & { reused?: boolean }> {
+    signal?.throwIfAborted();
+    const normalizedCwd = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
+    const key = JSON.stringify([normalizedCwd(cwd), command.trim()]);
+    const pending = this.backgroundStarts.get(key);
+    if (pending) {
+      const record = await pending;
+      signal?.throwIfAborted();
+      return { ...record, reused: true };
+    }
+    const existing = this.getRunningProcesses().find(record => record.isBackground && record.command.trim() === command.trim() && normalizedCwd(record.cwd) === normalizedCwd(cwd));
+    if (existing?.status === 'running') return { ...existing, reused: true };
+    const start = (async () => {
+      if (existing) { await this.completions.get(existing.id); await this.treeTerminations.get(existing.id); }
+      signal?.throwIfAborted();
+      const record = await this.runCommand(command, cwd, true, 0, signal);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return record;
+    })();
+    this.backgroundStarts.set(key, start);
+    try { return { ...await start }; }
+    finally { if (this.backgroundStarts.get(key) === start) this.backgroundStarts.delete(key); }
+  }
+
+  private async killChildTree(child: ChildProcess): Promise<void> {
     if (!child.pid) return;
     try {
       if (process.platform === 'win32') {
-        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-        killer.on('error', () => child.kill('SIGKILL'));
+        await new Promise<void>((complete, reject) => {
+          let output = '';
+          const killer = spawn(join(process.env.SystemRoot || 'C:/Windows', 'System32/taskkill.exe'), ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+          killer.stdout?.on('data', data => { output = (output + data.toString()).slice(-2000); });
+          killer.stderr?.on('data', data => { output = (output + data.toString()).slice(-2000); });
+          killer.on('error', error => { child.kill('SIGKILL'); reject(error); });
+          killer.on('close', code => code === 0 ? complete() : reject(new Error(`Owned process-tree termination exited with code ${code}: ${output.trim()}`)));
+        });
       } else {
         try {
           process.kill(-child.pid, 'SIGTERM');
@@ -43,10 +77,11 @@ export class TerminalManager {
         }, 1500);
         escalation.unref();
       }
-    } catch {
+    } catch (error) {
       try {
         child.kill('SIGKILL');
       } catch {}
+      throw error;
     }
   }
 
@@ -57,7 +92,12 @@ export class TerminalManager {
     if (record.status === 'stopping') return true;
     this.stopReasons.set(id, reason);
     record.status = 'stopping';
-    this.killChildTree(child);
+    const termination = this.killChildTree(child).catch(error => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.terminationFailures.set(id, message);
+      record.stderr += `\nProcess-tree cleanup failed: ${message}`;
+    }).finally(() => { this.treeTerminations.delete(id); });
+    this.treeTerminations.set(id, termination);
     return true;
   }
 
@@ -119,18 +159,29 @@ export class TerminalManager {
         cwd,
         shell: true,
         windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, CI: 'true', npm_config_yes: 'false' },
         detached: process.platform !== 'win32'
       });
 
       record.processId = child.pid;
       this.activeChildren.set(id, child);
 
+      const checkPrompt = () => {
+        if (record.status !== 'running') return;
+        if (/Do you want to install\s+['"]?webpack-cli['"]?\s+\(yes\/no\)/i.test(record.stderr + record.stdout)) {
+          record.stderr += '\nInteractive package installation cannot receive input in agent commands. Install the missing declared build tooling with explicit install_packages approval, then retry the original command.';
+          this.requestStop(id, 'stopped');
+        }
+      };
       child.stdout?.on('data', (data: Buffer | string) => {
         record.stdout = (record.stdout + data.toString()).slice(-20000);
+        checkPrompt();
       });
 
       child.stderr?.on('data', (data: Buffer | string) => {
         record.stderr = (record.stderr + data.toString()).slice(-10000);
+        checkPrompt();
       });
 
       const finish = (code: number | null, error?: Error) => {
@@ -163,12 +214,27 @@ export class TerminalManager {
     return this.requestStop(id, 'stopped');
   }
 
+  public async stopAllProcesses(): Promise<void> {
+    for (const record of this.getRunningProcesses()) this.stopProcess(record.id);
+    const pending = [...this.completions.values(), ...this.treeTerminations.values()];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(pending),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Owned process cleanup did not finish within 10 seconds.')), 10000); })
+      ]);
+      if (this.terminationFailures.size) throw new Error(`Owned process cleanup failed: ${[...this.terminationFailures.values()].join('; ')}`);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
   public async restartProcess(id: string): Promise<ManagedProcess | undefined> {
     const proc = this.processes.get(id);
     if (!proc) return undefined;
     const completion = this.completions.get(id);
     this.stopProcess(id);
+    const termination = this.treeTerminations.get(id);
     if (completion) await completion;
+    if (termination) await termination;
     return this.runCommand(proc.command, proc.cwd, proc.isBackground);
   }
 

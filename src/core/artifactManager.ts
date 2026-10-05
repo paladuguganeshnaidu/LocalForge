@@ -66,6 +66,10 @@ export class ArtifactManager {
     return Array.from(this.artifacts.values()).filter((a) => a.conversationId === conversationId);
   }
 
+  public purgeConversation(conversationId: string): void {
+    for (const [id, artifact] of this.artifacts) if (artifact.conversationId === conversationId) this.artifacts.delete(id);
+  }
+
   public updateStatus(id: string, status: ArtifactStatus): Artifact | undefined {
     const artifact = this.artifacts.get(id);
     if (artifact) {

@@ -1,8 +1,9 @@
 import { withCancellation } from '../core/cancellation';
 import { AgentAccessPolicy } from './accessPolicy';
 import { isSensitivePath } from '../core/sensitivePaths';
+import { getBuiltinToolDescriptor, ToolCategory, ToolDescriptor, validateToolDescriptor } from './toolPolicy';
 
-export type ToolCategory = 'read' | 'edit' | 'execute';
+export type { ToolCategory } from './toolPolicy';
 export type PermissionMode =
   | 'request_review'
   | 'allow_safe_auto'
@@ -31,6 +32,7 @@ export interface PermissionRequest {
   id: string;
   toolName: string;
   category: ToolCategory;
+  policy?: ToolDescriptor;
   description: string;
   command?: string;
   commandCategory?: CommandCategory;
@@ -93,21 +95,7 @@ const SHELL_OPERATORS = [
   /\$\(/
 ];
 
-const SAFE_TEST_BUILD_COMMAND_PREFIXES = [
-  'npm test',
-  'npm run test',
-  'npm start',
-  'npm run start',
-  'npm run lint',
-  'npm run build',
-  'node',
-  'cargo check',
-  'cargo test',
-  'pytest',
-  'go test',
-  'python -m unittest',
-  'mvn test',
-  './gradlew test',
+const SAFE_INSPECTION_COMMAND_PREFIXES = [
   'git status',
   'git diff',
   'git log',
@@ -121,6 +109,7 @@ export function hasShellChainingOrRedirection(cmd: string): boolean {
 export class PermissionManager {
   private mode: PermissionMode = 'allow_safe_auto';
   private sessionApprovedTools = new Set<string>();
+  private workspaceSessionRegistrations = new Set<string>();
   private approvalHandler?: ApprovalHandler;
   private accessPolicy?: AgentAccessPolicy;
 
@@ -134,6 +123,7 @@ export class PermissionManager {
   }
 
   public setMode(mode: PermissionMode): void {
+    this.clearSession();
     this.mode = mode;
   }
 
@@ -147,28 +137,20 @@ export class PermissionManager {
 
   public clearSession(): void {
     this.sessionApprovedTools.clear();
+    this.workspaceSessionRegistrations.clear();
+  }
+
+  public grantWorkspaceSession(registrations: readonly string[]): void {
+    if ((this.accessPolicy?.getState().scope ?? 'workspace') !== 'workspace' || !registrations.length) throw new Error('Session commands and edits require an open project workspace and registered tools.');
+    this.workspaceSessionRegistrations = new Set(registrations);
+  }
+
+  public hasWorkspaceSessionApproval(): boolean {
+    return this.workspaceSessionRegistrations.size > 0 && (this.accessPolicy?.getState().scope ?? 'workspace') === 'workspace';
   }
 
   public classifyTool(toolName: string): ToolCategory {
-    if (
-      toolName.startsWith('read_') ||
-      toolName.startsWith('search_') ||
-      toolName.startsWith('list_') ||
-      toolName === 'git_status' ||
-      toolName === 'git_diff' ||
-      toolName === 'detect_project'
-    ) {
-      return 'read';
-    }
-    if (
-      toolName.startsWith('write_') ||
-      toolName.startsWith('edit_') ||
-      toolName.startsWith('delete_') ||
-      toolName.startsWith('apply_patch')
-    ) {
-      return 'edit';
-    }
-    return 'execute';
+    return getBuiltinToolDescriptor(toolName)?.category ?? 'execute';
   }
 
   public categorizeCommand(command: string): CommandCategory {
@@ -255,13 +237,13 @@ export class PermissionManager {
       }
     }
 
-    return SAFE_TEST_BUILD_COMMAND_PREFIXES.some(
+    return SAFE_INSPECTION_COMMAND_PREFIXES.some(
       (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `)
     );
   }
 
   public shouldAutoApplyEdits(): boolean {
-    return this.mode === 'always_proceed';
+    return this.mode === 'always_proceed' || this.hasWorkspaceSessionApproval();
   }
 
   public async checkPermission(
@@ -269,15 +251,29 @@ export class PermissionManager {
     args: Record<string, unknown>,
     trustedBuiltinReadOnly = false,
     signal?: AbortSignal,
-    requireExplicitApproval = false
+    requireExplicitApproval = false,
+    descriptor?: ToolDescriptor,
+    authorizationId?: string
   ): Promise<boolean> {
     signal?.throwIfAborted();
-    this.accessPolicy?.assertTool(toolName, args);
-    const networkAction = toolName === 'read_web_page' || typeof args.command === 'string' && /https?:\/\/|\b(?:curl|wget|ssh|scp|sftp|Invoke-WebRequest|Invoke-RestMethod|npm\s+(?:i\b|install|ci|update)|pip\s+install|git\s+(?:fetch|pull|push|clone)|yarn\s+(?:add|install)|pnpm\s+(?:add|install))\b/i.test(args.command);
-    const paths = typeof args.path === 'string' ? [args.path] : Array.isArray(args.paths) ? args.paths.filter((path): path is string => typeof path === 'string') : [];
-    const sensitiveRead = toolName.startsWith('read_') && paths.some(isSensitivePath);
+    const baseline = getBuiltinToolDescriptor(toolName);
+    const policy = descriptor ?? baseline;
+    if (!policy || policy.name !== toolName) return false;
+    validateToolDescriptor(policy);
+    if (baseline && (policy.category !== baseline.category || policy.mutability !== baseline.mutability || policy.scopes.some((scope) => !baseline.scopes.includes(scope)) || JSON.stringify(policy.pathArguments) !== JSON.stringify(baseline.pathArguments) || baseline.network && !policy.network || baseline.processExecution && !policy.processExecution || baseline.approval === 'explicit' && policy.approval !== 'explicit' || baseline.approval === 'review' && policy.approval === 'read_only')) return false;
+    this.accessPolicy?.assertTool(toolName, args, policy);
+    if (typeof args.command === 'string') this.validateCommandSafety(args.command);
+    requireExplicitApproval ||= policy.approval === 'explicit';
+    const networkAction = policy.network || typeof args.command === 'string' && /https?:\/\/|\b(?:curl|wget|ssh|scp|sftp|Invoke-WebRequest|Invoke-RestMethod|npm\s+(?:i\b|install|ci|update)|pip\s+install|git\s+(?:fetch|pull|push|clone)|yarn\s+(?:add|install)|pnpm\s+(?:add|install))\b/i.test(args.command);
+    const paths = policy.pathArguments.flatMap((key) => Array.isArray(args[key]) ? args[key] as unknown[] : [args[key]]).filter((path): path is string => typeof path === 'string');
+    const sensitiveRead = policy.category === 'read' && paths.some(isSensitivePath);
     if (networkAction || sensitiveRead) requireExplicitApproval = true;
-    const category = trustedBuiltinReadOnly ? 'read' : this.classifyTool(toolName);
+    const category = policy.category;
+    const sessionCommand = typeof args.command === 'string' ? args.command : undefined;
+
+    if (this.hasWorkspaceSessionApproval() && baseline && authorizationId && this.workspaceSessionRegistrations.has(authorizationId) &&
+      !networkAction && !sensitiveRead && !['destructive', 'privileged', 'network'].includes(policy.riskLevel) && policy.mutability !== 'external' &&
+      !(sessionCommand && HIGH_RISK_COMMAND_PATTERNS.some(pattern => pattern.test(sessionCommand)))) return true;
 
     // 0. Always proceed mode: auto allow after validating safety
     if (this.mode === 'always_proceed' && !requireExplicitApproval) {
@@ -311,7 +307,7 @@ export class PermissionManager {
       return true;
     }
 
-    const sessionKey = `${toolName}:${requireExplicitApproval ? JSON.stringify(args) : args.path || args.command || ''}`;
+    const sessionKey = JSON.stringify([policy, args, authorizationId]);
     if (this.mode === 'ask_once_per_session' && this.sessionApprovedTools.has(sessionKey)) {
       return true;
     }
@@ -323,6 +319,7 @@ export class PermissionManager {
         id: `perm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         toolName,
         category,
+        policy,
         description: networkAction ? `Allow internet/network access${typeof args.url === 'string' ? ' to ' + args.url : ' for this command'}?` : sensitiveRead ? 'Allow reading a sensitive file? Its contents may be sent to the selected model endpoint.' : `Permission requested to execute ${toolName}`,
         command: cmd,
         commandCategory: cmd ? this.categorizeCommand(cmd) : undefined,

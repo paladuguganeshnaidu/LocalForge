@@ -1,12 +1,11 @@
 import { validateWorkspaceRelativePath } from '../core/workspacePaths';
+import { getBuiltinToolDescriptor, ToolDescriptor } from './toolPolicy';
 
 export type AccessScope = 'workspace' | 'file' | 'machine';
 
 export function isAccessScope(value: unknown): value is AccessScope {
   return value === 'workspace' || value === 'file' || value === 'machine';
 }
-
-const fileTools = new Set(['read_file', 'read_workspace_file', 'read_files', 'write_file', 'write_workspace_file', 'edit_workspace_file', 'create_file', 'replace_range', 'delete_file', 'read_web_page']);
 
 export class AgentAccessPolicy {
   private scope: AccessScope = 'workspace';
@@ -25,15 +24,15 @@ export class AgentAccessPolicy {
     this.filePath = scope === 'file' ? filePath : undefined;
   }
 
-  public allowsTool(name: string): boolean {
-    if (name === 'read_machine_file' || name === 'list_machine_directory') return this.scope === 'machine';
-    return this.scope !== 'file' || fileTools.has(name);
+  public allowsTool(name: string, descriptor = getBuiltinToolDescriptor(name)): boolean {
+    return !!descriptor && descriptor.name === name && descriptor.scopes.includes(this.scope);
   }
 
-  public assertTool(name: string, args: Record<string, unknown>): void {
-    if (!this.allowsTool(name)) throw new Error(`"${name}" is unavailable with ${this.scope === 'file' ? 'File' : 'Project workspace'} access. Change the access scope explicitly to authorize it.`);
-    if (this.scope !== 'file' || name === 'read_web_page') return;
-    const paths = name === 'read_files' ? args.paths : [args.path];
+  public assertTool(name: string, args: Record<string, unknown>, descriptor?: ToolDescriptor): void {
+    const policy = descriptor ?? getBuiltinToolDescriptor(name);
+    if (!this.allowsTool(name, policy)) throw new Error(`"${name}" is unavailable with ${this.scope === 'file' ? 'File' : 'Project workspace'} access. Change the access scope explicitly to authorize it.`);
+    if (this.scope !== 'file' || !policy!.pathArguments.length) return;
+    const paths = policy!.pathArguments.flatMap((key) => Array.isArray(args[key]) ? args[key] as unknown[] : [args[key]]);
     if (!Array.isArray(paths) || !paths.length) throw new Error('File access requires the selected file path.');
     for (const filePath of paths) this.assertFile(filePath);
   }

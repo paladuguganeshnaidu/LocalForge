@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import { ModelRegistry } from '../providers/modelRegistry';
 import { ModelRouter, TaskType } from '../providers/modelRouter';
 import { ModelProvider, ChatMessage } from '../providers/modelProvider';
-import { OllamaProvider } from '../providers/ollamaProvider';
-import { OpenAiCompatibleProvider } from '../providers/openAiCompatibleProvider';
+import { ConfiguredProviders } from '../providers/configuredProviders';
+import { EndpointConfiguration } from '../providers/endpointConfiguration';
 import { CompositeProvider } from '../providers/compositeProvider';
 import { WorkspaceIndexer } from '../context/workspaceIndexer';
 import { ContextEngine } from '../context/contextEngine';
@@ -12,13 +12,14 @@ import { ToolRegistry } from '../agent/toolRegistry';
 import { isPermissionMode, PermissionManager } from '../agent/permissionManager';
 import { AgentEngine, AgentRunSummary } from '../agent/agentEngine';
 import { AgentMode } from '../agent/agentLoop';
+import { resolveEffortBudget } from '../agent/effort';
 import { EditEngine, EditRollbackResult } from '../editing/editEngine';
 import { RemoteManager } from '../remote/remoteManager';
 import { SessionManager } from './sessionManager';
 import { TaskManager } from './taskManager';
 import { DiagnosticsService } from './diagnosticsService';
 import { LocalForgeEventEmitter } from './events';
-import { allWorkspaceTools, executeWorkspaceTool } from '../agent/workspaceTools';
+import { registerWorkspaceTools } from '../agent/workspaceTools';
 import { ArtifactManager, Artifact } from './artifactManager';
 import { TurnManager, AgentTurn, TurnActivity, ExecutionStrategy } from './turnManager';
 import { TerminalManager } from '../terminal/terminalManager';
@@ -27,18 +28,20 @@ import { ContextReferenceResolver } from '../context/referenceResolver';
 import { MultiAgentOrchestrator, OrchestratorOptions, OrchestrationResult } from '../agent/orchestration/orchestrator';
 import { CheckpointManager } from '../agent/orchestration/checkpointManager';
 import { registerAllCoreTools } from '../agent/coreTools';
+import { registerWorkflowTools } from '../agent/workflowTools';
+import { registerSubagentTools } from '../agent/subagentTools';
 import { ProductMode } from '../agent/orchestration/types';
 import { LocalForgeSelfTest } from './selfTest';
 import { formatCommandLabel, formatToolInput, formatToolOutput } from './activityDetails';
 import { AgentAccessPolicy, AccessScope } from '../agent/accessPolicy';
 import { registerExternalTools } from '../agent/externalTools';
 import { createRepositorySummaryFormatter, createRepositorySummaryValidator } from '../agent/summaryEvidence';
-import { isReadOnlyInspectionTask } from '../agent/taskIntent';
+import { classifyTaskIntent, conversationalMessages, isReadOnlyInspectionTask, requiresWorkspaceToolUse } from '../agent/taskIntent';
+import { getEditRequestPolicy } from '../editing/editRequestPolicy';
+import { ChatMemoryIndex, readChatMemoryOptions, sanitizeContext } from '../context/chatMemory';
+import { composeRequestContext, formatRequestContext, RequestContextSource } from '../context/requestContext';
 
-export interface EngineInitOptions {
-  ollamaEndpoint?: string;
-  openAiEndpoint?: string;
-}
+export interface EngineInitOptions extends EndpointConfiguration {}
 
 export interface ExecuteTaskOptions {
   strategy?: ExecutionStrategy;
@@ -77,33 +80,34 @@ export class LocalForgeEngine {
 
   private currentAbortController?: AbortController;
   private traceSaveTimer?: ReturnType<typeof setTimeout>;
+  private tracePersistence: Promise<void> = Promise.resolve();
+  private readonly configuredProviders: ConfiguredProviders;
+  private pendingProviderConfiguration?: EngineInitOptions;
+  private providerRefresh?: Promise<void>;
+  private providersDisposed = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     options: EngineInitOptions = {}
   ) {
-    const ollamaUrl = options.ollamaEndpoint || 'http://127.0.0.1:11434';
-    const localOllama = new OllamaProvider(ollamaUrl, 'ollama', () => {
-      const configuration = vscode.workspace.getConfiguration('localforge.ollama');
-      return {
-        num_ctx: configuration.get<number>('contextWindow', 8192),
-        num_predict: configuration.get<number>('maxOutputTokens', -1),
-        temperature: configuration.get<number>('temperature', 0.1)
-      };
-    });
-
-    const defaultProviders: ModelProvider[] = [localOllama];
-    if (options.openAiEndpoint) {
-      defaultProviders.push(new OpenAiCompatibleProvider('openai', options.openAiEndpoint));
-    }
-
-    this.compositeProvider = new CompositeProvider(defaultProviders);
     this.modelRegistry = new ModelRegistry();
-    this.modelRegistry.registerProvider(localOllama, localOllama.source, ollamaUrl);
-    if (options.openAiEndpoint) {
-      const compatible = new OpenAiCompatibleProvider('openai', options.openAiEndpoint);
-      this.modelRegistry.registerProvider(compatible, compatible.source, options.openAiEndpoint);
-    }
+    this.compositeProvider = new CompositeProvider([], this.modelRegistry);
+    const ollamaGenerationOptions = () => {
+      const configuration = vscode.workspace.getConfiguration('localforge.ollama');
+      const effort = this.sessionManager?.getActiveSession().effort ?? 'medium';
+      const budget = resolveEffortBudget(effort, { contextWindow: configuration.get<number>('contextWindow', 8192), maxOutputTokens: configuration.get<number>('maxOutputTokens', -1) });
+      return {
+        num_ctx: budget.contextWindow,
+        num_predict: budget.maxOutputTokens,
+        temperature: configuration.get<number>('temperature', 0.1),
+        thinking: configuration.get<boolean>('agentThinking', false)
+      };
+    };
+    this.configuredProviders = new ConfiguredProviders(this.modelRegistry, ollamaGenerationOptions);
+
+    this.configuredProviders.configure(options);
+    context.subscriptions.push({ dispose: () => { for (const provider of this.modelRegistry.getAllProviders()) provider.dispose?.(); } });
+    context.subscriptions.push({ dispose: () => { this.providersDisposed = true; this.pendingProviderConfiguration = undefined; } });
 
     this.modelRouter = new ModelRouter(() => this.modelRegistry.getModels());
 
@@ -117,8 +121,11 @@ export class LocalForgeEngine {
     this.editEngine = new EditEngine(context.workspaceState, context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined);
     this.terminalManager = new TerminalManager();
     this.agentEngine = new AgentEngine(this.toolRegistry, this.permissionManager, this.editEngine, this.terminalManager);
-    this.remoteManager = new RemoteManager(context, this.compositeProvider, this.modelRegistry);
-    this.sessionManager = new SessionManager(context.workspaceState);
+    this.remoteManager = new RemoteManager(context, this.compositeProvider, this.modelRegistry, ollamaGenerationOptions, (reason) => {
+      this.events.emit('remoteDisconnected', reason);
+      this.events.emit('providersChanged');
+    });
+    this.sessionManager = new SessionManager(context.workspaceState, context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined);
     this.taskManager = new TaskManager(context.workspaceState);
     this.gitContextService = new GitContextService();
 
@@ -126,6 +133,7 @@ export class LocalForgeEngine {
     this.turnManager = new TurnManager(() => this.scheduleTraceSave());
     this.turnManager.restorePersistedHistory(context.workspaceState.get<unknown>('localforge.activityTraceHistory'));
     this.browserTool = new BrowserTool();
+    context.subscriptions.push({ dispose: () => { void this.browserTool.dispose(); } });
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
 
     this.orchestrator = new MultiAgentOrchestrator(
@@ -150,16 +158,11 @@ export class LocalForgeEngine {
   }
 
   private registerDefaultTools(): void {
-    for (const toolDef of allWorkspaceTools) {
-      this.toolRegistry.registerTool(toolDef, (args, execution) =>
-        executeWorkspaceTool(toolDef.function.name, args, {
-          editEngine: this.editEngine,
-          terminalManager: this.terminalManager,
-          autoApply: this.permissionManager.shouldAutoApplyEdits(),
-          signal: execution.signal
-        })
-      );
-    }
+    registerWorkspaceTools(this.toolRegistry, () => ({
+      editEngine: this.editEngine,
+      terminalManager: this.terminalManager,
+      autoApply: this.permissionManager.shouldAutoApplyEdits()
+    }));
     registerAllCoreTools(this.toolRegistry, {
       editEngine: this.editEngine,
       terminalManager: this.terminalManager,
@@ -167,6 +170,9 @@ export class LocalForgeEngine {
       browserTool: this.browserTool,
       autoApply: () => this.permissionManager.shouldAutoApplyEdits()
     });
+    registerWorkflowTools(this.toolRegistry, this.permissionManager);
+    registerSubagentTools(this.toolRegistry, this.permissionManager, this.compositeProvider, () => this.sessionManager.getActiveSession().model, message => this.events.emit('subagentProgress', message));
+    this.toolRegistry.assertInvariants();
   }
 
   private initWorkspaceContext(): void {
@@ -174,23 +180,58 @@ export class LocalForgeEngine {
     if (roots && roots.length > 0) {
       this.indexer = new WorkspaceIndexer();
       this.contextEngine = new ContextEngine(this.indexer);
+      this.context.subscriptions.push(this.indexer, this.indexer.onDidChange((status) => this.events.emit('indexStatus', status)), this.editEngine.onDidChangeFiles((uris) => this.indexer?.notifyFilesChanged(uris)));
+      this.indexer.startWatching();
       void this.indexer.indexWorkspace().then((count) => {
         this.events.emit('indexProgress', `Indexed ${count} workspace files`);
-      });
+      }).catch((error) => this.events.emit('indexProgress', `Workspace index failed: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
 
   public async bootstrap(): Promise<void> {
+    await this.reconcileProviderConfiguration();
     await this.modelRegistry.refresh();
     try {
-      if (await this.browserTool.isAvailable()) {
+      if (await this.browserTool.isAvailable() && !this.toolRegistry.hasTool(BROWSER_TOOL_DEFINITION.function.name)) {
         this.toolRegistry.registerTool(BROWSER_TOOL_DEFINITION, (args, execution) => this.browserTool.execute(args as any, execution.signal));
       }
     } catch {}
   }
 
+  public getProviderConfigurationStatus(): { pending: boolean; errors: string[] } {
+    return { pending: !!this.pendingProviderConfiguration || !!this.providerRefresh, errors: this.configuredProviders.getErrors() };
+  }
+
+  public async updateProviderConfiguration(configuration: EngineInitOptions): Promise<void> {
+    if (this.providersDisposed) throw new Error('Provider configuration is disposed.');
+    this.pendingProviderConfiguration = { ...configuration };
+    this.events.emit('providersChanged');
+    await this.reconcileProviderConfiguration();
+  }
+
+  private async reconcileProviderConfiguration(): Promise<void> {
+    if (this.isBusy() || this.providersDisposed) return;
+    if (this.providerRefresh) return this.providerRefresh;
+    if (!this.pendingProviderConfiguration) return;
+    const refresh = (async () => {
+      while (this.pendingProviderConfiguration && !this.isBusy() && !this.providersDisposed) {
+        const configuration = this.pendingProviderConfiguration;
+        this.pendingProviderConfiguration = undefined;
+        this.configuredProviders.configure(configuration);
+        this.events.emit('providersChanged');
+        await this.modelRegistry.refresh();
+      }
+    })();
+    this.providerRefresh = refresh;
+    try { await refresh; }
+    finally { if (this.providerRefresh === refresh) this.providerRefresh = undefined; this.events.emit('providersChanged'); }
+  }
+
   public getActivityHistory(conversationId: string): TurnActivity[] {
+    const session = this.sessionManager.getSessions().find((session) => session.id === conversationId);
+    if (!session) return [];
     return this.turnManager.getTurnsForConversation(conversationId)
+      .filter((turn) => turn.historyEpoch === session.historyEpoch)
       .slice(-12)
       .flatMap((turn) => turn.activities.slice(-32));
   }
@@ -198,14 +239,48 @@ export class LocalForgeEngine {
   public async flushActivityHistory(): Promise<void> {
     if (this.traceSaveTimer) clearTimeout(this.traceSaveTimer);
     this.traceSaveTimer = undefined;
-    await this.context.workspaceState.update('localforge.activityTraceHistory', this.turnManager.getPersistedHistory());
+    const saving = (this.tracePersistence ?? Promise.resolve()).then(async () => {
+      const sessions = new Map(this.sessionManager.getSessions().map((session) => [session.id, session]));
+      const history = this.turnManager.getPersistedHistory().filter((turn) => sessions.has(turn.conversationId) && turn.historyEpoch === sessions.get(turn.conversationId)?.historyEpoch);
+      await this.context.workspaceState.update('localforge.activityTraceHistory', history);
+    });
+    this.tracePersistence = saving.catch(() => {});
+    await saving;
+  }
+
+  public async initializeConversationHistory(): Promise<void> {
+    await this.sessionManager.initialize();
+    const sessions = new Map(this.sessionManager.getSessions().map((session) => [session.id, session]));
+    this.turnManager.restorePersistedHistory(this.turnManager.getPersistedHistory().filter((turn) => sessions.has(turn.conversationId) && turn.historyEpoch === sessions.get(turn.conversationId)?.historyEpoch));
+  }
+
+  public async clearConversation(id: string): Promise<void> {
+    if (this.isBusy()) throw new Error('Wait for the task or cancel it before clearing chat.');
+    await this.clearConversationState(id);
+  }
+
+  private async clearConversationState(id: string): Promise<void> {
+    await this.sessionManager.clearSession(id);
+    this.turnManager.purgeConversation(id);
+    this.artifactManager.purgeConversation(id);
+    await this.flushActivityHistory();
+  }
+
+  public async deleteConversation(id: string): Promise<void> {
+    if (this.isBusy()) throw new Error('Wait for the task or cancel it before deleting chat.');
+    await this.sessionManager.deleteSession(id);
+    this.turnManager.purgeConversation(id);
+    this.artifactManager.purgeConversation(id);
+    await this.flushActivityHistory();
   }
 
   private scheduleTraceSave(): void {
     if (this.traceSaveTimer) clearTimeout(this.traceSaveTimer);
     this.traceSaveTimer = setTimeout(() => {
       this.traceSaveTimer = undefined;
-      void this.context.workspaceState.update('localforge.activityTraceHistory', this.turnManager.getPersistedHistory());
+      void this.flushActivityHistory().catch((error) => {
+        void vscode.window.showErrorMessage(`Could not save chat activity: ${error instanceof Error ? error.message : error}`);
+      });
     }, 150);
   }
 
@@ -233,13 +308,16 @@ export class LocalForgeEngine {
     onProgressOrOptions?: ((msg: string) => void) | ExecuteTaskOptions,
     legacyOnToken?: (token: string) => void
   ): Promise<AgentRunSummary> {
+    await this.sessionManager.initialize();
     this.cancelCurrentTask();
+    await this.reconcileProviderConfiguration();
     const controller = new AbortController();
     this.currentAbortController = controller;
     try {
       return await this.executeTaskRun(controller.signal, userPrompt, mode, modelPreference, onProgressOrOptions, legacyOnToken);
     } finally {
       if (this.currentAbortController === controller) this.currentAbortController = undefined;
+      await this.reconcileProviderConfiguration();
     }
   }
 
@@ -267,15 +345,45 @@ export class LocalForgeEngine {
 
     // 1. Slash commands parsing
     const parsedSlash = this.referenceResolver.parseSlashCommand(userPrompt);
-    if (this.accessPolicy.getState().scope === 'file' && parsedSlash.command && !['clear', 'plan'].includes(parsedSlash.command)) throw new Error('This shortcut is unavailable with File access. Change scope before accessing other project data or running commands.');
+    if (this.accessPolicy.getState().scope === 'file' && parsedSlash.command && !['clear', 'plan', 'context'].includes(parsedSlash.command)) throw new Error('This shortcut is unavailable with File access. Change scope before accessing other project data or running commands.');
     let effectivePrompt = parsedSlash.cleanPrompt || userPrompt;
 
     if (parsedSlash.command) {
       switch (parsedSlash.command) {
+        case 'context': {
+          const session = this.sessionManager.getActiveSession();
+          const fileScoped = this.accessPolicy.getState().scope === 'file';
+          return {
+            runId: `run-${Date.now()}`, task: 'Inspect model context', mode: effectiveMode,
+            response: fileScoped ? 'File access is active. Prior chat/workspace context is hidden; subsequent requests exclude chat memory and automatic workspace retrieval.' : sanitizeContext(session.lastContextPreview || 'No model request has been sent in this chat yet.'),
+            filesModified: [], validationAttempts: [], status: 'completed', durationMs: 0
+          };
+        }
+        case 'search': {
+          if (!/^chat(?:\s|$)/i.test(parsedSlash.cleanPrompt)) {
+            const query = parsedSlash.cleanPrompt.trim();
+            const matches = query && this.indexer ? await this.indexer.search(query, { maxFiles: 8, maxChars: 10000 }) : [];
+            signal.throwIfAborted();
+            return {
+              runId: `run-${Date.now()}`, task: 'Search workspace', mode: effectiveMode,
+              response: !query ? 'Usage: `/search <query>` or `/search chat <query>`' : !this.indexer ? 'Open a trusted project workspace to search its index.' : '# Workspace search\n\n' + (matches.length ? matches.map((match) => `## ${match.path}:${match.startLine}–${match.endLine}\nScore: ${match.score.toFixed(3)} · chunk: ${match.chunkId} · SHA-256: ${match.fileHash}${match.truncated ? ' · excerpt truncated' : ''}\n\n${match.text}`).join('\n\n') : 'No matching indexed workspace chunks.') + (this.indexer.getStats().limitReached ? '\n\nIndex limits were reached; these results do not cover every workspace file. Adjust workspace index limits or refine ignore rules.' : ''),
+              filesModified: [], validationAttempts: [], status: 'completed', durationMs: 0
+            };
+          }
+          const query = parsedSlash.cleanPrompt.replace(/^chat\b/i, '').trim();
+          const session = this.sessionManager.getActiveSession();
+          const configuration = vscode.workspace.getConfiguration('localforge.chatMemory');
+          const memoryOptions = readChatMemoryOptions((key, fallback) => configuration.get(key, fallback));
+          const matches = query ? await new ChatMemoryIndex(this.sessionManager).search(query, session.id, { scope: memoryOptions.scope, limit: memoryOptions.resultCount, maximumCharacters: memoryOptions.memoryCharacters, signal }) : [];
+          return {
+            runId: `run-${Date.now()}`, task: 'Search chat memory', mode: effectiveMode,
+            response: !query ? 'Usage: `/search chat <query>`' : `# Chat search (${memoryOptions.scope === 'all' ? 'all chats — explicitly enabled' : 'current chat'})\n\n` + (matches.length ? matches.map((match) => `- Chat ${match.chatId} · message ${match.messageId} · chars ${match.startCharacter}–${match.endCharacter} · score ${match.score.toFixed(3)}\n${match.text}`).join('\n\n') : 'No matching chat memories.'),
+            filesModified: [], validationAttempts: [], status: 'completed', durationMs: 0
+          };
+        }
         case 'clear': {
           const session = this.sessionManager.getActiveSession();
-          session.messages = [];
-          await this.sessionManager.saveSession(session);
+          await this.clearConversationState(session.id);
           return {
             runId: `run-${Date.now()}`,
             task: 'Clear session',
@@ -445,17 +553,24 @@ export class LocalForgeEngine {
 
     const agentConfiguration = vscode.workspace.getConfiguration('localforge.agent');
     const chosenMetadata = this.modelRegistry.getModels().find((entry) => entry.id === chosenModel || entry.name === chosenModel);
-    const contextWindow = chosenMetadata?.providerId === 'ollama' || chosenModel.startsWith('ollama:')
-      ? vscode.workspace.getConfiguration('localforge.ollama').get<number>('contextWindow', 8192)
+    if (modelPreference && modelPreference.toLowerCase() !== 'auto' && (!routing.model || !chosenMetadata)) throw new Error(`Selected model "${modelPreference}" is unavailable or ambiguous. Your chat is preserved; choose a provider-qualified model.`);
+    const ollamaModel = chosenMetadata?.providerId === 'ollama' || chosenMetadata?.providerId.startsWith('ssh-ollama-') || chosenModel.startsWith('ollama:');
+    const configuredContextWindow = ollamaModel
+      ? Math.min(vscode.workspace.getConfiguration('localforge.ollama').get<number>('contextWindow', 8192), chosenMetadata?.capabilities?.contextWindow ?? Infinity)
       : chosenMetadata?.capabilities?.contextWindow ?? 8192;
 
     const session = this.sessionManager.getActiveSession();
+    const effortBudget = resolveEffortBudget(session.effort ?? 'medium', { contextWindow: configuredContextWindow, maxRounds: agentConfiguration.get<number>('maxRounds', 80), historyCharacters: agentConfiguration.get<number>('historyCharacters', 48000) });
+    const contextWindow = effortBudget.contextWindow;
+    const taskIntent = classifyTaskIntent(effectivePrompt);
+    const conversational = taskIntent === 'conversation';
     session.mode = effectiveMode;
     session.model = chosenModel;
 
     // Start turn
     const turn = this.turnManager.startTurn({
       conversationId: session.id,
+      historyEpoch: session.historyEpoch,
       modelId: chosenModel,
       mode: effectiveMode,
       strategy
@@ -484,37 +599,28 @@ export class LocalForgeEngine {
       return act;
     };
 
-    // 2. Resolve @ references
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    const fileScoped = this.accessPolicy.getState().scope === 'file';
-    const resolved = fileScoped ? { cleanedPrompt: effectivePrompt, references: [] } : await this.referenceResolver.resolveReferences(effectivePrompt, workspaceRoot);
-    effectivePrompt = resolved.cleanedPrompt;
-
-    let contextHeader = this.accessPolicy.getPrompt() + '\n\n';
-    if (resolved.references.length > 0) {
-      contextHeader += 'Attached References:\n' + resolved.references.map((r) => `[${r.label}]\n${r.content}`).join('\n\n') + '\n\n';
-    }
-
-    // 3. Context retrieval - budget appropriately for local context windows
-    if (this.contextEngine && !fileScoped) {
-      const maxTokens = Math.min(agentConfiguration.get<number>('contextTokens', 4000), Math.max(500, Math.floor(contextWindow / 4)));
-      const ctx = await this.contextEngine.assembleContext(effectivePrompt, { maxTokens, includeWorkspace: true });
-      contextHeader += ctx.promptText;
-      session.lastContextPreview = ctx.summary;
-    }
-
-    const messages: ChatMessage[] = [
-      ...(fileScoped ? [] : session.messages.slice(-10)),
-      {
-        role: 'user',
-        content: contextHeader ? `${contextHeader}\n\nTask:\n${effectivePrompt}` : effectivePrompt
-      }
-    ];
-
     const taskRecord = await this.taskManager.recordTaskStart(effectivePrompt, effectiveMode, chosenModel);
-
     try {
-      const result = await this.agentEngine.runTask(
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+      const fileScoped = this.accessPolicy.getState().scope === 'file';
+      const resolved = fileScoped || conversational ? { cleanedPrompt: effectivePrompt, references: [] } : await this.referenceResolver.resolveReferences(effectivePrompt, workspaceRoot);
+      effectivePrompt = resolved.cleanedPrompt;
+      const sources: RequestContextSource[] = resolved.references.map((reference) => ({ category: 'references', label: reference.label, content: reference.content }));
+      if (this.contextEngine && !fileScoped && !conversational) {
+        const maxTokens = Math.min(agentConfiguration.get<number>('contextTokens', 4000), Math.max(500, Math.floor(contextWindow / 4)));
+        const ctx = await this.contextEngine.assembleContext(effectivePrompt, { maxTokens, includeWorkspace: true });
+        if (ctx.workspaceSummary) sources.push({ category: 'workspace_summary', label: 'Workspace metadata', content: ctx.workspaceSummary });
+        for (const item of ctx.items) sources.push({ category: item.source === 'retrieval' ? 'workspace_retrieval' : item.source, label: item.label, path: item.path, content: item.content, chunk: item.chunk });
+      }
+      const memoryConfiguration = vscode.workspace.getConfiguration('localforge.chatMemory');
+      const composed = conversational ? undefined : await composeRequestContext({
+        session, prompt: effectivePrompt, policyPrompt: this.accessPolicy.getPrompt(), accessScope: fileScoped ? 'file' : this.accessPolicy.getState().scope,
+        contextWindow, memory: new ChatMemoryIndex(this.sessionManager), options: readChatMemoryOptions((key, fallback) => memoryConfiguration.get(key, fallback)), sources, signal
+      });
+      const messages: ChatMessage[] = conversational ? conversationalMessages(effectivePrompt) : composed!.messages;
+      if (composed) session.lastContextPreview = formatRequestContext(composed.report);
+      signal.throwIfAborted();
+      const result = conversational ? await this.streamConversation(chosenModel, messages, effectivePrompt, effectiveMode, signal, onToken, onProgress) : await this.agentEngine.runTask(
         this.compositeProvider,
         chosenModel,
         messages,
@@ -522,12 +628,15 @@ export class LocalForgeEngine {
           mode: effectiveMode,
           strategy,
           signal,
-          maxRounds: agentConfiguration.get<number>('maxRounds', 80),
+          editRequestPolicy: { ...getEditRequestPolicy(userPrompt), conversationId: session.id, turnId: turn.turnId },
+          taskPrompt: effectivePrompt,
+          maxRounds: effortBudget.maxRounds,
+          maxToolDefinitions: ollamaModel ? 16 : undefined,
           readOnlyInspection: isReadOnlyInspectionTask(effectivePrompt),
-          maxHistoryCharacters: Math.min(agentConfiguration.get<number>('historyCharacters', 48000), contextWindow * 3),
-          requireToolUse: effectiveMode !== 'plan' && /\b(?:read|inspect|summari[sz]e|summary|analy[sz]e|create|build|fix|edit|modify|refactor|implement|delete|move|run|test)\b/i.test(effectivePrompt),
-          validateFinalResponse: effectiveMode === 'plan' ? undefined : createRepositorySummaryValidator(effectivePrompt),
-          formatFinalResponse: effectiveMode === 'plan' ? undefined : createRepositorySummaryFormatter(effectivePrompt),
+          maxHistoryCharacters: effortBudget.historyCharacters,
+          requireToolUse: effectiveMode !== 'plan' && requiresWorkspaceToolUse(effectivePrompt),
+          validateFinalResponse: effectiveMode === 'plan' || taskIntent === 'memory' ? undefined : createRepositorySummaryValidator(effectivePrompt),
+          formatFinalResponse: effectiveMode === 'plan' || taskIntent === 'memory' ? undefined : createRepositorySummaryFormatter(effectivePrompt),
           onProgress: (p) => {
             onProgress?.(p);
           },
@@ -535,14 +644,17 @@ export class LocalForgeEngine {
           onModelOutput: (text, round, toolNames) => {
             if (!text.trim()) return;
             const actionLabel = toolNames.length ? ` · ${toolNames.join(', ')}` : '';
-            emitActivity('Working', `Visible model update · step ${round}${actionLabel}`, 'success', text.slice(0, 3000));
+            emitActivity('Working', 'Agent update', 'success', text.slice(0, 3000));
           },
-          onToolStart: (name, args, callId) => {
-            let cat: any = 'Working';
+          onToolStart: (name, args, callId, verificationReason) => {
+            let cat: any = this.toolRegistry.getTool(name)?.descriptor.activity ?? 'Working';
             let title = `Running tool ${name}`;
             let targetPath: string | undefined;
 
-            if (['search_workspace', 'search_text', 'search_files', 'symbol_search'].includes(name)) {
+            if (name === 'update_plan') {
+              cat = 'Planning';
+              title = 'Updating the task-specific plan';
+            } else if (['search_workspace', 'search_text', 'search_files', 'symbol_search'].includes(name)) {
               cat = 'Searching';
               title = `Searching workspace for "${(args as any).query || ''}"`;
             } else if (['read_workspace_file', 'read_file', 'read_files'].includes(name)) {
@@ -565,7 +677,7 @@ export class LocalForgeEngine {
               targetPath = String(args.path ?? args.source_path ?? '');
               title = name === 'delete_file' ? `Preparing deletion of ${targetPath}` : name === 'move_file'
                 ? `Preparing move: ${targetPath} → ${String(args.destination_path ?? '')}` : `Preparing edit for ${targetPath || 'file'}`;
-            } else if (['run_command', 'run_test', 'run_build'].includes(name)) {
+            } else if (['run_command', 'run_test', 'run_build', 'run_lint', 'install_dependencies', 'install_packages', 'start_dev_server'].includes(name)) {
               cat = 'Running';
               title = `Running: ${formatCommandLabel(name, args)}`;
             } else if (name === 'browser_action') {
@@ -576,11 +688,11 @@ export class LocalForgeEngine {
             const act = this.turnManager.addActivity(turn.turnId, {
               id: callId,
               category: cat,
-              title,
+              title: verificationReason ? `${title} · automatic verification` : title,
               status: 'running',
               targetPath,
               toolName: name,
-              inputSummary: formatToolInput(name, args)
+              inputSummary: verificationReason ? `Agent-scheduled verification: ${verificationReason}\n${formatToolInput(name, args)}` : formatToolInput(name, args)
             });
             onActivity?.(act);
             onProgress?.(title);
@@ -591,8 +703,8 @@ export class LocalForgeEngine {
             if (existing) {
               const commandResult = res && typeof res === 'object' ? res as Record<string, unknown> : {};
               const settledTitle = signal.aborted ? `Cancelled: ${existing.title}` : error ? `Failed: ${existing.title}` :
-                commandResult.duplicateSuppressed ? `Reused previous result: ${existing.title}` : existing.title.startsWith('Running:')
-                  ? existing.title.replace(/^Running:/, 'Ran:') + (typeof commandResult.exitCode === 'number' ? ` · exit ${commandResult.exitCode}` : '')
+                commandResult.duplicateSuppressed ? `Reused previous result: ${existing.title}` : name === 'start_dev_server' && commandResult.status === 'running' ? `${commandResult.reused === true ? 'Using running process' : 'Started process'}: ${formatCommandLabel(name, commandResult)} · check readiness` : name === 'update_plan' ? 'Task plan updated (model-reported)' : commandResult.applied === true && existing.targetPath ? `${commandResult.operation === 'create' ? 'Created' : 'Saved'} ${existing.targetPath}` : existing.title.startsWith('Running:')
+                  ? `Ran: ${typeof commandResult.command === 'string' ? formatCommandLabel(name, commandResult) : existing.title.slice(8).trim()}` + (typeof commandResult.exitCode === 'number' ? ` · exit ${commandResult.exitCode}` : '')
                   : existing.title.replace(/^Reading\b/, 'Read').replace(/^Preparing\b/, 'Prepared').replace(/^Searching\b/, 'Searched');
               const updated = this.turnManager.updateActivity(turn.turnId, existing.id, {
                 title: settledTitle,
@@ -610,7 +722,7 @@ export class LocalForgeEngine {
       );
 
       // Handle Plan Mode artifact creation
-      if (effectiveMode === 'plan') {
+      if (effectiveMode === 'plan' && !conversational) {
         const planArtifact = this.artifactManager.createArtifact({
           type: 'Implementation Plan',
           title: `Implementation Plan: ${effectivePrompt.slice(0, 50)}`,
@@ -625,7 +737,7 @@ export class LocalForgeEngine {
       }
 
       // Check if edits are pending review
-      const pending = this.editEngine.getPendingProposals();
+      const pending = conversational ? [] : this.editEngine.getPendingProposals();
       // Handle Walkthrough artifact creation if files were already modified (e.g. In auto-apply mode)
       if (effectiveMode === 'agent' && result.filesModified.length > 0) {
         const walkthrough = this.artifactManager.createWalkthrough({
@@ -642,7 +754,7 @@ export class LocalForgeEngine {
         onArtifact?.(walkthrough);
       }
 
-      const awaitingReview = pending.length > 0 || effectiveMode === 'plan';
+      const awaitingReview = !conversational && (pending.length > 0 || effectiveMode === 'plan');
       const resultErrors = result.errors ?? [];
       const hasToolWarnings = resultErrors.length > 0;
       this.turnManager.completeTurn(turn.turnId, result.status === 'cancelled' ? 'cancelled' : result.status === 'failed' ? 'failed' : awaitingReview ? 'waiting_for_approval' : 'completed', result.filesModified);
@@ -658,10 +770,10 @@ export class LocalForgeEngine {
         emitActivity('Completed', 'Task completed', 'success');
       }
 
-      session.messages.push({ role: 'user', content: userPrompt });
-      session.messages.push({ role: 'assistant', content: result.response });
-      session.filesModified = Array.from(new Set([...session.filesModified, ...result.filesModified]));
-      await this.sessionManager.saveSession(session);
+      await this.sessionManager.appendMessages(session.id, [
+        { role: 'user', content: userPrompt, turnId: turn.turnId },
+        { role: 'assistant', content: result.response, model: chosenModel, providerId: chosenMetadata?.providerId, turnId: turn.turnId, memorySources: composed?.report.memorySources }
+      ], { mode: effectiveMode, strategy, model: chosenModel, filesModified: result.filesModified, lastContextPreview: conversational ? 'Conversational response: current message only; no project, references, tools, or prior messages.' : session.lastContextPreview }, { epoch: session.historyEpoch });
 
       await this.taskManager.recordTaskCompletion(
         taskRecord.id,
@@ -670,6 +782,7 @@ export class LocalForgeEngine {
         result.response.slice(0, 500)
       );
 
+      await this.flushActivityHistory();
       return result;
     } catch (err: any) {
       this.turnManager.completeTurn(turn.turnId, signal.aborted ? 'cancelled' : 'failed');
@@ -680,8 +793,33 @@ export class LocalForgeEngine {
         signal.aborted ? 'cancelled' : 'error',
         errDetail
       );
+      await this.taskManager.recordTaskCompletion(taskRecord.id, signal.aborted ? 'cancelled' : 'failed', [], errDetail.slice(0, 500));
+      await this.flushActivityHistory();
       throw err;
     }
+  }
+
+  private async streamConversation(
+    model: string,
+    messages: ChatMessage[],
+    task: string,
+    mode: AgentMode,
+    signal: AbortSignal,
+    onToken?: (token: string) => void,
+    onProgress?: (message: string) => void
+  ): Promise<AgentRunSummary> {
+    const startedAt = Date.now();
+    let response = '';
+    signal.throwIfAborted();
+    onProgress?.('Thinking');
+    await this.compositeProvider.streamChat(model, messages, (token) => {
+      if (signal.aborted) return;
+      response += token;
+      onToken?.(token);
+    }, signal);
+    signal.throwIfAborted();
+    if (!response.trim()) throw new Error('The selected model returned an empty response. Try again or select another model.');
+    return { runId: `run-${startedAt}`, task, mode, response, status: 'completed', filesModified: [], validationAttempts: [], errors: [], durationMs: Date.now() - startedAt };
   }
 
   public async applyProposalAndValidate(
@@ -698,6 +836,7 @@ export class LocalForgeEngine {
       return await this.applyProposalRun(controller.signal, proposalId, files, onActivity, onProgress, onArtifact);
     } finally {
       if (this.currentAbortController === controller) this.currentAbortController = undefined;
+      await this.reconcileProviderConfiguration();
     }
   }
 
@@ -713,6 +852,7 @@ export class LocalForgeEngine {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
     const turn = this.turnManager.startTurn({
       conversationId: session.id,
+      historyEpoch: session.historyEpoch,
       modelId: session.model || '',
       mode: 'agent',
       strategy: 'fast'
@@ -789,7 +929,7 @@ export class LocalForgeEngine {
       );
 
       session.filesModified = Array.from(new Set([...session.filesModified, ...editResult.appliedFiles]));
-      await this.sessionManager.saveSession(session);
+      await this.sessionManager.updateSession(session.id, { filesModified: session.filesModified });
       return { ...editResult, validationPassed };
     } catch (error) {
       this.turnManager.completeTurn(turn.turnId, signal.aborted ? 'cancelled' : 'failed');
@@ -803,7 +943,7 @@ export class LocalForgeEngine {
     if (this.accessPolicy.getState().scope === 'file') throw new Error('Recorded project rollback requires Project workspace access.');
     const controller = new AbortController();
     const session = this.sessionManager.getActiveSession();
-    const turn = this.turnManager.startTurn({ conversationId: session.id, modelId: session.model || '', mode: 'agent', strategy: 'fast' });
+    const turn = this.turnManager.startTurn({ conversationId: session.id, historyEpoch: session.historyEpoch, modelId: session.model || '', mode: 'agent', strategy: 'fast' });
     const activity = this.turnManager.addActivity(turn.turnId, {
       category: 'Editing', title: 'Restoring recorded changes', status: 'running', toolName: 'rollback_changes', inputSummary: recoveryId
     });
@@ -838,6 +978,7 @@ export class LocalForgeEngine {
     modelPreference?: string,
     options: OrchestratorOptions = {}
   ): Promise<OrchestrationResult> {
+    if (this.isBusy()) throw new Error('A task is already running. Wait or cancel it before starting another task.');
     if (this.accessPolicy.getState().scope === 'file') throw new Error('Multi-agent project execution is unavailable with File access.');
     const routing = this.modelRouter.route(mode === 'agent' ? 'agent' : 'chat', modelPreference);
     const chosenModel = routing.modelId;
@@ -845,9 +986,17 @@ export class LocalForgeEngine {
     if (!workspaceRoot) {
       throw new Error('Open a workspace folder before executing multi-agent tasks.');
     }
-    return this.orchestrator.executeGoal(userGoal, chosenModel, workspaceRoot, {
-      ...options,
-      mode
-    });
+    const controller = new AbortController();
+    const cancelFromParent = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) cancelFromParent();
+    else options.signal?.addEventListener('abort', cancelFromParent, { once: true });
+    this.currentAbortController = controller;
+    try {
+      return await this.orchestrator.executeGoal(userGoal, chosenModel, workspaceRoot, { ...options, signal: controller.signal, mode });
+    } finally {
+      options.signal?.removeEventListener('abort', cancelFromParent);
+      if (this.currentAbortController === controller) this.currentAbortController = undefined;
+      await this.reconcileProviderConfiguration();
+    }
   }
 }

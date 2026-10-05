@@ -1,6 +1,7 @@
 import { LocalModel, ModelProvider } from './modelProvider';
 import { inferModelCapabilities, evaluateRuntimeCapabilities, ModelCapabilities, ModelMetadata, ModelSource } from './modelCapabilities';
 import { ModelTask } from './modelRouter';
+import { canonicalModelId } from './endpointConfiguration';
 
 export interface ProviderHealth {
   id: string;
@@ -18,12 +19,18 @@ export class ModelRegistry {
   private providers = new Map<string, { provider: ModelProvider; source: ModelSource; endpoint?: string; gpuInfo?: string }>();
   private models = new Map<string, ModelMetadata>();
   private health = new Map<string, ProviderHealth>();
+  private revision = 0;
+  private discovery = 0;
+  private pendingDiscovery?: { revision: number; promise: Promise<ModelMetadata[]> };
 
   registerProvider(provider: ModelProvider, source: ModelSource = provider.source ?? 'local', endpoint?: string, gpuInfo?: string): void {
+    if (this.providers.get(provider.id)?.provider !== provider) this.unregisterProvider(provider.id);
     this.providers.set(provider.id, { provider, source, endpoint, gpuInfo });
+    this.revision += 1;
   }
 
   unregisterProvider(providerId: string): void {
+    this.revision += 1;
     this.providers.delete(providerId);
     this.health.delete(providerId);
     for (const [id, model] of this.models.entries()) {
@@ -53,7 +60,18 @@ export class ModelRegistry {
   }
 
   async discoverAll(): Promise<ModelMetadata[]> {
-    this.models.clear();
+    if (this.pendingDiscovery?.revision === this.revision) return this.pendingDiscovery.promise;
+    const pending = { revision: this.revision, promise: this.discoverSnapshot() };
+    this.pendingDiscovery = pending;
+    try { return await pending.promise; }
+    finally { if (this.pendingDiscovery === pending) this.pendingDiscovery = undefined; }
+  }
+
+  private async discoverSnapshot(): Promise<ModelMetadata[]> {
+    const revision = this.revision;
+    const discovery = ++this.discovery;
+    const replacementModels = new Map<string, ModelMetadata>();
+    const replacementHealth = new Map<string, ProviderHealth>();
     const probeResults = await Promise.allSettled(
       Array.from(this.providers.entries()).map(async ([providerId, entry]) => {
         let isReachable = false;
@@ -64,15 +82,16 @@ export class ModelRegistry {
           isReachable = entry.provider.detect ? await entry.provider.detect() : true;
           if (isReachable) {
             models = await entry.provider.listModels();
-          }
+          } else errStr = 'Endpoint did not respond successfully to model discovery.';
         } catch (error) {
-          errStr = error instanceof Error ? error.message : String(error);
+          isReachable = false;
+          errStr = (error instanceof Error ? error.message : String(error)).slice(0, 800);
         }
 
         const health: ProviderHealth = {
           id: providerId,
           source: entry.source,
-          endpoint: entry.endpoint || 'http://127.0.0.1:11434',
+          endpoint: entry.endpoint || '',
           isReachable,
           healthy: isReachable,
           modelCount: models.length,
@@ -80,7 +99,7 @@ export class ModelRegistry {
           lastChecked: new Date(),
           error: errStr
         };
-        this.health.set(providerId, health);
+        replacementHealth.set(providerId, health);
 
         return { providerId, entry, models };
       })
@@ -90,15 +109,15 @@ export class ModelRegistry {
       if (res.status !== 'fulfilled') continue;
       const { providerId, entry, models } = res.value;
       for (const m of models) {
-        const id = `${providerId}:${encodeURIComponent(m.name)}`;
-        let runtimeCaps: { capabilities?: string[]; template?: string } | undefined;
+        const id = canonicalModelId(providerId, m.name);
+        let runtimeCaps: { capabilities?: string[]; template?: string; model_info?: Record<string, unknown> } | undefined;
         if (typeof (entry.provider as any).showModel === 'function') {
           try {
             runtimeCaps = await (entry.provider as any).showModel(m.name);
           } catch {}
         }
         const capabilities = m.capabilities || evaluateRuntimeCapabilities(m.name, m.size, runtimeCaps);
-        const displayName = m.displayName || `${m.name} (${entry.source === 'remote' ? 'Remote GPU' : providerId})`;
+        const displayName = m.displayName || `${m.name} (${providerId.startsWith('openai-') && entry.endpoint ? entry.endpoint : entry.source === 'remote' ? 'Remote GPU' : providerId})`;
 
         const metadata: ModelMetadata = {
           id,
@@ -112,10 +131,14 @@ export class ModelRegistry {
           endpoint: entry.endpoint,
           gpuInfo: entry.gpuInfo
         };
-        this.models.set(id, metadata);
+        replacementModels.set(id, metadata);
       }
     }
 
+    if (revision === this.revision && discovery === this.discovery) {
+      this.models = replacementModels;
+      this.health = replacementHealth;
+    }
     return this.getModels();
   }
 

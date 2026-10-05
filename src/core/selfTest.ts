@@ -53,6 +53,7 @@ export class LocalForgeSelfTest {
 
     // 5. Tool Registry
     results.push(await this.testCheck('tool_registry', async () => {
+      this.engine.toolRegistry.assertInvariants();
       const tools = this.engine.toolRegistry.getAllTools();
       if (tools.length < 5) throw new Error(`Too few tools registered: ${tools.length}`);
       return `${tools.length} core tools registered and validated.`;

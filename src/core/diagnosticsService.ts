@@ -171,8 +171,8 @@ export class DiagnosticsService {
       const stats = this.indexer.getStats();
       items.push({
         name: 'Workspace Context Indexer',
-        status: 'green',
-        details: `Indexed ${stats.fileCount} workspace files (${Math.round(stats.totalChars / 1024)} KB code indexed).`
+        status: stats.error ? 'red' : stats.limitReached || !stats.watching || stats.state !== 'ready' ? 'yellow' : 'green',
+        details: `${stats.state}: ${stats.fileCount} files / ${stats.chunkCount} chunks (${Math.round(stats.totalChars / 1024)} KB text). Watching: ${stats.watching}. ${stats.limitReached ? 'Index limit reached; coverage is partial. ' : ''}${stats.error ?? ''}`
       });
     } else {
       items.push({

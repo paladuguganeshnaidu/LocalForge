@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
+const { PermissionManager } = require('../dist/agent/permissionManager.js');
 const { TerminalManager } = require('../dist/terminal/terminalManager.js');
 const { BrowserTool } = require('../dist/browser/browserTool.js');
 const Module = require('node:module');
@@ -28,7 +29,7 @@ test('cancelling validation terminates its actual command before a delayed file 
   registry.registerTool({ type: 'function', function: {
     name: 'run_command', description: 'Run isolated cancellation test', parameters: {}
   } }, async (_args, execution) => validation.runValidation({ fsPath: directory }, `"${process.execPath}" "${script}"`, 10000, execution.signal));
-  const result = registry.executeTool('run_command', {}, undefined, { signal: controller.signal })
+  const result = registry.executeTool('run_command', {}, new PermissionManager('always_ask', async () => true), { signal: controller.signal })
     .then(() => ({ resolved: true }), (error) => ({ error }));
   try {
     const started = Date.now();
@@ -70,7 +71,18 @@ test('cancelling browser inspection closes the real HTTP request', async () => {
     response.on('close', () => closed(true));
     requested();
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await new Promise((resolve, reject) => {
+        const onError = error => reject(error);
+        server.once('error', onError);
+        server.listen(49152 + require('node:crypto').randomInt(16384), '127.0.0.1', () => { server.removeListener('error', onError); resolve(); });
+      });
+      break;
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' || attempt >= 19) throw error;
+    }
+  }
   const controller = new AbortController();
   const browser = new BrowserTool();
   const registry = new ToolRegistry();
@@ -79,9 +91,9 @@ test('cancelling browser inspection closes the real HTTP request', async () => {
   } }, (args, execution) => browser.execute(args, execution.signal));
   const inspection = registry.executeTool('browser_action', {
     action: 'navigate', url: `http://127.0.0.1:${server.address().port}/`
-  }, undefined, { signal: controller.signal });
+  }, new PermissionManager('always_ask', async () => true), { signal: controller.signal, timeoutMs: 10000 });
   try {
-    await requestStarted;
+    await Promise.race([requestStarted, inspection.then(result => { throw new Error('Browser inspection finished before the controlled HTTP request started: ' + JSON.stringify(result)); })]);
     controller.abort();
     await assert.rejects(inspection, (error) => error.name === 'AbortError');
     const disconnected = await Promise.race([requestClosed, new Promise((resolve) => setTimeout(() => resolve(false), 1000))]);

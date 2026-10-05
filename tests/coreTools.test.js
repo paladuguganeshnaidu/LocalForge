@@ -17,6 +17,22 @@ Module._load = function (request, parent, isMain) {
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 const { registerAllCoreTools, validateRelativeWorkspacePath } = require('../dist/agent/coreTools.js');
 
+test('process schemas and recovery errors distinguish opaque owned IDs from OS process IDs', async () => {
+  const { registerProjectTools } = require('../dist/agent/projectTools');
+  const { PermissionManager } = require('../dist/agent/permissionManager');
+  const registry = new ToolRegistry();
+  let stops = 0;
+  const record = { id: 'proc-fixture-owned', processId: 12345, stdout: '', stderr: '', status: 'running' };
+  registerProjectTools(registry, { getAllProcesses: () => [record], stopProcess: () => { stops += 1; return true; } });
+  const permissions = new PermissionManager('always_proceed', async () => true);
+  assert.match(registry.getTool('process_status').definition.function.parameters.properties.process_id.description, /opaque.*NOT.*numeric/s);
+  await assert.rejects(registry.executeTool('process_status', { process_id: '12345' }, permissions), /Available owned IDs: proc-fixture-owned/);
+  assert.equal((await registry.executeTool('process_status', { process_id: record.id }, permissions))[0].id, record.id);
+  assert.equal((await registry.executeTool('process_status', {}, permissions))[0].id, record.id);
+  await assert.rejects(registry.executeTool('stop_process', { process_id: '12345' }, permissions), /no external process was stopped/);
+  assert.equal(stops, 0);
+});
+
 test('ToolRegistry registers and categorizes core tools with rich metadata', () => {
   const registry = new ToolRegistry();
   registerAllCoreTools(registry, {});

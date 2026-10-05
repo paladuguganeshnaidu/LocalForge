@@ -194,8 +194,9 @@ export class ToolCallParser {
   }
 
   private static unwrapString(val: unknown, keyName?: string): string | undefined {
+    const preserveWhitespace = ['content', 'target_content', 'replacement_content', 'replacement', 'text'].includes(keyName || '');
     if (typeof val === 'string') {
-      return val.trim();
+      return preserveWhitespace ? val : val.trim();
     }
     if (val && typeof val === 'object' && !Array.isArray(val)) {
       const obj = val as Record<string, unknown>;
@@ -207,8 +208,8 @@ export class ToolCallParser {
         ? [keyName, 'value', 'text', 'content', 'query', 'path', 'file', 'command', 'cmd', 'target', 'replacement']
         : ['value', 'text', 'content', 'query', 'path', 'file', 'command', 'cmd', 'target', 'replacement'];
       for (const k of candidates) {
-        if (typeof obj[k] === 'string' && (obj[k] as string).trim()) {
-          return (obj[k] as string).trim();
+        if (typeof obj[k] === 'string' && (preserveWhitespace || (obj[k] as string).trim())) {
+          return preserveWhitespace ? obj[k] as string : (obj[k] as string).trim();
         }
         if (obj[k] && typeof obj[k] === 'object') {
           const nested = this.unwrapString(obj[k], keyName);
@@ -230,6 +231,7 @@ export class ToolCallParser {
     }
 
     for (const key of Object.keys(copy)) {
+      if (key === 'json' && ['create_file', 'write_file'].includes(toolName)) continue;
       const val = copy[key];
       if (val && typeof val === 'object' && !Array.isArray(val)) {
         const unwrapped = this.unwrapString(val, key);

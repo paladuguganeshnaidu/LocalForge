@@ -1,6 +1,9 @@
 export function normalizeAssistantMarkdown(value: string): string {
+  let source = String(value ?? '').replace(/\r\n/g, '\n');
+  const wrapped = /^\s*(`{3,}|~{3,})(?:markdown|md)\s*\n([\s\S]*?)\n\1\s*$/i.exec(source);
+  if (wrapped && !new RegExp(`^\\s*${wrapped[1][0]}{${wrapped[1].length},}\\s*$`, 'm').test(wrapped[2])) source = wrapped[2];
   let fence: string | undefined;
-  return String(value ?? '').replace(/\r\n/g, '\n').split('\n').map((line) => {
+  return source.split('\n').map((line) => {
     const marker = /^\s*(`{3,}|~{3,})/.exec(line);
     if (marker) {
       if (!fence) fence = marker[1][0];

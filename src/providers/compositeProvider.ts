@@ -1,23 +1,34 @@
-import { ChatMessage, LocalModel, ModelProvider, ModelPullProgress, ModelToolDefinition } from './modelProvider';
+import { ChatMessage, LocalModel, ModelProvider, ModelPullProgress, ModelToolDefinition, ModelGenerationProgress } from './modelProvider';
 import { inferModelCapabilities } from './modelCapabilities';
+import { ModelRegistry } from './modelRegistry';
+import { canonicalModelId } from './endpointConfiguration';
 
 export class CompositeProvider implements ModelProvider {
   readonly id = 'localforge';
   private providers: ModelProvider[];
-  private discovered = new Map<string, { provider: ModelProvider; actualName: string }>();
+  private discovered: Array<{ provider: ModelProvider; model: LocalModel }> = [];
+  private revision = 0;
+  private discovery = 0;
 
-  constructor(providers: ModelProvider[]) {
-    this.providers = providers;
+  constructor(providers: ModelProvider[], private readonly registry?: ModelRegistry) {
+    this.providers = [...providers];
+    for (const provider of providers) this.registry?.registerProvider(provider);
   }
 
   async detect(): Promise<boolean> {
-    const results = await Promise.allSettled(this.providers.map((provider) => provider.detect()));
+    const results = await Promise.allSettled(this.getProviders().map((provider) => provider.detect()));
     return results.some((result) => result.status === 'fulfilled' && result.value);
   }
 
   async listModels(): Promise<LocalModel[]> {
-    this.discovered.clear();
-    const result = await Promise.allSettled(this.providers.map(async (provider) => ({
+    if (this.registry) {
+      await this.registry.refresh();
+      return this.registry.getModels().map((model) => ({ ...model, name: model.id }));
+    }
+    const revision = this.revision;
+    const discovery = ++this.discovery;
+    const replacement: typeof this.discovered = [];
+    const result = await Promise.allSettled(this.getProviders().map(async (provider) => ({
       provider,
       models: await provider.listModels()
     })));
@@ -25,11 +36,8 @@ export class CompositeProvider implements ModelProvider {
     for (const item of result) {
       if (item.status !== 'fulfilled') continue;
       for (const model of item.value.models) {
-        const key = `${item.value.provider.id}:${encodeURIComponent(model.name)}`;
-        const unencodedKey = `${item.value.provider.id}:${model.name}`;
-        this.discovered.set(key, { provider: item.value.provider, actualName: model.name });
-        this.discovered.set(unencodedKey, { provider: item.value.provider, actualName: model.name });
-        this.discovered.set(model.name, { provider: item.value.provider, actualName: model.name });
+        const key = canonicalModelId(item.value.provider.id, model.name);
+        replacement.push({ provider: item.value.provider, model });
         const capabilities = model.capabilities ?? inferModelCapabilities(model.name, model.size);
         output.push({
           ...model,
@@ -41,16 +49,37 @@ export class CompositeProvider implements ModelProvider {
         });
       }
     }
+    if (revision !== this.revision || discovery !== this.discovery) return this.discovered.map(({ model, provider }) => ({ ...model, id: canonicalModelId(provider.id, model.name), name: canonicalModelId(provider.id, model.name), providerId: provider.id }));
+    this.discovered = replacement;
     return output.sort((left, right) => (left.displayName ?? left.name).localeCompare(right.displayName ?? right.name));
   }
 
   async pullModel(name: string, onProgress: (progress: ModelPullProgress) => void, signal?: AbortSignal): Promise<void> {
-    const ollama = this.providers.find((provider) => provider.id === 'ollama' &&
+    const ollama = this.getProviders().find((provider) => provider.id === 'ollama' &&
       (!provider.source || provider.source === 'local') && provider.pullModel);
     if (!ollama?.pullModel) {
       throw new Error('Model downloads are available when a local Ollama provider is configured and running.');
     }
     await ollama.pullModel(name, onProgress, signal);
+  }
+
+  async getDownloadTargets(): Promise<Array<{ id: string; label: string; source?: ModelProvider['source'] }>> {
+    const results = await Promise.all(this.getProviders().filter(provider => provider.pullModel).map(async provider => {
+      try {
+        if (!await provider.detect()) return undefined;
+        return { id: provider.id, label: provider.source === 'remote' ? `SSH host · ${provider.id}` : `This machine · ${provider.id}`, source: provider.source };
+      } catch { return undefined; }
+    }));
+    return results.filter((target): target is NonNullable<typeof target> => !!target);
+  }
+
+  async pullModelToProvider(providerId: string, name: string, onProgress: (progress: ModelPullProgress) => void, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const provider = this.getProviders().find(candidate => candidate.id === providerId);
+    if (!provider?.pullModel || !await provider.detect()) throw new Error('The selected download host is unavailable. Reconnect it; no other host was used.');
+    signal?.throwIfAborted();
+    if (!this.getProviders().includes(provider)) throw new Error('The selected download host disconnected. No other host was used.');
+    await provider.pullModel(name, onProgress, signal);
   }
 
   async deleteModel(modelId: string, signal?: AbortSignal): Promise<void> {
@@ -69,57 +98,13 @@ export class CompositeProvider implements ModelProvider {
 
   public resolveRoute(model: string): { provider: ModelProvider; actualName: string } | undefined {
     if (!model) return undefined;
-    let route = this.discovered.get(model);
-    if (route) return route;
-
-    // Check decoded
-    try {
-      const decoded = decodeURIComponent(model);
-      route = this.discovered.get(decoded);
-      if (route) return route;
-    } catch {}
-
-    // Check re-encoded
-    try {
-      const parts = model.split(':');
-      if (parts.length > 2) {
-        const encoded = `${parts[0]}:${encodeURIComponent(parts.slice(1).join(':'))}`;
-        route = this.discovered.get(encoded);
-        if (route) return route;
-      }
-    } catch {}
-
-    // Strip provider prefix if present e.g. "ollama:qwen2.5-coder:1.5b" -> "qwen2.5-coder:1.5b"
-    const stripped = model.replace(/^[a-zA-Z0-9_-]+:/, '');
-    route = this.discovered.get(stripped);
-    if (route) return route;
-
-    try {
-      const decodedStripped = decodeURIComponent(stripped);
-      route = this.discovered.get(decodedStripped);
-      if (route) return route;
-    } catch {}
-
-    // Check if matches actualName
-    for (const entry of this.discovered.values()) {
-      if (entry.actualName === model || entry.actualName === stripped) return entry;
-    }
-
-    // Direct provider matching even if discovered map is empty
-    const colonIdx = model.indexOf(':');
-    if (colonIdx > 0) {
-      const providerId = model.slice(0, colonIdx).toLowerCase();
-      const provider = this.providers.find((p) => p.id.toLowerCase() === providerId);
-      if (provider) {
-        let actualName = model.slice(colonIdx + 1);
-        try {
-          actualName = decodeURIComponent(actualName);
-        } catch {}
-        return { provider, actualName };
-      }
-    }
-
-    return undefined;
+    const routes = this.registry ? this.registry.getModels().flatMap((entry) => {
+      const provider = this.registry!.getProvider(entry.providerId);
+      return provider ? [{ provider, model: entry }] : [];
+    }) : this.discovered;
+    const scoped = routes.filter((entry) => canonicalModelId(entry.provider.id, entry.model.name) === model || `${entry.provider.id}:${entry.model.name}` === model);
+    const matches = scoped.length ? scoped : routes.filter((entry) => entry.model.name === model);
+    return matches.length === 1 ? { provider: matches[0].provider, actualName: matches[0].model.name } : undefined;
   }
 
   async streamChat(model: string, messages: ChatMessage[], onToken: (token: string) => void, signal?: AbortSignal): Promise<void> {
@@ -137,7 +122,8 @@ export class CompositeProvider implements ModelProvider {
     messages: ChatMessage[],
     tools: ModelToolDefinition[],
     signal?: AbortSignal,
-    onContentDelta?: (delta: string) => void
+    onContentDelta?: (delta: string) => void,
+    onGenerationProgress?: (progress: ModelGenerationProgress) => void
   ): Promise<ChatMessage> {
     let route = this.resolveRoute(model);
     if (!route) {
@@ -146,10 +132,13 @@ export class CompositeProvider implements ModelProvider {
     }
     if (!route) throw new Error('The selected model is no longer available. Refresh the model list and try again.');
     if (!route.provider.chatWithTools) throw new Error(`Provider ${route.provider.id} does not support agent tool calls.`);
-    return route.provider.chatWithTools(route.actualName, messages, tools, signal, onContentDelta);
+    return route.provider.chatWithTools(route.actualName, messages, tools, signal, onContentDelta, onGenerationProgress);
   }
 
   addProvider(provider: ModelProvider): void {
+    if (this.registry) { this.registry.registerProvider(provider); return; }
+    this.revision += 1;
+    this.discovered = this.discovered.filter((entry) => entry.provider.id !== provider.id);
     if (this.providers.some((existing) => existing.id === provider.id)) {
       this.providers = this.providers.map((existing) => existing.id === provider.id ? provider : existing);
     } else {
@@ -162,8 +151,10 @@ export class CompositeProvider implements ModelProvider {
   }
 
   removeProvider(providerId: string): void {
+    if (this.registry) { this.registry.unregisterProvider(providerId); return; }
+    this.revision += 1;
     this.providers = this.providers.filter((provider) => provider.id !== providerId);
-    for (const [key, route] of this.discovered) if (route.provider.id === providerId) this.discovered.delete(key);
+    this.discovered = this.discovered.filter((entry) => entry.provider.id !== providerId);
   }
 
   unregisterProvider(providerId: string): void {
@@ -171,6 +162,6 @@ export class CompositeProvider implements ModelProvider {
   }
 
   getProviders(): ModelProvider[] {
-    return [...this.providers];
+    return this.registry ? this.registry.getAllProviders() : [...this.providers];
   }
 }

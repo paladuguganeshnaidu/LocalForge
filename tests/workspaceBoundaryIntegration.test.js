@@ -111,10 +111,11 @@ test('terminal and test tools refuse untrusted workspaces and shell syntax in te
     registerAllCoreTools(registry, { terminalManager: { runCommand: async () => { executions += 1; } } });
     try {
       vscode.workspace.isTrusted = false;
-      await assert.rejects(registry.executeTool('run_command', { command: 'echo hello' }), /not trusted/);
-      await assert.rejects(registry.executeTool('run_test', {}), /not trusted/);
+      const approved = new PermissionManager('always_ask', async () => true);
+      await assert.rejects(registry.executeTool('run_command', { command: 'echo hello' }, approved), /not trusted/);
+      await assert.rejects(registry.executeTool('run_test', {}, approved), /not trusted/);
       vscode.workspace.isTrusted = true;
-      await assert.rejects(registry.executeTool('run_test', { test_filter: 'safe & curl https://example.com' }), /not shell syntax/);
+      await assert.rejects(registry.executeTool('run_test', { test_filter: 'safe & curl https://example.com' }, approved), /not shell syntax/);
       assert.equal(executions, 0);
     } finally { vscode.workspace.isTrusted = true; }
   });
@@ -130,6 +131,7 @@ test('workspace paths reject traversal, alternate streams, invalid names and pro
 test('automatic indexing and explicit references cannot attach secrets or outside-workspace links', async () => fixture(async ({ root, external }) => {
   await fs.writeFile(path.join(root, '.env'), 'PRIVATE_FIXTURE_TOKEN=not-real');
   await fs.writeFile(path.join(root, 'normal.ts'), 'export const normal = true;');
+  await fs.writeFile(path.join(root, 'file with spaces.txt'), 'QUOTED_CONTEXT_OK');
   await fs.writeFile(path.join(external, 'secret.txt'), 'OUTSIDE_FIXTURE_SECRET');
   await fs.symlink(external, path.join(root, 'linked'), 'junction');
   const indexer = new WorkspaceIndexer();
@@ -140,6 +142,10 @@ test('automatic indexing and explicit references cannot attach secrets or outsid
   assert.match(JSON.stringify(result.references), /Not attached/);
   assert.doesNotMatch(JSON.stringify(result.references), /OUTSIDE_FIXTURE_SECRET|PRIVATE_FIXTURE_TOKEN/);
   assert.match(JSON.stringify(result.references), /export const normal/);
+  const quoted = await resolver.resolveReferences('Summarize @file:"file with spaces.txt" @file:".env" @file:"../external/secret.txt"', uri(root));
+  assert.equal(quoted.cleanedPrompt, 'Summarize');
+  assert.match(JSON.stringify(quoted.references), /QUOTED_CONTEXT_OK/);
+  assert.doesNotMatch(JSON.stringify(quoted.references), /PRIVATE_FIXTURE_TOKEN|OUTSIDE_FIXTURE_SECRET/);
   indexer.dispose();
 }));
 
@@ -195,6 +201,12 @@ test('the reported directory-as-file request never reads workspace root and reco
   assert.equal(result.state.status, 'completed');
   assert.match(result.response, /Course phase three/);
   assert.doesNotMatch(result.response, /Incomplete actions/);
+}));
+
+test('exact workspace edits preserve target indentation and final newlines on disk', async () => fixture(async ({ root }) => {
+  await fs.writeFile(path.join(root, 'indent.py'), 'def example():\n    return 1\n');
+  await executeWorkspaceTool('edit_workspace_file', { path: 'indent.py', target_content: '    return 1\n', replacement_content: '    return 2\n' });
+  assert.equal(await fs.readFile(path.join(root, 'indent.py'), 'utf8'), 'def example():\n    return 2\n');
 }));
 
 test('new files beneath an external junction are refused by both workspace tool runtimes', async () => fixture(async ({ root, external }) => {
@@ -621,7 +633,7 @@ test('missing edit-engine context cannot silently bypass reviewed file operation
     ['replace_range', { path: 'existing.txt', start_line: 1, end_line: 1, replacement: 'unsafe' }],
     ['delete_file', { path: 'existing.txt' }],
     ['move_file', { source_path: 'existing.txt', destination_path: 'new.txt' }]
-  ]) await assert.rejects(registry.executeTool(name, args), /reviewed edit engine is unavailable/);
+  ]) await assert.rejects(registry.executeTool(name, args, new PermissionManager('always_ask', async () => true)), /reviewed edit engine is unavailable/);
   assert.equal(await fs.readFile(path.join(root, 'existing.txt'), 'utf8'), 'original');
   await assert.rejects(fs.stat(path.join(root, 'new.txt')), { code: 'ENOENT' });
 }));

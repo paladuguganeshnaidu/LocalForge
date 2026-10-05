@@ -8,6 +8,8 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   private installController?: AbortController;
   private activeInstallName?: string;
   private pausedInstallName?: string;
+  private activeTargetId?: string;
+  private pausedTargetId?: string;
   private installStatus?: Record<string, unknown>;
 
   constructor(private readonly provider: ModelProvider, private readonly onModelsChanged?: () => Promise<void>) {}
@@ -22,7 +24,7 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
         await this.refresh();
         if (this.installStatus) this.post(this.installStatus);
       }
-      if (raw.type === 'installModel') await this.install(raw.model);
+      if (raw.type === 'installModel') await this.install(raw.model, raw.targetId);
       if (raw.type === 'pauseModelInstall') this.pauseInstall();
       if (raw.type === 'cancelModelInstall') this.cancelInstall();
       if (raw.type === 'deleteModel') await this.delete(raw.modelId);
@@ -68,6 +70,8 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
       const models = await this.provider.listModels();
       const defaultModel = vscode.workspace.getConfiguration('localforge.routing').get<string>('agentModel', '');
       this.post({ type: 'models', models, defaultModel });
+      const targets = this.provider.getDownloadTargets ? await this.provider.getDownloadTargets() : this.provider.pullModel ? [{ id: this.provider.id || 'ollama', label: 'Configured Ollama', source: this.provider.source }] : [];
+      this.post({ type: 'downloadTargets', targets });
       if (models.length || await this.provider.detect()) {
         this.notice('complete', '');
       } else {
@@ -78,17 +82,17 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async install(name: string): Promise<void> {
+  private async install(name: string, targetId?: string): Promise<void> {
     const normalizedName = name.trim();
     if (this.installController) {
       this.notice('error', 'A model download is already running.');
       return;
     }
-    if (this.pausedInstallName && this.pausedInstallName !== normalizedName) {
+    if (this.pausedInstallName && (this.pausedInstallName !== normalizedName || this.pausedTargetId !== targetId)) {
       this.notice('error', `Resume or cancel the paused download for ${this.pausedInstallName} first.`);
       return;
     }
-    if (!this.provider.pullModel) {
+    if (targetId ? !this.provider.pullModelToProvider && (!this.provider.pullModel || targetId !== this.provider.id) : !this.provider.pullModel) {
       this.updateInstallStatus({ state: 'error', message: 'The configured model provider does not support downloads.' });
       return;
     }
@@ -98,29 +102,41 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
     const controller = new AbortController();
     this.installController = controller;
     this.activeInstallName = normalizedName;
-    this.updateInstallStatus({ state: 'progress', model: normalizedName, progress: { status: resuming ? 'Restarting pull; Ollama may reuse completed layers' : 'Starting download' } });
+    this.activeTargetId = targetId;
+    this.updateInstallStatus({ state: 'progress', model: normalizedName, targetId, progress: { status: resuming ? 'Restarting pull; Ollama may reuse completed layers' : 'Starting download' } });
     let result: Record<string, unknown>;
     try {
-      await this.provider.pullModel(normalizedName, (progress) => {
-        if (!controller.signal.aborted) this.updateInstallStatus({ state: 'progress', model: normalizedName, progress });
-      }, controller.signal);
+      if (targetId) {
+        const targets = this.provider.getDownloadTargets ? await this.provider.getDownloadTargets() : [{ id: this.provider.id, label: 'Configured Ollama', source: this.provider.source }];
+        const target = targets.find(candidate => candidate.id === targetId);
+        if (!target) throw new Error('Selected download host is no longer available. Reconnect and refresh; no local fallback.');
+        const confirmed = await vscode.window.showWarningMessage(`Download ${normalizedName} on ${target.label}? This host will access the model registry and use its disk space. GPU availability does not guarantee that a model fits in VRAM.`, { modal: true }, 'Download model');
+        if (confirmed !== 'Download model') { controller.abort(); controller.signal.throwIfAborted(); }
+      }
+      const onProgress = (progress: import('../providers/modelProvider').ModelPullProgress) => {
+        if (!controller.signal.aborted) this.updateInstallStatus({ state: 'progress', model: normalizedName, targetId, progress });
+      };
+      if (targetId && this.provider.pullModelToProvider) await this.provider.pullModelToProvider(targetId, normalizedName, onProgress, controller.signal);
+      else await this.provider.pullModel!(normalizedName, onProgress, controller.signal);
       controller.signal.throwIfAborted();
       await this.onModelsChanged?.();
       await this.refresh();
       controller.signal.throwIfAborted();
-      result = { state: 'complete', model: normalizedName, message: `Ollama confirmed the download of ${normalizedName}.` };
+      result = { state: 'complete', model: normalizedName, targetId, message: `Ollama confirmed the download of ${normalizedName}${targetId ? ' on ' + targetId : ''}.` };
     } catch (error) {
       const cancelled = controller.signal.aborted;
       const paused = cancelled && this.pausedInstallName === normalizedName;
       result = {
         state: paused ? 'paused' : cancelled ? 'cancelled' : 'error',
         model: normalizedName,
+        targetId,
         message: paused ? `Paused ${normalizedName}. Select Resume download to continue.` : cancelled ? 'Model download cancelled.' : error instanceof Error ? error.message : String(error)
       };
     } finally {
       if (this.installController === controller) {
         this.installController = undefined;
         this.activeInstallName = undefined;
+        this.activeTargetId = undefined;
       }
     }
     this.updateInstallStatus(result);
@@ -129,17 +145,20 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   private pauseInstall(): void {
     if (!this.installController || !this.activeInstallName) return;
     this.pausedInstallName = this.activeInstallName;
+    this.pausedTargetId = this.activeTargetId;
     this.installController.abort();
   }
 
   private cancelInstall(): void {
     if (this.installController) {
       this.pausedInstallName = undefined;
+      this.pausedTargetId = undefined;
       this.installController.abort();
       return;
     }
     if (this.pausedInstallName) {
       this.pausedInstallName = undefined;
+      this.pausedTargetId = undefined;
       this.updateInstallStatus({ state: 'cancelled', message: 'Paused download discarded. Ollama may retain already downloaded layers.' });
     }
   }
@@ -217,7 +236,7 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
   :root { color-scheme: light dark; }
-  body { color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: 12px var(--vscode-font-family); margin: 0; padding: 12px; }
+  body { color: var(--vscode-foreground, #e1e4eb); background: var(--vscode-sideBar-background, #181a20); font: 12px/1.6 var(--vscode-font-family, system-ui); margin: 0; padding: 12px; overflow-wrap: anywhere; }
   * { box-sizing: border-box; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   h1 { font-size: 14px; font-weight: 600; margin: 0; }
@@ -229,6 +248,9 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   button:disabled { opacity: .55; cursor: default; }
   .section { border-top: 1px solid var(--vscode-panel-border); padding: 12px 0; }
   .section-title { font-weight: 600; margin-bottom: 8px; }
+  select { display: block; width: 100%; min-width: 0; margin: 6px 0 10px; color: inherit; font: inherit; background: var(--vscode-input-background, #232730); border: 1px solid var(--vscode-panel-border, #303541); padding: 7px; border-radius: 6px; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--vscode-focusBorder, #8ca5ff); outline-offset: 2px; }
+  [hidden] { display: none !important; }
   .install-row { display: flex; gap: 6px; }
   input { min-width: 0; flex: 1; padding: 6px 8px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); }
   .actions { display: flex; gap: 6px; margin-top: 7px; }
@@ -250,13 +272,16 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   <div id="notice" role="status" aria-live="polite" hidden></div>
   <section class="section">
     <div class="section-title">Install from Ollama</div>
+    <label for="downloadTarget">Download destination</label>
+    <select id="downloadTarget" aria-describedby="downloadHelp"><option value="">Checking connected hosts…</option></select>
+    <p id="downloadHelp" class="meta">Models are stored on the selected host, not copied to this laptop. Connect SSH in chat settings to download onto a remote GPU machine. Ollama chooses CPU/GPU inference based on that host's hardware.</p>
     <div class="install-row">
       <input id="modelName" maxlength="128" list="suggestions" placeholder="Model name, e.g. qwen2.5-coder:7b" aria-label="Ollama model name">
       <datalist id="suggestions"><option value="qwen2.5-coder:1.5b"><option value="qwen2.5-coder:7b"><option value="deepseek-r1:8b"><option value="llama3.2:3b"></datalist>
       <button id="install" type="button">Install</button>
     </div>
     <div class="actions"><button id="pause" class="secondary" type="button" hidden>Pause download</button><button id="cancel" class="secondary" type="button" hidden>Cancel download</button></div>
-    <div id="status" role="status" aria-live="polite">Downloads use your configured local Ollama service.</div>
+    <div id="status" role="status" aria-live="polite">Select a reachable Ollama host and model to download.</div>
     <progress id="progress" max="100" value="0" hidden></progress>
   </section>
   <section class="section">
@@ -267,6 +292,7 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const modelName = document.getElementById('modelName');
+  const downloadTarget = document.getElementById('downloadTarget');
   const installButton = document.getElementById('install');
   const pauseButton = document.getElementById('pause');
   const cancelButton = document.getElementById('cancel');
@@ -280,11 +306,13 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   let pausedModelName = '';
   document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   const install = () => {
+    if (!downloadTarget.value) { status.textContent = 'No download host selected. Start Ollama or connect SSH, then refresh.'; return; }
     const name = modelName.value.trim();
-    if (!name || name.length > 128 || /[\u0000-\u001f\u007f]/.test(name)) { status.textContent = 'Enter a valid model name (up to 128 characters).'; return; }
+    if (!name || name.length > 128 || /[\\u0000-\\u001f\\u007f]/.test(name)) { status.textContent = 'Enter a valid model name (up to 128 characters).'; return; }
     if (pausedModelName && pausedModelName !== name) { status.textContent = 'Resume or discard the paused download for ' + pausedModelName + ' first.'; return; }
     installButton.disabled = true;
     modelName.disabled = true;
+    downloadTarget.disabled = true;
     installButton.textContent = 'Installing…';
     pauseButton.hidden = false;
     pauseButton.disabled = false;
@@ -294,7 +322,7 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
     progress.hidden = false;
     progress.removeAttribute('value');
     status.textContent = 'Connecting to Ollama…';
-    vscode.postMessage({ type: 'installModel', model: name });
+    vscode.postMessage({ type: 'installModel', model: name, targetId: downloadTarget.value });
   };
   installButton.addEventListener('click', install);
   modelName.addEventListener('keydown', event => { if (event.key === 'Enter' && !installButton.disabled) install(); });
@@ -321,10 +349,10 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
       const card = document.createElement('article'); card.className = 'model';
       const head = document.createElement('div'); head.className = 'model-head';
       const name = document.createElement('div'); name.className = 'model-name'; name.textContent = model.displayName || model.name;
-      const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = model.source === 'remote' ? 'Remote' : 'Local';
+      const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = model.source === 'remote' ? 'Remote' : model.source === 'local' || model.providerId === 'ollama' ? 'Local' : 'API';
       head.append(name, badge);
       const meta = document.createElement('div'); meta.className = 'meta';
-      const capabilities = model.capabilities ? Object.entries(model.capabilities).filter(([, enabled]) => enabled).map(([key]) => key).join(' · ') : '';
+      const capabilities = model.capabilities ? Object.entries(model.capabilities).filter(([, enabled]) => enabled === true).map(([key]) => key).join(' · ') : '';
       meta.textContent = [model.providerId || 'Provider unavailable', formatBytes(model.size), capabilities].filter(Boolean).join(' · ');
       const actions = document.createElement('div'); actions.className = 'model-actions';
       const useButton = document.createElement('button'); useButton.className = 'secondary'; useButton.textContent = 'Use in chat';
@@ -344,6 +372,14 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
   }
   window.addEventListener('message', event => {
     const message = event.data;
+    if (message.type === 'downloadTargets') {
+      const selected = downloadTarget.value;
+      downloadTarget.replaceChildren();
+      (message.targets || []).forEach(target => downloadTarget.add(new Option(target.label, target.id)));
+      if (!downloadTarget.options.length) downloadTarget.add(new Option('No reachable download hosts', ''));
+      if (Array.from(downloadTarget.options).some(option => option.value === selected)) downloadTarget.value = selected;
+      installButton.disabled = !downloadTarget.value || modelName.disabled && !pausedModelName;
+    }
     if (message.type === 'models') { models = message.models || []; defaultModel = message.defaultModel || ''; renderModels(); }
     if (message.type === 'modelCenterNotice') {
       notice.textContent = message.message || '';
@@ -352,6 +388,8 @@ export class ModelCenterViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'modelCenterStatus') {
       const active = message.state === 'progress';
+      downloadTarget.disabled = active || message.state === 'paused';
+      if (message.targetId) downloadTarget.value = message.targetId;
       installButton.disabled = active;
       modelName.disabled = active || message.state === 'paused';
       installButton.textContent = pausedModelName ? 'Resume download' : 'Install';
