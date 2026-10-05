@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { LocalForgeEngine } from './LocalForgeEngine';
+import { TuxNestEngine, LocalForgeEngine } from './LocalForgeEngine';
 import { createUnifiedDiff } from '../editing/diffService';
 import { computeContentHash } from '../editing/patchService';
 
@@ -18,8 +18,8 @@ export interface SelfTestReport {
   results: SelfTestResult[];
 }
 
-export class LocalForgeSelfTest {
-  constructor(private readonly engine: LocalForgeEngine) {}
+export class TuxNestSelfTest {
+  constructor(private readonly engine: TuxNestEngine) {}
 
   public async runSelfTest(): Promise<SelfTestReport> {
     const startTime = Date.now();
@@ -27,7 +27,7 @@ export class LocalForgeSelfTest {
 
     // 1. Activation & Engine
     results.push(await this.testCheck('activation', async () => {
-      if (!this.engine) throw new Error('LocalForgeEngine is not initialized.');
+      if (!this.engine) throw new Error('TuxNest Engine is not initialized.');
       return 'Engine active and operational.';
     }));
 
@@ -176,3 +176,6 @@ export class LocalForgeSelfTest {
     return lines.join('\n');
   }
 }
+
+export const LocalForgeSelfTest = TuxNestSelfTest;
+export type LocalForgeSelfTest = TuxNestSelfTest;

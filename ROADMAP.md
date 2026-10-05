@@ -1,8 +1,8 @@
-# LocalForge Roadmap & Architecture
+# TuxNest Roadmap & Architecture
 
 ## Product Vision
 
-LocalForge is a local-first AI software engineer for VS Code. It discovers models already available on your workstation or user-owned GPU server, routes chat, code edits, autonomous agent loops, and inline completions through provider-agnostic interfaces, and operates with zero proprietary cloud dependencies.
+TuxNest is a local-first AI software engineer for VS Code featuring TuxNest Chat and TuxNest SI Agent. It discovers models already available on your workstation or user-owned GPU server, routes chat, code edits, autonomous agent loops, and inline completions through provider-agnostic interfaces, and operates with zero proprietary cloud dependencies.
 
 ---
 

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { WorkspaceIndexStatus } from '../context/workspaceIndexer';
 
-export interface LocalForgeEvents {
+export interface TuxNestEvents {
   'modelChanged': (modelId: string) => void;
   'sessionUpdated': (sessionId: string) => void;
   'remoteConnected': (profileName: string) => void;
@@ -11,8 +11,13 @@ export interface LocalForgeEvents {
   'indexStatus': (status: WorkspaceIndexStatus) => void;
 }
 
-export class LocalForgeEventEmitter extends EventEmitter {
+export type LocalForgeEvents = TuxNestEvents;
+
+export class TuxNestEventEmitter extends EventEmitter {
   public override emit(event: string | symbol, ...args: any[]): boolean {
     return super.emit(event, ...args);
   }
 }
+
+export const LocalForgeEventEmitter = TuxNestEventEmitter;
+export type LocalForgeEventEmitter = TuxNestEventEmitter;

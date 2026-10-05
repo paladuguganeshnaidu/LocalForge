@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 const {
+  TuxNestError,
   LocalForgeError,
   ModelError,
   ProviderError,
@@ -41,6 +42,7 @@ test('Structured error hierarchy initializes with codes, recoverability, and JSO
     });
 
     assert.ok(err instanceof Error);
+    assert.ok(err instanceof TuxNestError);
     assert.ok(err instanceof LocalForgeError);
     assert.equal(err.code, defaultCode);
     assert.equal(err.userMessage, 'User friendly explanation');

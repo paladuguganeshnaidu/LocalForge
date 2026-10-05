@@ -1,0 +1,18 @@
+{
+  "name": "tuxnest-vscode",
+  "displayName": "TuxNest",
+  "version": "1.0.0",
+  "publisher": "tuxnest",
+  "file": "tuxnest-vscode-1.0.0.vsix",
+  "sha256": "a8192463ffdb3d9e04b377181553f4c43ce0fed71ca946ac8cd309dd80ad8d65",
+  "builtAt": "2026-10-05T15:49:31Z",
+  "tag": "v1.0.0",
+  "description": "TuxNest - Local AI Developer with TuxNest Chat, TuxNest SI Agent, Transparent Penguin Visual Identity & Autonomous Multi-Agent Workflows",
+  "verification": {
+    "manifestName": "tuxnest-vscode",
+    "publisher": "tuxnest",
+    "displayName": "TuxNest",
+    "version": "1.0.0",
+    "checksPassed": 6
+  }
+}

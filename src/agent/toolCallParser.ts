@@ -357,7 +357,7 @@ export class ToolCallParser {
 
   private static extractProtocolBlocks(text: string): Array<{ rawMatch: string; payload: string }> {
     const results: Array<{ rawMatch: string; payload: string }> = [];
-    const marker = /LOCALFORGE_TOOL_CALL\s*:?/gi;
+    const marker = /(?:TUXNEST|LOCALFORGE)_TOOL_CALL\s*:?/gi;
     let match: RegExpExecArray | null;
     while ((match = marker.exec(text)) !== null) {
       const markerStart = match.index;
@@ -453,7 +453,7 @@ export class ToolCallParser {
   private static stripToolEchoes(text: string): string {
     return text
       .replace(/```(?:json)?\s*```/g, '')
-      .replace(/LOCALFORGE_TOOL_CALL\s*:?/gi, '')
+      .replace(/(?:TUXNEST|LOCALFORGE)_TOOL_CALL\s*:?/gi, '')
       .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
       .replace(/<\/tool_call>/gi, '')
       .replace(/<tool_call>/gi, '')

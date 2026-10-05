@@ -1,6 +1,8 @@
 node_modules/
 dist/
 *.vsix
+!releases/v1.0.0/*.vsix
+releases/archive/
 .vscode-test/
 scratch/
 archive/

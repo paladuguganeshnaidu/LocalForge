@@ -2,13 +2,15 @@ import { AgentMode } from '../agent/agentLoop';
 import { LocalModel } from '../providers/modelProvider';
 import { GpuStatusInfo } from '../remote/gpuMonitor';
 
-export interface LocalForgeSettings {
+export interface TuxNestSettings {
   autoApproveSafe: boolean;
   inlineCompletion: boolean;
   contextBudgetTokens: number;
   ollamaEndpoint: string;
   openaiEndpoint?: string;
 }
+
+export type LocalForgeSettings = TuxNestSettings;
 
 export interface WebviewState {
   models: LocalModel[];
@@ -19,5 +21,5 @@ export interface WebviewState {
   remoteProfileName?: string;
   gpuStatus?: GpuStatusInfo[];
   activeFilePath?: string;
-  settings: LocalForgeSettings;
+  settings: TuxNestSettings;
 }

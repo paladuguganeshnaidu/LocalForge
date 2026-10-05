@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import { applyReviewedSelection } from './editing/selectionEdits';
 import { randomUUID } from 'node:crypto';
-import { LocalForgeEngine } from './core/LocalForgeEngine';
-import { LocalForgeViewProvider } from './ui/chatView';
+import { TuxNestEngine, LocalForgeEngine } from './core/LocalForgeEngine';
+import { TuxNestViewProvider, LocalForgeViewProvider } from './ui/chatView';
 import { ModelCenterViewProvider } from './ui/modelCenter';
-import { LocalForgeCompletionProvider } from './completion/completionProvider';
+import { TuxNestCompletionProvider, LocalForgeCompletionProvider } from './completion/completionProvider';
 import { isWebviewMessage } from './ui/webviewMessages';
 import { validateRelativeWorkspacePath } from './agent/workspaceTools';
 import { ChatMessage } from './providers/modelProvider';
@@ -54,25 +54,27 @@ export function formatFixPrompt(
   ];
 }
 
-let engineInstance: LocalForgeEngine | undefined;
+let engineInstance: TuxNestEngine | undefined;
 
-export interface LocalForgeExtensionApi {
-  engine: LocalForgeEngine;
-  viewProvider: LocalForgeViewProvider;
+export interface TuxNestExtensionApi {
+  engine: TuxNestEngine;
+  viewProvider: TuxNestViewProvider;
 }
 
-export async function activate(context: vscode.ExtensionContext): Promise<LocalForgeExtensionApi> {
+export type LocalForgeExtensionApi = TuxNestExtensionApi;
+
+export async function activate(context: vscode.ExtensionContext): Promise<TuxNestExtensionApi> {
   const ollamaUrl = vscode.workspace.getConfiguration('tuxnest.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434');
   const openAiUrls = vscode.workspace.getConfiguration('tuxnest.providers').get<string>('openAICompatibleUrls', '');
 
-  const engine = new LocalForgeEngine(context, {
+  const engine = new TuxNestEngine(context, {
     ollamaEndpoint: ollamaUrl,
     openAiEndpoints: openAiUrls
   });
   engineInstance = engine;
   await engine.initializeConversationHistory();
 
-  const viewProvider = new LocalForgeViewProvider(engine.compositeProvider, context, engine);
+  const viewProvider = new TuxNestViewProvider(engine.compositeProvider, context, engine);
   const modelCenterProvider = new ModelCenterViewProvider(engine.compositeProvider, async () => {
     await engine.modelRegistry.discoverAll();
     await viewProvider.refresh();
@@ -85,7 +87,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<LocalF
     }).then(() => viewProvider.refresh()).catch((error) => vscode.window.showErrorMessage(`Could not update providers: ${error instanceof Error ? error.message : 'Unknown provider error'}`));
   }));
 
-  const completionProvider = new LocalForgeCompletionProvider(
+  const completionProvider = new TuxNestCompletionProvider(
     engine.compositeProvider,
     () => vscode.workspace.getConfiguration('tuxnest.autocomplete').get<boolean>('enabled', false),
     () => viewProvider.modelForTask('completion')
@@ -351,7 +353,7 @@ export async function deactivate(): Promise<void> {
   }
 }
 
-async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<void> {
+async function explainSelection(viewProvider: TuxNestViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     void vscode.window.showInformationMessage('Open a file and select code for TuxNest to explain.');
@@ -371,7 +373,7 @@ async function explainSelection(viewProvider: LocalForgeViewProvider): Promise<v
   await viewProvider.sendUserPrompt(prompt, { includeContext: false, mode: 'ask' });
 }
 
-async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
+async function fixSelection(engine: TuxNestEngine, viewProvider: TuxNestViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     void vscode.window.showInformationMessage('Open a file before asking TuxNest to fix code.');
@@ -470,7 +472,7 @@ async function fixSelection(engine: LocalForgeEngine, viewProvider: LocalForgeVi
   await applyRecordedSelection(engine, viewProvider, editor.document, targetRange, replacement, controller.signal);
 }
 
-async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeViewProvider): Promise<void> {
+async function proposeEdit(engine: TuxNestEngine, viewProvider: TuxNestViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     void vscode.window.showInformationMessage('Open a file before asking TuxNest to edit code.');
@@ -555,8 +557,8 @@ async function proposeEdit(engine: LocalForgeEngine, viewProvider: LocalForgeVie
 }
 
 async function applyRecordedSelection(
-  engine: LocalForgeEngine,
-  viewProvider: LocalForgeViewProvider,
+  engine: TuxNestEngine,
+  viewProvider: TuxNestViewProvider,
   document: vscode.TextDocument,
   range: vscode.Range,
   replacement: string,
@@ -658,8 +660,8 @@ async function configureRemoteProfile(context: vscode.ExtensionContext): Promise
 
 async function connectRemote(
   context: vscode.ExtensionContext,
-  engine: LocalForgeEngine,
-  viewProvider: LocalForgeViewProvider
+  engine: TuxNestEngine,
+  viewProvider: TuxNestViewProvider
 ): Promise<void> {
   const profiles = engine.remoteManager.getProfiles();
   if (!profiles.length) {

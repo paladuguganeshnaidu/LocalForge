@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ChatMessage, ModelProvider } from '../providers/modelProvider';
 
-export class LocalForgeCompletionProvider implements vscode.InlineCompletionItemProvider {
+export class TuxNestCompletionProvider implements vscode.InlineCompletionItemProvider {
   private lastRequestId = 0;
 
   constructor(
@@ -109,3 +109,6 @@ function delay(milliseconds: number, token: vscode.CancellationToken): Promise<v
     });
   });
 }
+
+export const LocalForgeCompletionProvider = TuxNestCompletionProvider;
+export type LocalForgeCompletionProvider = TuxNestCompletionProvider;

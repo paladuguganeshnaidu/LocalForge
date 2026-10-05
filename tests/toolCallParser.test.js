@@ -171,6 +171,17 @@ test('ToolCallParser parses LOCALFORGE_TOOL_CALL protocol', () => {
   assert.equal(parsed.userVisibleText, '');
 });
 
+test('ToolCallParser parses TUXNEST_TOOL_CALL protocol', () => {
+  const content = 'TUXNEST_TOOL_CALL: {"tool": "run_command", "arguments": {"command": "npm run build"}}';
+  const parsed = ToolCallParser.parse(content, undefined, new Set(['run_command']));
+
+  assert.equal(parsed.hadToolCallSyntax, true);
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0].function.name, 'run_command');
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { command: 'npm run build' });
+  assert.equal(parsed.userVisibleText, '');
+});
+
 test('ToolCallParser parses arrays of tool calls', () => {
   const content = `[
     {"name": "write_workspace_file", "arguments": {"path": "a.txt", "content": "hello"}},

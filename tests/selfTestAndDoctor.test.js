@@ -21,7 +21,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const { DiagnosticsService } = require('../dist/core/diagnosticsService.js');
-const { LocalForgeSelfTest } = require('../dist/core/selfTest.js');
+const { TuxNestSelfTest, LocalForgeSelfTest } = require('../dist/core/selfTest.js');
 const { ToolRegistry } = require('../dist/agent/toolRegistry.js');
 const { registerAllCoreTools } = require('../dist/agent/coreTools.js');
 

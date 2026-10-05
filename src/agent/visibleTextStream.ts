@@ -59,14 +59,16 @@ export class VisibleTextStream {
       }
     }
 
-    const protocolMarker = 'localforge_tool_call';
-    let markerOffset = 0;
-    while (true) {
-      const markerStart = lower.indexOf(protocolMarker, markerOffset);
-      if (markerStart < 0) break;
-      const objectStart = lower.indexOf('{', markerStart + protocolMarker.length);
-      if (objectStart < 0 || this.findJsonEnd(objectStart) < 0) block(markerStart);
-      markerOffset = markerStart + protocolMarker.length;
+    const protocolMarkers = ['tuxnest_tool_call', 'localforge_tool_call'];
+    for (const protocolMarker of protocolMarkers) {
+      let markerOffset = 0;
+      while (true) {
+        const markerStart = lower.indexOf(protocolMarker, markerOffset);
+        if (markerStart < 0) break;
+        const objectStart = lower.indexOf('{', markerStart + protocolMarker.length);
+        if (objectStart < 0 || this.findJsonEnd(objectStart) < 0) block(markerStart);
+        markerOffset = markerStart + protocolMarker.length;
+      }
     }
 
     for (let start = 0; start < lower.length; start += 1) {
@@ -83,7 +85,7 @@ export class VisibleTextStream {
 
     const partialMarkers = [
       '<think', '</think', '<thought', '</thought', '<reasoning', '</reasoning',
-      '<!--', '-->', '<tool_call', '</tool_call', protocolMarker
+      '<!--', '-->', '<tool_call', '</tool_call', 'tuxnest_tool_call', 'localforge_tool_call'
     ];
     for (let start = Math.max(0, lower.length - Math.max(...partialMarkers.map((marker) => marker.length)) + 1); start < lower.length; start += 1) {
       const suffix = lower.slice(start);

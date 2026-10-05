@@ -4,7 +4,7 @@ import { ModelRegistry } from './modelRegistry';
 import { canonicalModelId } from './endpointConfiguration';
 
 export class CompositeProvider implements ModelProvider {
-  readonly id = 'localforge';
+  readonly id = 'tuxnest';
   private providers: ModelProvider[];
   private discovered: Array<{ provider: ModelProvider; model: LocalModel }> = [];
   private revision = 0;

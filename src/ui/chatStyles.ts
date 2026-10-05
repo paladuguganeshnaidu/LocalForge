@@ -31,6 +31,7 @@ textarea { resize: vertical; }
 .header-top, .header-actions, .model-info-left, .composer-bottom, .toolbar-items, .drawer-header, .artifact-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .header-top { justify-content: space-between; }
 .header-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; font-weight: 600; }
+.header-logo { width: 18px; height: 18px; object-fit: contain; flex: none; background: transparent; border: none; }
 #sessionTitle { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: normal; }
 .header-actions { flex: none; gap: 2px; }
 .icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
@@ -58,7 +59,11 @@ textarea { resize: vertical; }
 .main-scroll > * { flex-shrink: 0; max-width: 100%; min-width: 0; }
 .msg-assistant { padding: 0; overflow-wrap: anywhere; }
 .msg-assistant.welcome { display: flex; flex-direction: column; gap: 10px; color: var(--subtle); margin: auto 0; padding: 24px 6px; text-align: left; }
-.welcome-label { font-size: 10px; letter-spacing: .12em; }
+.welcome-header { display: flex; align-items: center; gap: 12px; }
+.welcome-logo { width: 56px; height: 56px; object-fit: contain; flex: none; background: transparent; border: none; box-shadow: none; filter: drop-shadow(0 3px 10px rgba(0,0,0,0.18)); }
+.welcome-brand { display: flex; flex-direction: column; gap: 2px; }
+.welcome-label { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; }
+.welcome-tagline { font-size: 11px; color: var(--subtle); }
 .msg-assistant.welcome strong { color: var(--fg); font-size: 22px; font-weight: 550; line-height: 1.35; letter-spacing: -.025em; }
 .msg-assistant.welcome p { font-size: 12px; margin: 0; max-width: 330px; line-height: 1.7; }
 .main-scroll:has(.msg-user) .welcome { display: none !important; }

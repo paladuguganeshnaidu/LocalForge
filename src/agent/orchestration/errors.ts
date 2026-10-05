@@ -9,7 +9,7 @@ export interface StructuredErrorOptions {
   cause?: Error;
 }
 
-export abstract class LocalForgeError extends Error {
+export abstract class TuxNestError extends Error {
   public readonly code: string;
   public readonly details: Record<string, unknown>;
   public readonly recoverable: boolean;
@@ -45,73 +45,76 @@ export abstract class LocalForgeError extends Error {
   }
 }
 
-export class ModelError extends LocalForgeError {
+export const LocalForgeError = TuxNestError;
+export type LocalForgeError = TuxNestError;
+
+export class ModelError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'MODEL_ERROR' });
   }
 }
 
-export class ProviderError extends LocalForgeError {
+export class ProviderError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'PROVIDER_ERROR' });
   }
 }
 
-export class ToolError extends LocalForgeError {
+export class ToolError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'TOOL_ERROR' });
   }
 }
 
-export class TerminalError extends LocalForgeError {
+export class TerminalError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'TERMINAL_ERROR' });
   }
 }
 
-export class FileError extends LocalForgeError {
+export class FileError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'FILE_ERROR' });
   }
 }
 
-export class PermissionError extends LocalForgeError {
+export class PermissionError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'PERMISSION_ERROR' });
   }
 }
 
-export class ParseError extends LocalForgeError {
+export class ParseError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'PARSE_ERROR' });
   }
 }
 
-export class TimeoutError extends LocalForgeError {
+export class TimeoutError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'TIMEOUT_ERROR', retryable: true });
   }
 }
 
-export class CancellationError extends LocalForgeError {
+export class CancellationError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'CANCELLATION_ERROR', recoverable: false, retryable: false });
   }
 }
 
-export class AgentError extends LocalForgeError {
+export class AgentError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'AGENT_ERROR' });
   }
 }
 
-export class WorkspaceError extends LocalForgeError {
+export class WorkspaceError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'WORKSPACE_ERROR' });
   }
 }
 
-export class GitError extends LocalForgeError {
+export class GitError extends TuxNestError {
   constructor(options: Omit<StructuredErrorOptions, 'code'> & { code?: string }) {
     super({ ...options, code: options.code || 'GIT_ERROR' });
   }

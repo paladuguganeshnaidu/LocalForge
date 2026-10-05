@@ -248,7 +248,7 @@ export class OllamaProvider implements ModelProvider {
             if (typeof argumentsValue === 'string') {
               try { argumentsValue = JSON.parse(argumentsValue); } catch {}
             }
-            return 'LOCALFORGE_TOOL_CALL ' + JSON.stringify({ tool: call.function.name, arguments: argumentsValue });
+            return 'TUXNEST_TOOL_CALL ' + JSON.stringify({ tool: call.function.name, arguments: argumentsValue });
           }).join('\n')
         };
         return message;
@@ -337,7 +337,7 @@ export class OllamaProvider implements ModelProvider {
       this.nativeToolSupport.set(model, false);
     }
 
-    // Standard chat without native tools parameter (model will use LocalForge text-tool protocol)
+    // Standard chat without native tools parameter (model will use TuxNest text-tool protocol)
     if (onContentDelta) {
       const response = await this.generate({ model, messages: this.formatMessagesForOllama(messages, true, model), stream: true, ...this.generationSettings(model) }, signal);
       if (!response.ok) {

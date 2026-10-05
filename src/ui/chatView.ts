@@ -6,7 +6,7 @@ import { ChatMessage, LocalModel, ModelProvider } from '../providers/modelProvid
 import { AgentMode } from '../agent/agentLoop';
 import { SshOllamaTunnel } from '../remote/sshOllamaTunnel';
 import { isWebviewMessage, WebviewMessage } from './webviewMessages';
-import { LocalForgeEngine } from '../core/LocalForgeEngine';
+import { TuxNestEngine, LocalForgeEngine } from '../core/LocalForgeEngine';
 import { ModelTask, routeModel } from '../providers/modelRouter';
 import { EditProposal } from '../editing/editEngine';
 import { Artifact } from '../core/artifactManager';
@@ -22,7 +22,7 @@ import { chatStyles } from './chatStyles';
 import { canAttachWorkspaceContext } from '../context/accessBoundary';
 import { defaultCompatibleEndpoints } from '../providers/endpointConfiguration';
 
-export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
+export class TuxNestViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private models: LocalModel[] = [];
   private sessionManager: SessionManager;
@@ -33,7 +33,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   public selectedModel?: string;
   public activeMode: AgentMode = 'agent';
   public activeStrategy: ExecutionStrategy = 'planning';
-  private engine?: LocalForgeEngine;
+  private engine?: TuxNestEngine;
   private currentProposal?: EditProposal;
   private providerEvents?: vscode.Disposable;
   private pendingPermissionRequests = new Map<string, {
@@ -47,7 +47,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly provider: ModelProvider,
     private readonly context: vscode.ExtensionContext,
-    engine?: LocalForgeEngine
+    engine?: TuxNestEngine
   ) {
     this.engine = engine;
     this.sessionManager = engine?.sessionManager ?? new SessionManager(context.workspaceState);
@@ -56,7 +56,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public setEngine(engine: LocalForgeEngine): void {
+  public setEngine(engine: TuxNestEngine): void {
     this.engine = engine;
     this.sessionManager = engine.sessionManager;
     this.initPermissionHandler();
@@ -192,7 +192,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
       }
     }
     } catch (error) {
-      console.error('[LocalForge] Approval activity update failed:', error instanceof Error ? error.message : String(error));
+      console.error('[TuxNest] Approval activity update failed:', error instanceof Error ? error.message : String(error));
     } finally {
       pending.resolve(decision === 'allow' || decision === 'allow_session');
       this.post({ type: 'permissionDecision', requestId, decision });
@@ -928,6 +928,7 @@ export class LocalForgeViewProvider implements vscode.WebviewViewProvider {
 function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   const nonce = randomBytes(16).toString('hex');
   const cspSource = webview.cspSource;
+  const iconUri = extensionUri ? webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'tuxnest.svg')).toString() : '';
 
 
   return `<!DOCTYPE html>
@@ -941,7 +942,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 <body>
   <header class="header">
     <div class="header-top">
-      <div class="header-title"><span>Chat</span><span id="sessionTitle"></span></div>
+      <div class="header-title">${iconUri ? `<img class="header-logo" src="${iconUri}" alt="TuxNest Logo" />` : ''}<span>Chat</span><span id="sessionTitle"></span></div>
       <div class="header-actions">
         <button class="icon-btn" id="newChatBtn" title="New chat" aria-label="New chat">
           <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -963,7 +964,13 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
   <main class="conversation-area">
     <div class="main-scroll" id="mainScroll" role="region" aria-label="Conversation and actual tool activity" tabindex="0">
       <div class="msg-assistant welcome">
-        <span class="welcome-label">TuxNest Chat</span>
+        <div class="welcome-header">
+          ${iconUri ? `<img class="welcome-logo" src="${iconUri}" alt="TuxNest Logo" />` : ''}
+          <div class="welcome-brand">
+            <span class="welcome-label">TuxNest Chat</span>
+            <div class="welcome-tagline">Autonomous AI Engineering Assistant</div>
+          </div>
+        </div>
         <strong>What would you like to build?</strong>
         <p>Ask about your code, plan a change, or let TuxNest SI Agent work. You review the edits.</p>
       </div>
@@ -1149,7 +1156,7 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 
   <script nonce="${nonce}">
     window.addEventListener('error', function(e) {
-      console.error('[LocalForge Webview Error]', e.error || e.message);
+      console.error('[TuxNest Webview Error]', e.error || e.message);
     });
 
     const vscode = (function() {
@@ -2077,3 +2084,6 @@ function getHtml(webview: vscode.Webview, extensionUri?: vscode.Uri): string {
 </body>
 </html>`;
 }
+
+export const LocalForgeViewProvider = TuxNestViewProvider;
+export type LocalForgeViewProvider = TuxNestViewProvider;

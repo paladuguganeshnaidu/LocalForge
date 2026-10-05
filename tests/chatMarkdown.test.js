@@ -126,9 +126,9 @@ test('models without native tools use readable chat roles and close the stream o
     assert.equal(request.messages.at(-1).role, 'user');
     assert.match(request.messages.at(-1).content, /Execution result for read_file/);
     assert.match(request.messages.at(-1).content, /Do not repeat a successful identical action/);
-    assert.match(request.messages[1].content, /LOCALFORGE_TOOL_CALL/);
+    assert.match(request.messages[1].content, /(?:TUXNEST|LOCALFORGE)_TOOL_CALL/);
     const stream = new ReadableStream({
-      start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ message: { content: 'LOCALFORGE_TOOL_CALL {"tool":"read_file","arguments":{"path":"package.json"}}' } }) + '\n')); },
+      start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ message: { content: 'TUXNEST_TOOL_CALL {"tool":"read_file","arguments":{"path":"package.json"}}' } }) + '\n')); },
       cancel() { cancelled = true; }
     });
     return new Response(stream);

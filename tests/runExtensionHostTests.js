@@ -27,11 +27,11 @@ async function main() {
       `--extensions-dir=${path.join(fixtureRoot, 'extensions')}`
     ];
 
-    console.log('[LocalForge] Launching VS Code Extension Host...');
-    console.log('[LocalForge] Extension development path:', extensionDevelopmentPath);
-    console.log('[LocalForge] Extension tests path:', extensionTestsPath);
+    console.log('[TuxNest] Launching VS Code Extension Host...');
+    console.log('[TuxNest] Extension development path:', extensionDevelopmentPath);
+    console.log('[TuxNest] Extension tests path:', extensionTestsPath);
     if (vscodeExecutablePath) {
-      console.log('[LocalForge] VS Code executable:', vscodeExecutablePath);
+      console.log('[TuxNest] VS Code executable:', vscodeExecutablePath);
     }
 
     await runTests({
@@ -41,9 +41,9 @@ async function main() {
       launchArgs
     });
 
-    console.log('[LocalForge] Extension Host tests finished successfully.');
+    console.log('[TuxNest] Extension Host tests finished successfully.');
   } catch (err) {
-    console.error('[LocalForge] Failed to run extension host tests:', err);
+    console.error('[TuxNest] Failed to run extension host tests:', err);
     process.exitCode = 1;
   } finally {
     const fixtureAbsolute = path.resolve(fixtureRoot);
@@ -53,7 +53,7 @@ async function main() {
     try {
       fs.rmSync(fixtureAbsolute, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch (error) {
-      console.warn(`[LocalForge] Temporary test profile retained at ${fixtureAbsolute}: ${error.message}`);
+      console.warn(`[TuxNest] Temporary test profile retained at ${fixtureAbsolute}: ${error.message}`);
     }
   }
 }

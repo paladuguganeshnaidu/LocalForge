@@ -18,7 +18,7 @@ import { RemoteManager } from '../remote/remoteManager';
 import { SessionManager } from './sessionManager';
 import { TaskManager } from './taskManager';
 import { DiagnosticsService } from './diagnosticsService';
-import { LocalForgeEventEmitter } from './events';
+import { TuxNestEventEmitter, LocalForgeEventEmitter } from './events';
 import { registerWorkspaceTools } from '../agent/workspaceTools';
 import { ArtifactManager, Artifact } from './artifactManager';
 import { TurnManager, AgentTurn, TurnActivity, ExecutionStrategy } from './turnManager';
@@ -31,7 +31,7 @@ import { registerAllCoreTools } from '../agent/coreTools';
 import { registerWorkflowTools } from '../agent/workflowTools';
 import { registerSubagentTools } from '../agent/subagentTools';
 import { ProductMode } from '../agent/orchestration/types';
-import { LocalForgeSelfTest } from './selfTest';
+import { TuxNestSelfTest, LocalForgeSelfTest } from './selfTest';
 import { formatCommandLabel, formatToolInput, formatToolOutput } from './activityDetails';
 import { AgentAccessPolicy, AccessScope } from '../agent/accessPolicy';
 import { registerExternalTools } from '../agent/externalTools';
@@ -51,8 +51,8 @@ export interface ExecuteTaskOptions {
   onArtifact?: (artifact: Artifact) => void;
 }
 
-export class LocalForgeEngine {
-  public readonly events = new LocalForgeEventEmitter();
+export class TuxNestEngine {
+  public readonly events = new TuxNestEventEmitter();
   public readonly modelRegistry: ModelRegistry;
   public readonly compositeProvider: CompositeProvider;
   public readonly modelRouter: ModelRouter;
@@ -73,7 +73,7 @@ export class LocalForgeEngine {
   public readonly referenceResolver: ContextReferenceResolver;
   public readonly orchestrator: MultiAgentOrchestrator;
   public readonly checkpointManager: CheckpointManager;
-  public readonly selfTest: LocalForgeSelfTest;
+  public readonly selfTest: TuxNestSelfTest;
 
   public indexer?: WorkspaceIndexer;
   public contextEngine?: ContextEngine;
@@ -143,7 +143,7 @@ export class LocalForgeEngine {
       this.editEngine
     );
     this.checkpointManager = new CheckpointManager(context.workspaceState);
-    this.selfTest = new LocalForgeSelfTest(this);
+    this.selfTest = new TuxNestSelfTest(this);
 
     this.registerDefaultTools();
     this.initWorkspaceContext();
@@ -1000,3 +1000,6 @@ export class LocalForgeEngine {
     }
   }
 }
+
+export const LocalForgeEngine = TuxNestEngine;
+export type LocalForgeEngine = TuxNestEngine;

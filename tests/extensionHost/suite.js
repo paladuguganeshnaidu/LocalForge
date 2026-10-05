@@ -32,8 +32,8 @@ async function run() {
 
   // Stage 1: Extension Discovery & Activation
   await runStage('Stage 1: Extension Activation', async () => {
-    ext = vscode.extensions.getExtension('paladuguganeshnaidu.localforge-vscode');
-    assert.ok(ext, 'Extension paladuguganeshnaidu.localforge-vscode must be discovered');
+    ext = vscode.extensions.getExtension('paladuguganeshnaidu.tuxnest-vscode') || vscode.extensions.getExtension('paladuguganeshnaidu.localforge-vscode');
+    assert.ok(ext, 'Extension paladuguganeshnaidu.tuxnest-vscode must be discovered');
 
     if (!ext.isActive) {
       await ext.activate();
@@ -52,23 +52,22 @@ async function run() {
 
   // Stage 2: Command Registration
   const expectedCommands = [
-    'localforge.openAgent',
-    'localforge.newConversation',
-    'localforge.continueTask',
-    'localforge.reviewChanges',
-    'localforge.undoChanges',
-    'localforge.showArtifacts',
-    'localforge.diagnose',
-    'localforge.doctor',
-    'localforge.selfTest',
-    'localforge.refreshModels',
-    'localforge.connectRemote',
-    'localforge.disconnectRemote',
-    'localforge.remoteGpuStatus',
-    'localforge.reindexWorkspace',
-    'localforge.cancelAgent',
-    'localforge.setAgentMode',
-    'localforge.setModel'
+    'tuxnest.openAgent',
+    'tuxnest.newConversation',
+    'tuxnest.continueTask',
+    'tuxnest.reviewChanges',
+    'tuxnest.showArtifacts',
+    'tuxnest.diagnose',
+    'tuxnest.doctor',
+    'tuxnest.selfTest',
+    'tuxnest.refreshModels',
+    'tuxnest.connectRemote',
+    'tuxnest.disconnectRemote',
+    'tuxnest.remoteGpuStatus',
+    'tuxnest.reindexWorkspace',
+    'tuxnest.cancelAgent',
+    'tuxnest.setAgentMode',
+    'tuxnest.setModel'
   ];
 
   await runStage('Stage 2: Command Registration Verification', async () => {
@@ -79,10 +78,11 @@ async function run() {
         `Command "${cmd}" must be registered in the extension host.`
       );
     }
-    const extension = vscode.extensions.all.find((item) => item.packageJSON?.name === 'localforge-vscode');
-    assert.ok(extension, 'The LocalForge extension must be present in the host.');
-    const contributedViews = extension.packageJSON.contributes?.views?.['localforge-secondary'] || [];
-    assert.ok(contributedViews.some((view) => view.id === 'localforge.modelsView'), 'The dedicated Models view must be contributed.');
+    const extension = vscode.extensions.all.find((item) => item.packageJSON?.name === 'tuxnest-vscode' || item.packageJSON?.name === 'localforge-vscode');
+    assert.ok(extension, 'The TuxNest extension must be present in the host.');
+    const views = extension.packageJSON.contributes?.views || {};
+    const contributedViews = views['tuxnest-secondary'] || views['localforge-secondary'] || [];
+    assert.ok(contributedViews.some((view) => view.id === 'tuxnest.modelsView' || view.id === 'localforge.modelsView'), 'The dedicated Models view must be contributed.');
   });
 
   // Stage 3: Built-in Command Executions
@@ -739,7 +739,7 @@ async function run() {
     api.engine.setAccessScope('file', 'package.json');
     try {
       const file = await api.engine.toolRegistry.executeTool('read_file', { path: 'package.json' }, api.engine.permissionManager);
-      assert.match(file.content, /localforge-vscode/);
+      assert.match(file.content, /(?:tuxnest|localforge)-vscode/);
       await assert.rejects(api.engine.toolRegistry.executeTool('read_file', { path: 'README.md' }, api.engine.permissionManager), /restricted/);
       await assert.rejects(api.engine.toolRegistry.executeTool('run_command', { command: 'npm test' }, api.engine.permissionManager), /unavailable/);
       await assert.rejects(api.engine.executeTask('/terminal npm test', 'agent'), /unavailable/);
