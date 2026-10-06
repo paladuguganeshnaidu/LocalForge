@@ -2,7 +2,7 @@
   "name": "tuxnest-vscode",
   "displayName": "TuxNest",
   "description": "TuxNest Chat & TuxNest SI Agent: Use local Ollama and SSH-tunneled Ollama models for AI-assisted coding in VS Code.",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "publisher": "tuxnest",
   "icon": "media/tuxnest-icon.png",
   "repository": {

@@ -513,11 +513,20 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       type: 'function',
       function: {
         name: 'run_command',
-        description: 'Execute a terminal shell command in the workspace root.',
+        description: 'Execute a terminal shell command in the workspace root. Supports bash, powershell, or cmd.',
         parameters: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'Shell command to execute' }
+            command: { type: 'string', description: 'Shell command to execute' },
+            shell: {
+              type: 'string',
+              enum: ['auto', 'bash', 'powershell', 'cmd'],
+              description: 'Optional shell environment to run in (default: auto, automatically routes bash syntax to Git Bash/WSL if available)'
+            },
+            timeoutMs: {
+              type: 'number',
+              description: 'Optional execution timeout in milliseconds (adaptive default up to 10m for package installations)'
+            }
           },
           required: ['command'],
           additionalProperties: false
@@ -526,12 +535,22 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
     },
     async (args, execution) => {
       const command = getString(args.command, 'command', 1000);
+      const requestedShell = typeof args.shell === 'string' ? args.shell : undefined;
+      const requestedTimeout = typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : undefined;
+
       if (!vscode.workspace.isTrusted) throw new Error('Terminal execution is blocked because the workspace is not trusted.');
       validateCommandSafety(command);
       const rootPath = getWorkspaceRootUri().fsPath;
 
       if (context.terminalManager) {
-        const proc = await context.terminalManager.runCommand(command, rootPath, false, 60000, execution.signal);
+        const proc = await context.terminalManager.runCommand(
+          command,
+          rootPath,
+          false,
+          requestedTimeout ?? 60000,
+          execution.signal,
+          { shell: requestedShell }
+        );
         return {
           command: proc.command,
           cwd: proc.cwd,
@@ -547,7 +566,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       }
 
       return new Promise((resolve) => {
-        exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024, signal: execution.signal }, (error, stdout, stderr) => {
+        exec(command, { cwd: rootPath, timeout: requestedTimeout ?? 60000, maxBuffer: 1024 * 1024, signal: execution.signal }, (error, stdout, stderr) => {
           resolve({
             command,
             exitCode: error && typeof error.code === 'number' ? error.code : error ? 1 : 0,
@@ -556,7 +575,8 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           });
         });
       });
-    }
+    },
+    { timeout: 900000 }
   );
 
   // 16. run_test
@@ -582,7 +602,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
       if (filter && !/^[\w./:@ -]+$/.test(filter)) throw new Error('test_filter must be a plain test name or path, not shell syntax.');
       const cmd = filter ? `npm test -- "${filter}"` : 'npm test';
       if (context.terminalManager) {
-        const process = await context.terminalManager.runCommand(cmd, rootPath, false, 60000, execution.signal);
+        const process = await context.terminalManager.runCommand(cmd, rootPath, false, 300000, execution.signal);
         return {
           command: cmd,
           cwd: process.cwd,
@@ -598,7 +618,7 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
         };
       }
       return new Promise((resolve) => {
-        exec(cmd, { cwd: rootPath, timeout: 60000, maxBuffer: 1024 * 1024, signal: execution.signal }, (err, stdout, stderr) => {
+        exec(cmd, { cwd: rootPath, timeout: 300000, maxBuffer: 1024 * 1024, signal: execution.signal }, (err, stdout, stderr) => {
           resolve({
             command: cmd,
             passed: !err,
@@ -608,7 +628,8 @@ export function registerAllCoreTools(registry: ToolRegistry, context: CoreToolCo
           });
         });
       });
-    }
+    },
+    { timeout: 360000 }
   );
 
   // 17. get_diagnostics

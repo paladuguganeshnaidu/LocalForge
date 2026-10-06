@@ -19,6 +19,10 @@ export class AgentPool {
     this.maxConcurrency = maxConcurrency;
   }
 
+  public getCapacity(): number {
+    return this.maxConcurrency;
+  }
+
   public canAcquire(): boolean {
     return this.activeAgents.size < this.maxConcurrency;
   }

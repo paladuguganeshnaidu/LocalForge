@@ -97,11 +97,13 @@ export const allWorkspaceTools: ModelToolDefinition[] = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Execute a non-destructive terminal shell command in the root of the workspace.',
+      description: 'Execute a non-destructive terminal shell command in the root of the workspace. Supports bash, powershell, or cmd.',
       parameters: {
         type: 'object',
         properties: {
-          command: { type: 'string', description: 'Shell command to execute (e.g. npm test, git status, cargo check)' }
+          command: { type: 'string', description: 'Shell command to execute (e.g. npm test, git status, cargo check)' },
+          shell: { type: 'string', enum: ['auto', 'bash', 'powershell', 'cmd'], description: 'Optional shell' },
+          timeoutMs: { type: 'number', description: 'Optional timeout in milliseconds' }
         },
         required: ['command'],
         additionalProperties: false
@@ -277,14 +279,24 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
 
   if (name === 'run_command') {
     const command = getString(args.command, 'command', 1000);
+    const requestedShell = typeof args.shell === 'string' ? args.shell : undefined;
+    const requestedTimeout = typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : undefined;
     validateCommandSafety(command);
     const rootPath = getWorkspaceRootUri().fsPath;
 
     if (toolContext?.terminalManager) {
-      const proc = await toolContext.terminalManager.runCommand(command, rootPath, false, 60000, toolContext.signal);
+      const proc = await toolContext.terminalManager.runCommand(
+        command,
+        rootPath,
+        false,
+        requestedTimeout ?? 60000,
+        toolContext.signal,
+        { shell: requestedShell }
+      );
       return {
         command: proc.command,
         cwd: proc.cwd,
+        shell: proc.shell,
         processId: proc.processId,
         status: proc.status,
         exitCode: proc.exitCode ?? null,
@@ -295,7 +307,7 @@ export const executeWorkspaceTool: WorkspaceToolExecutor = async (name, args, to
     }
 
     return new Promise((resolve) => {
-      exec(command, { cwd: rootPath, timeout: 30000, maxBuffer: 512 * 1024, signal: toolContext?.signal }, (error, stdout, stderr) => {
+      exec(command, { cwd: rootPath, timeout: requestedTimeout ?? 60000, maxBuffer: 512 * 1024, signal: toolContext?.signal }, (error, stdout, stderr) => {
         resolve({
           command,
           exitCode: error && typeof error.code === 'number' ? error.code : (error ? 1 : 0),

@@ -29,18 +29,19 @@ export function cleanModelCodeOutput(text: string): string {
 }
 
 export function formatExplainPrompt(code: string, languageId: string, relativePath: string): string {
-  return `Analyze the following ${languageId} code from \`${relativePath}\` with depth and precision:
+  return `Perform an exhaustive, master-level engineering analysis of the following ${languageId} code from \`${relativePath}\`:
 
 \`\`\`${languageId}
 ${code.slice(0, 20000)}
 \`\`\`
 
-Provide a structured explanation covering:
-1. **Purpose**: What does this code accomplish? What problem does it solve?
-2. **How it works**: Step-by-step walkthrough of the logic flow. Explain non-obvious patterns.
-3. **Key constructs**: Explain any complex language features, design patterns, or idioms used.
-4. **Dependencies**: What does this code depend on? What depends on it?
-5. **Edge cases & potential issues**: Any error handling gaps, performance concerns, or subtle bugs?`;
+Provide an in-depth, structured explanation covering:
+1. **Core Purpose & Architecture**: What high-level capability does this code deliver? What architectural patterns and responsibilities does it embody?
+2. **Execution Flow & Invariants**: Step-by-step walkthrough of the logic pathways, state transitions, and critical invariants. Highlight subtle or non-obvious algorithms.
+3. **Language Idioms & Design Constructs**: Explain advanced type constructs, concurrency patterns, memory/resource management, or framework paradigms employed.
+4. **Dependencies & Blast Radius**: What external modules or internal contracts does this rely on? What callers or subsystems are affected by its behavior?
+5. **Edge Cases, Security & Robustness**: Identify unhandled corner cases (null/undefined, boundary conditions, race conditions, resource leaks), security risks, and failure modes.
+6. **Performance & Optimization**: Analyze time and space complexity (Big-O) and highlight concrete opportunities for algorithmic or efficiency improvements.`;
 }
 
 export function formatFixPrompt(
@@ -56,7 +57,7 @@ export function formatFixPrompt(
   return [
     {
       role: 'system',
-      content: 'You are a precise code repair specialist. RULES: (1) Return ONLY the complete replacement text — no markdown fences, no explanations, no notes, no surrounding context. (2) Fix the SPECIFIC issue requested while preserving all unrelated logic, comments, formatting, and behavior. (3) Handle edge cases that the original code missed. (4) Maintain the exact coding style, indentation, and conventions of the original.'
+      content: 'You are an elite, surgical code repair specialist. RULES: (1) Return ONLY the 100% complete replacement text — absolutely NO markdown fences, NO explanations, NO introductory or concluding commentary, NO placeholders or stubs. (2) Fix the SPECIFIC requested issue and all reported compiler/lint diagnostics completely while strictly preserving all unrelated logic, comments, formatting, and public APIs. (3) Thoroughly handle edge cases (null/undefined, boundary values, async rejections) that caused or could cause related failures. (4) Match the exact indentation, stylistic conventions, typing standards, and idioms of the original code.'
     },
     {
       role: 'user',
@@ -522,7 +523,7 @@ async function proposeEdit(engine: TuxNestEngine, viewProvider: TuxNestViewProvi
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content: 'You are a surgical code editor. RULES: (1) Return ONLY the complete replacement code — no markdown fences, no explanations, no commentary. (2) Apply the EXACT change requested while preserving all other logic, comments, formatting, and behavior. (3) Think through edge cases and error handling for the change. (4) Match the existing code style precisely — same indentation, naming conventions, and patterns.'
+      content: 'You are a surgical, production-grade code editor. RULES: (1) Return ONLY the 100% complete replacement code — absolutely NO markdown fences, NO explanations, NO conversational commentary, NO placeholders or TODOs. (2) Apply the EXACT modification requested with surgical precision while preserving all other logic, comments, formatting, and behavioral invariants. (3) Fully implement all error handling, type definitions, and edge cases necessitated by the change. (4) Match the existing indentation, naming conventions, and idiomatic patterns flawlessly.'
     },
     {
       role: 'user',

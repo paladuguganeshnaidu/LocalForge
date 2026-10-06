@@ -7,16 +7,19 @@ import { EditRequestPolicy } from '../../editing/editRequestPolicy';
 export type AgentRole =
   | 'orchestrator'
   | 'planner'
+  | 'architect'
   | 'repository_analyst'
   | 'researcher'
   | 'coder'
   | 'test_engineer'
+  | 'tester'
   | 'debugger'
   | 'reviewer'
   | 'security_reviewer'
+  | 'performance_agent'
   | 'documentation_agent'
   | 'git_agent'
-  | 'performance_agent';
+  | 'designer';
 
 export type AgentLifecycleState =
   | 'IDLE'

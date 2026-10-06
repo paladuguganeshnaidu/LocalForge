@@ -1,5 +1,7 @@
 import { spawn, ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
+import { ShellResolver } from './shellResolver';
+import { CommandTimeoutClassifier } from './commandTimeoutClassifier';
 
 export type ProcessStatus = 'queued' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'timed_out';
 
@@ -19,6 +21,12 @@ export interface ManagedProcess {
   processId?: number;
 }
 
+export interface RunCommandOptions {
+  shell?: 'auto' | 'bash' | 'powershell' | 'cmd' | string;
+  inactivityTimeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+}
+
 export class TerminalManager {
   private processes = new Map<string, ManagedProcess>();
   private activeChildren = new Map<string, ChildProcess>();
@@ -28,7 +36,12 @@ export class TerminalManager {
   private treeTerminations = new Map<string, Promise<void>>();
   private terminationFailures = new Map<string, string>();
 
-  public async startBackgroundCommand(command: string, cwd: string, signal?: AbortSignal): Promise<ManagedProcess & { reused?: boolean }> {
+  public async startBackgroundCommand(
+    command: string,
+    cwd: string,
+    signal?: AbortSignal,
+    options?: RunCommandOptions
+  ): Promise<ManagedProcess & { reused?: boolean }> {
     signal?.throwIfAborted();
     const normalizedCwd = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
     const key = JSON.stringify([normalizedCwd(cwd), command.trim()]);
@@ -38,12 +51,16 @@ export class TerminalManager {
       signal?.throwIfAborted();
       return { ...record, reused: true };
     }
-    const existing = this.getRunningProcesses().find(record => record.isBackground && record.command.trim() === command.trim() && normalizedCwd(record.cwd) === normalizedCwd(cwd));
+    const existing = this.getRunningProcesses().find(record =>
+      record.isBackground &&
+      record.command.trim() === command.trim() &&
+      normalizedCwd(record.cwd) === normalizedCwd(cwd)
+    );
     if (existing?.status === 'running') return { ...existing, reused: true };
     const start = (async () => {
       if (existing) { await this.completions.get(existing.id); await this.treeTerminations.get(existing.id); }
       signal?.throwIfAborted();
-      const record = await this.runCommand(command, cwd, true, 0, signal);
+      const record = await this.runCommand(command, cwd, true, 0, signal, options);
       await new Promise(resolve => setTimeout(resolve, 500));
       return record;
     })();
@@ -58,11 +75,18 @@ export class TerminalManager {
       if (process.platform === 'win32') {
         await new Promise<void>((complete, reject) => {
           let output = '';
-          const killer = spawn(join(process.env.SystemRoot || 'C:/Windows', 'System32/taskkill.exe'), ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+          const killer = spawn(
+            join(process.env.SystemRoot || 'C:/Windows', 'System32/taskkill.exe'),
+            ['/pid', String(child.pid), '/T', '/F'],
+            { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
+          );
           killer.stdout?.on('data', data => { output = (output + data.toString()).slice(-2000); });
           killer.stderr?.on('data', data => { output = (output + data.toString()).slice(-2000); });
           killer.on('error', error => { child.kill('SIGKILL'); reject(error); });
-          killer.on('close', code => (code === 0 || /There is no running instance of the task|not found/i.test(output)) ? complete() : reject(new Error(`Owned process-tree termination exited with code ${code}: ${output.trim()}`)));
+          killer.on('close', code => (code === 0 || /There is no running instance of the task|not found/i.test(output))
+            ? complete()
+            : reject(new Error(`Owned process-tree termination exited with code ${code}: ${output.trim()}`))
+          );
         });
       } else {
         try {
@@ -106,14 +130,17 @@ export class TerminalManager {
     cwd: string,
     isBackground = false,
     timeoutMs = 60000,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: RunCommandOptions
   ): Promise<ManagedProcess> {
     const id = `proc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const resolvedShell = ShellResolver.resolve(options?.shell, command);
+
     const record: ManagedProcess = {
       id,
       command,
       cwd,
-      shell: process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh',
+      shell: resolvedShell.displayName,
       isBackground,
       status: 'queued',
       startTime: Date.now(),
@@ -135,11 +162,46 @@ export class TerminalManager {
     this.completions.set(id, new Promise((resolve) => { finishCompletion = resolve; }));
     return new Promise((resolve) => {
       record.status = 'running';
-      let timer: NodeJS.Timeout | undefined;
       let finished = false;
 
+      // Classify command and calculate adaptive maximum and streaming inactivity timeouts
+      const timeoutPolicy = CommandTimeoutClassifier.classify(command, timeoutMs);
+      const effectiveMaxTimeout = timeoutPolicy.maxTimeoutMs;
+      const effectiveInactivityTimeout = options?.inactivityTimeoutMs ?? timeoutPolicy.inactivityTimeoutMs;
+
+      let lastActivityAt = Date.now();
+      let inactivityTimer: NodeJS.Timeout | undefined;
+      let maxTimer: NodeJS.Timeout | undefined;
+
+      const clearAllTimers = () => {
+        if (inactivityTimer) {
+          clearTimeout(inactivityTimer);
+          inactivityTimer = undefined;
+        }
+        if (maxTimer) {
+          clearTimeout(maxTimer);
+          maxTimer = undefined;
+        }
+      };
+
+      const scheduleInactivityCheck = () => {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        if (effectiveInactivityTimeout <= 0 || isBackground) return;
+
+        inactivityTimer = setTimeout(() => {
+          if (record.status !== 'running' || child?.exitCode !== null || child?.signalCode !== null) return;
+          const idleMs = Date.now() - lastActivityAt;
+          if (idleMs >= effectiveInactivityTimeout) {
+            record.stderr += `\nCommand timed out after ${effectiveInactivityTimeout}ms.`;
+            this.requestStop(id, 'timed_out');
+          } else {
+            scheduleInactivityCheck();
+          }
+        }, Math.max(10, effectiveInactivityTimeout - (Date.now() - lastActivityAt)));
+      };
+
       const abortHandler = () => {
-        if (timer) clearTimeout(timer);
+        clearAllTimers();
         record.stderr += '\nCommand cancelled by user.';
         this.requestStop(id, 'stopped');
       };
@@ -148,38 +210,73 @@ export class TerminalManager {
         signal.addEventListener('abort', abortHandler, { once: true });
       }
 
-      if (!isBackground && timeoutMs > 0) {
-        timer = setTimeout(() => {
-          record.stderr += `\nCommand timed out after ${timeoutMs}ms.`;
+      if (!isBackground && effectiveMaxTimeout > 0) {
+        maxTimer = setTimeout(() => {
+          if (record.status !== 'running') return;
+          record.stderr += `\nCommand timed out after ${effectiveMaxTimeout}ms.`;
           this.requestStop(id, 'timed_out');
-        }, timeoutMs);
+        }, effectiveMaxTimeout);
       }
 
-      const child = spawn(command, {
-        cwd,
-        shell: true,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, CI: 'true', npm_config_yes: 'false' },
-        detached: process.platform !== 'win32'
-      });
+      if (!isBackground) {
+        scheduleInactivityCheck();
+      }
+
+      let child: ChildProcess;
+      const defaultEnv = {
+        ...process.env,
+        CI: 'true',
+        npm_config_yes: 'false',
+        ...(options?.env || {})
+      };
+
+      if (resolvedShell.type === 'bash' || resolvedShell.type === 'powershell') {
+        child = spawn(resolvedShell.executable, resolvedShell.args, {
+          cwd,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: defaultEnv,
+          detached: process.platform !== 'win32'
+        });
+      } else {
+        child = spawn(command, {
+          cwd,
+          shell: process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : true,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: defaultEnv,
+          detached: process.platform !== 'win32'
+        });
+      }
 
       record.processId = child.pid;
       this.activeChildren.set(id, child);
 
       const checkPrompt = () => {
         if (record.status !== 'running') return;
-        if (/Do you want to install\s+['"]?webpack-cli['"]?\s+\(yes\/no\)/i.test(record.stderr + record.stdout)) {
+        const combined = record.stderr + record.stdout;
+        if (/Do you want to install\s+['"]?webpack-cli['"]?\s+\(yes\/no\)/i.test(combined)) {
           record.stderr += '\nInteractive package installation cannot receive input in agent commands. Install the missing declared build tooling with explicit install_packages approval, then retry the original command.';
+          this.requestStop(id, 'stopped');
+        } else if (/Do you want to install\s+['"]?[\w-]+['"]?\s+\(yes\/no\)/i.test(combined)) {
+          record.stderr += '\nInteractive package installation cannot receive input in agent commands. Run installation non-interactively with explicit flags.';
+          this.requestStop(id, 'stopped');
+        } else if (/Are you sure you want to continue\s+connecting\s+\(yes\/no(?:\/\[fingerprint\])?\)/i.test(combined)) {
+          record.stderr += '\nSSH host verification prompt detected without interactive terminal.';
           this.requestStop(id, 'stopped');
         }
       };
+
       child.stdout?.on('data', (data: Buffer | string) => {
+        lastActivityAt = Date.now();
+        scheduleInactivityCheck();
         record.stdout = (record.stdout + data.toString()).slice(-20000);
         checkPrompt();
       });
 
       child.stderr?.on('data', (data: Buffer | string) => {
+        lastActivityAt = Date.now();
+        scheduleInactivityCheck();
         record.stderr = (record.stderr + data.toString()).slice(-10000);
         checkPrompt();
       });
@@ -187,7 +284,7 @@ export class TerminalManager {
       const finish = (code: number | null, error?: Error) => {
         if (finished) return;
         finished = true;
-        if (timer) clearTimeout(timer);
+        clearAllTimers();
         if (signal) signal.removeEventListener('abort', abortHandler);
         this.activeChildren.delete(id);
         record.endTime = Date.now();
@@ -201,6 +298,9 @@ export class TerminalManager {
         resolve(record);
       };
 
+      child.on('exit', () => {
+        clearAllTimers();
+      });
       child.on('close', (code) => finish(code));
       child.on('error', (error) => finish(null, error));
 

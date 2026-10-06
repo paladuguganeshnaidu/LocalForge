@@ -41,6 +41,9 @@ export interface OrchestrationResult {
   durationMs: number;
 }
 
+import { CheckpointManager } from './checkpointManager';
+import { DynamicPlanner } from './dynamicPlanner';
+
 export class MultiAgentOrchestrator {
   private agentManager: AgentManager;
   private pool: AgentPool;
@@ -50,7 +53,8 @@ export class MultiAgentOrchestrator {
     private readonly toolRegistry: ToolRegistry,
     private readonly permissionManager: PermissionManager,
     private readonly editEngine?: EditEngine,
-    maxConcurrency: number = 4
+    maxConcurrency: number = 4,
+    private readonly checkpointManager?: CheckpointManager
   ) {
     this.pool = new AgentPool(maxConcurrency);
     this.agentManager = new AgentManager(provider, toolRegistry, permissionManager, this.pool);
@@ -98,7 +102,7 @@ export class MultiAgentOrchestrator {
         }
 
         // Execute available tasks respecting concurrency limits
-        const concurrency = Math.max(1, Math.min(16, options.maxConcurrency ?? 1));
+        const concurrency = Math.max(1, Math.min(16, options.maxConcurrency ?? this.pool.getCapacity()));
         const slots = Math.min(this.pool.getAvailableSlots(), Math.max(0, concurrency - this.pool.getActiveCount()));
         if (!slots) { await new Promise(resolve => setTimeout(resolve, 50)); continue; }
         const tasksToRun = readyTasks.slice(0, slots);
@@ -151,6 +155,19 @@ export class MultiAgentOrchestrator {
                 }
               }
               options.onSubagentEnd?.(taskNode.role, taskNode.id, result);
+
+              // Persist intermediate checkpoint
+              if (this.checkpointManager) {
+                await this.checkpointManager.saveCheckpoint({
+                  runId,
+                  task: userGoal,
+                  mode,
+                  graph: graph.serialize(),
+                  filesModified,
+                  timestamp: Date.now(),
+                  status: 'running'
+                });
+              }
             } else if (result.status === 'cancelled') {
               graph.markCancelled(taskNode.id);
             } else {
@@ -176,6 +193,18 @@ export class MultiAgentOrchestrator {
         summaryText = isCancelled ? 'Task was cancelled by user.' : 'Task execution failed.';
       }
 
+      if (this.checkpointManager) {
+        await this.checkpointManager.saveCheckpoint({
+          runId,
+          task: userGoal,
+          mode,
+          graph: graph.serialize(),
+          filesModified,
+          timestamp: Date.now(),
+          status: isCancelled ? 'interrupted' : isSuccess ? 'completed' : 'failed'
+        });
+      }
+
       return {
         runId,
         task: userGoal,
@@ -188,6 +217,9 @@ export class MultiAgentOrchestrator {
       };
     } catch (err: any) {
       graph.cancelAll();
+      if (this.checkpointManager) {
+        await this.checkpointManager.markInterrupted();
+      }
       return {
         runId,
         task: userGoal,

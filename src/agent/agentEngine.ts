@@ -146,10 +146,10 @@ export class AgentEngine {
 
       const repairPrompt: ChatMessage = {
         role: 'user',
-        content: `## TEST FAILURE — Systematic diagnosis required.
+        content: `## TEST FAILURE — Systematic forensic diagnosis and surgical repair required.
 
-**Command**: \`${projectInfo.testCommand}\`
-**Exit code**: ${currentResult.exitCode}
+**Validation Command**: \`${projectInfo.testCommand}\`
+**Exit Code**: ${currentResult.exitCode}
 
 ### stdout:
 \`\`\`
@@ -161,14 +161,14 @@ ${currentResult.stdout}
 ${currentResult.stderr}
 \`\`\`
 
-## REQUIRED ANALYSIS STEPS:
-1. **READ** the full error output above carefully. Identify the EXACT failing test/assertion and its line number.
-2. **TRACE** the failure to its ROOT CAUSE in your modified code — not just the symptom. What specific line or logic error caused this?
-3. **EXPLAIN** why the current code is wrong (1-2 sentences).
-4. **FIX** the specific root cause with a surgical edit. Do not rewrite unrelated code.
-5. **PREDICT** whether this fix will resolve the failure and why.
+## MANDATORY FORENSIC DEBUGGING PROTOCOL:
+1. **ANALYZE THE FAILURE SPECIFICALLY**: Dissect the error payload above. Identify the exact failing test, assertion discrepancy (expected vs received value), and the precise source file and line number.
+2. **TRACE TO ROOT CAUSE**: Trace backwards through the call stack to uncover the underlying flaw in your modified code (e.g., incorrect type, missing import, unhandled edge condition, off-by-one, race condition, or state mutation). Do not treat the symptom—isolate the cause.
+3. **EXPLAIN THE FLAW**: Clearly state what caused the test failure in 1-2 concise sentences.
+4. **EXECUTE SURGICAL REPAIR**: Apply an exact, production-ready fix to the affected file(s). Do NOT leave placeholders or TODOs. Do NOT rewrite unrelated code. Maintain full type safety and existing conventions.
+5. **PREVENT REGRESSIONS**: Ensure your fix addresses the failure cleanly without compromising other features or test suites.
 
-Do NOT guess. Do NOT make broad rewrites. Fix the specific identified cause.`
+Do NOT guess. Do NOT make broad, speculative rewrites. Repair the identified root cause with surgical precision.`
       };
 
       const repairLoop = new AgentLoop(provider, this.toolRegistry, this.permissionManager);
