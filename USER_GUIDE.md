@@ -1,11 +1,13 @@
-# TuxNest — 1.0.0 User Guide
+# TuxNest — 1.0.1 User Guide
 
 The extension identity is `tuxnest.tuxnest-vscode` (publisher: `tuxnest`). Version 1.0.0 delivers the complete rebrand to **TuxNest**, introducing **TuxNest Chat** and the autonomous **TuxNest SI Agent**.
 
 ## Install and open
 
+TuxNest automatically starts an already installed local Ollama server on activation and model refresh. It reuses a running server, waits for real readiness and discovers installed models. If the configured model directory is unavailable but existing home-directory models are present, only the server process uses those models; persistent environment settings are unchanged. Disable **Tuxnest › Ollama: Auto Start** to keep startup manual. Only supported absolute installation paths and unprivileged loopback HTTP endpoints are eligible; no arbitrary programs, models, remote services or downloads are started. SSH GPU studios and their servers still need to be available before connecting.
+
 1. Use VS Code 1.106 or later. Open a disposable, trusted project folder for your first agent task.
-2. Run **Extensions: Install from VSIX** and select the validated `tuxnest-vscode-1.0.0.vsix` package artifact. Reload the window. **TuxNest: Diagnose Installation** reports the actual active version and extension path.
+2. Run **Extensions: Install from VSIX** and select the validated `tuxnest-vscode-1.0.1.vsix` package artifact. Reload the window. **TuxNest: Diagnose Installation** reports the actual active version and extension path.
 3. Run **TuxNest: Open TuxNest SI Agent** or open **TuxNest Chat** in the Secondary Sidebar. Model and mode selectors are in the bottom composer. Use the file picker to attach exact files; advanced controls are in Settings.
 4. **TuxNest: Doctor**, **Run Self-Test** and **Refresh Models** help diagnose connectivity. A packaged version does not prove that a particular model can complete your task.
 

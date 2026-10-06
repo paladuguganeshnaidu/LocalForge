@@ -4,6 +4,12 @@ All notable changes to the LocalForge extension are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-05
+
+- Automatically start an existing local Ollama installation on activation/model refresh, wait for actual readiness, reuse healthy servers and coalesce concurrent startup requests.
+- Recover unavailable configured model storage by using existing home-directory models for the child process only. No downloads, global environment mutation or automatic remote service execution.
+- Add a machine-scoped Auto Start switch and actionable startup failure reporting. Discover models only after the startup check; contain background bootstrap errors.
+
 ## [1.0.0] - 2026-10-05
 
 - Local release candidate requested by the user; publication requires confirmation. Original full-site/3D acceptance, 100 independent tools and 20B/40B model verification remain open.

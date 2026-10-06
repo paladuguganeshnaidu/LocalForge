@@ -3,6 +3,7 @@ import { ModelRegistry } from '../providers/modelRegistry';
 import { ModelRouter, TaskType } from '../providers/modelRouter';
 import { ModelProvider, ChatMessage } from '../providers/modelProvider';
 import { ConfiguredProviders } from '../providers/configuredProviders';
+import { LocalOllamaStartup } from '../providers/localOllamaStartup';
 import { EndpointConfiguration } from '../providers/endpointConfiguration';
 import { CompositeProvider } from '../providers/compositeProvider';
 import { WorkspaceIndexer } from '../context/workspaceIndexer';
@@ -85,6 +86,9 @@ export class TuxNestEngine {
   private pendingProviderConfiguration?: EngineInitOptions;
   private providerRefresh?: Promise<void>;
   private providersDisposed = false;
+  private readonly ollamaStartup = new LocalOllamaStartup();
+  private ollamaEndpoint = 'http://127.0.0.1:11434';
+  private ollamaStartupErrors: string[] = [];
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -105,6 +109,7 @@ export class TuxNestEngine {
     };
     this.configuredProviders = new ConfiguredProviders(this.modelRegistry, ollamaGenerationOptions);
 
+    this.ollamaEndpoint = options.ollamaEndpoint ?? this.ollamaEndpoint;
     this.configuredProviders.configure(options);
     context.subscriptions.push({ dispose: () => { for (const provider of this.modelRegistry.getAllProviders()) provider.dispose?.(); } });
     context.subscriptions.push({ dispose: () => { this.providersDisposed = true; this.pendingProviderConfiguration = undefined; } });
@@ -190,6 +195,7 @@ export class TuxNestEngine {
 
   public async bootstrap(): Promise<void> {
     await this.reconcileProviderConfiguration();
+    await this.ensureLocalOllama();
     await this.modelRegistry.refresh();
     try {
       if (await this.browserTool.isAvailable() && !this.toolRegistry.hasTool(BROWSER_TOOL_DEFINITION.function.name)) {
@@ -199,7 +205,17 @@ export class TuxNestEngine {
   }
 
   public getProviderConfigurationStatus(): { pending: boolean; errors: string[] } {
-    return { pending: !!this.pendingProviderConfiguration || !!this.providerRefresh, errors: this.configuredProviders.getErrors() };
+    return { pending: !!this.pendingProviderConfiguration || !!this.providerRefresh, errors: [...this.configuredProviders.getErrors(), ...this.ollamaStartupErrors] };
+  }
+
+  private async ensureLocalOllama(): Promise<void> {
+    if (this.providersDisposed) return;
+    const enabled = vscode.workspace.getConfiguration('tuxnest.ollama').get<boolean>('autoStart', true);
+    const endpoint = this.ollamaEndpoint;
+    const result = await this.ollamaStartup.ensure(endpoint, enabled);
+    if (this.providersDisposed || endpoint !== this.ollamaEndpoint) return;
+    this.ollamaStartupErrors = result.status === 'unavailable' ? [result.message] : [];
+    if (result.status === 'started' || result.status === 'unavailable') console.info('[TuxNest Ollama]', result.message);
   }
 
   public async updateProviderConfiguration(configuration: EngineInitOptions): Promise<void> {
@@ -218,6 +234,8 @@ export class TuxNestEngine {
         const configuration = this.pendingProviderConfiguration;
         this.pendingProviderConfiguration = undefined;
         this.configuredProviders.configure(configuration);
+        this.ollamaEndpoint = configuration.ollamaEndpoint ?? 'http://127.0.0.1:11434';
+        await this.ensureLocalOllama();
         this.events.emit('providersChanged');
         await this.modelRegistry.refresh();
       }
@@ -534,7 +552,7 @@ export class TuxNestEngine {
 
     if (this.modelRegistry.getModels().length === 0) {
       try {
-        await this.modelRegistry.discoverAll();
+        await this.bootstrap();
       } catch {}
     }
 

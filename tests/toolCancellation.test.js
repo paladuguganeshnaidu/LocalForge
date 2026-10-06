@@ -247,6 +247,9 @@ test('provider configuration deferred during approved-edit validation reconciles
   engine.events = new (require('node:events').EventEmitter)();
   const configurations = [];
   let refreshes = 0;
+  let startupChecks = 0;
+  engine.ollamaStartupErrors = [];
+  engine.ensureLocalOllama = async () => { startupChecks += 1; };
   engine.configuredProviders = { configure: (value) => configurations.push(value), getErrors: () => [] };
   engine.modelRegistry = { refresh: async () => { refreshes += 1; } };
   const pending = deferred();
@@ -255,11 +258,13 @@ test('provider configuration deferred during approved-edit validation reconciles
   await engine.updateProviderConfiguration({ openAiEndpoints: 'http://127.0.0.1:8000/v1' });
   assert.equal(engine.getProviderConfigurationStatus().pending, true);
   assert.equal(configurations.length, 0);
+  assert.equal(startupChecks, 0);
   pending.resolve({ success: true });
   await applying;
   assert.equal(engine.getProviderConfigurationStatus().pending, false);
   assert.deepEqual(configurations, [{ openAiEndpoints: 'http://127.0.0.1:8000/v1' }]);
   assert.equal(refreshes, 1);
+  assert.equal(startupChecks, 1);
 });
 
 test('early task failure releases busy state and review validation remains cancellable', async () => {

@@ -87,11 +87,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<TuxNes
 
   const viewProvider = new TuxNestViewProvider(engine.compositeProvider, context, engine);
   const modelCenterProvider = new ModelCenterViewProvider(engine.compositeProvider, async () => {
-    await engine.modelRegistry.discoverAll();
+    await engine.bootstrap();
     await viewProvider.refresh();
   });
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
-    if (!event.affectsConfiguration('tuxnest.ollama.baseUrl') && !event.affectsConfiguration('tuxnest.providers.openAICompatibleUrls')) return;
+    if (!event.affectsConfiguration('tuxnest.ollama.baseUrl') && !event.affectsConfiguration('tuxnest.ollama.autoStart') && !event.affectsConfiguration('tuxnest.providers.openAICompatibleUrls')) return;
     void engine.updateProviderConfiguration({
       ollamaEndpoint: vscode.workspace.getConfiguration('tuxnest.ollama').get<string>('baseUrl', 'http://127.0.0.1:11434'),
       openAiEndpoints: vscode.workspace.getConfiguration('tuxnest.providers').get<string>('openAICompatibleUrls', '')
@@ -349,7 +349,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<TuxNes
   );
 
   // Initialize engine background tasks
-  void engine.bootstrap().then(() => viewProvider.refresh());
+  void engine.bootstrap().then(() => viewProvider.refresh()).catch(error => console.error('[TuxNest startup]', error));
 
   return { engine, viewProvider };
 }
