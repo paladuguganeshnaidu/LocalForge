@@ -89,9 +89,24 @@ export class WorktreeManager {
       .map((f) => f.trim())
       .filter((f) => f.length > 0);
 
-    // 2. Check if clean merge is possible
-    const mergeBaseRes = await this.execGit(['merge-base', 'HEAD', worktree.branchName]);
-    const hasConflict = mergeBaseRes.exitCode !== 0;
+    // 2. Real index merge simulation to detect genuine content conflicts
+    let hasConflict = false;
+    const mergeTreeRes = await this.execGit(['merge-tree', 'HEAD', worktree.branchName]);
+    if (mergeTreeRes.exitCode === 0) {
+      if (mergeTreeRes.stdout.includes('<<<<<<<') || mergeTreeRes.stdout.toLowerCase().includes('conflict')) {
+        hasConflict = true;
+      }
+    } else {
+      // Fallback for Git 3-way merge-tree syntax: git merge-tree <base> HEAD <branch>
+      const baseRes = await this.execGit(['merge-base', 'HEAD', worktree.branchName]);
+      if (baseRes.exitCode === 0 && baseRes.stdout.trim()) {
+        const baseCommit = baseRes.stdout.trim();
+        const tree3Res = await this.execGit(['merge-tree', baseCommit, 'HEAD', worktree.branchName]);
+        if (tree3Res.stdout.includes('<<<<<<<') || tree3Res.stdout.toLowerCase().includes('conflict in')) {
+          hasConflict = true;
+        }
+      }
+    }
 
     return {
       hasConflict,

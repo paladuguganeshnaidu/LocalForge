@@ -25,7 +25,23 @@ const DEFAULT_ALLOWED_ENV_VARS = new Set([
   'number_of_processors',
   'processor_architecture',
   'processor_identifier',
-  'psmodulepath'
+  'psmodulepath',
+  // Toolchain and runtime homes
+  'nvm_dir',
+  'nvm_bin',
+  'nvm_inc',
+  'cargo_home',
+  'rustup_home',
+  'gopath',
+  'goroot',
+  'pythonhome',
+  'pythonpath',
+  'pnpm_home',
+  'java_home',
+  'git_exec_path',
+  'npm_config_cache',
+  'npm_config_prefix',
+  'ci'
 ]);
 
 const FORBIDDEN_SECRET_PATTERNS = [

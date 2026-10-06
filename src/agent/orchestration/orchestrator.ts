@@ -64,7 +64,8 @@ export class MultiAgentOrchestrator {
     userGoal: string,
     model: string,
     workspaceRoot: vscode.Uri,
-    options: OrchestratorOptions = {}
+    options: OrchestratorOptions = {},
+    workspaceContext?: { indexedFiles?: string[]; detectedTechnologies?: string[] }
   ): Promise<OrchestrationResult> {
     const runId = `orch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const startTime = Date.now();
@@ -73,7 +74,7 @@ export class MultiAgentOrchestrator {
     options.onProgress?.('Orchestrator: Decomposing engineering task into TaskGraph...');
 
     // 1. Task Decomposition: Create DAG based on mode and goal
-    const graph = this.decomposeGoal(userGoal, mode);
+    const graph = this.decomposeGoal(userGoal, mode, workspaceContext);
 
     const filesModified: string[] = [];
     const priorDecisions: string[] = [];
@@ -233,17 +234,20 @@ export class MultiAgentOrchestrator {
     }
   }
 
-  public decomposeGoal(goal: string, mode: ProductMode): TaskGraph {
-    const graph = new TaskGraph();
-
+  public decomposeGoal(
+    goal: string,
+    mode: ProductMode,
+    workspaceContext?: { indexedFiles?: string[]; detectedTechnologies?: string[] }
+  ): TaskGraph {
     if (mode === 'ask') {
+      const graph = new TaskGraph();
       graph.addNode({
         id: 'task-inspect',
         title: 'Repository Inspection',
         description: `Analyze workspace to answer: "${goal}"`,
         role: 'repository_analyst',
         dependencies: [],
-        targetFiles: [],
+        targetFiles: workspaceContext?.indexedFiles?.slice(0, 5) ?? [],
         priority: 'high',
         maxRetries: 1
       });
@@ -251,27 +255,20 @@ export class MultiAgentOrchestrator {
     }
 
     if (mode === 'plan') {
-      graph.addNode({
-        id: 'task-plan',
-        title: 'Architecture & Implementation Planning',
-        description: `Create detailed implementation plan for: "${goal}"`,
-        role: 'planner',
-        dependencies: [],
-        targetFiles: [],
-        priority: 'high',
-        maxRetries: 1
-      });
-      return graph;
+      const plan = DynamicPlanner.planGoal(goal, workspaceContext);
+      return DynamicPlanner.buildTaskGraph(plan);
     }
 
     if (mode === 'review') {
+      const graph = new TaskGraph();
+      const files = workspaceContext?.indexedFiles ?? [];
       graph.addNode({
         id: 'task-diff-review',
         title: 'Code Review & Regression Analysis',
         description: 'Review git diff and verify code quality against standards.',
         role: 'reviewer',
         dependencies: [],
-        targetFiles: [],
+        targetFiles: files.slice(0, 10),
         priority: 'high',
         maxRetries: 1
       });
@@ -280,86 +277,64 @@ export class MultiAgentOrchestrator {
         title: 'Security Vulnerability Audit',
         description: 'Audit modified files for injection, path escapes, and credential exposure.',
         role: 'security_reviewer',
-        dependencies: [],
-        targetFiles: [],
+        dependencies: ['task-diff-review'],
+        targetFiles: files.slice(0, 10),
         priority: 'high',
         maxRetries: 1
       });
       return graph;
     }
 
-    // Default AGENT mode: Decompose into Plan -> Code -> Test -> Review
-    const isSmallTask = goal.length < 50 && !goal.toLowerCase().includes('refactor') && !goal.toLowerCase().includes('architecture');
-
-    if (isSmallTask) {
+    // Default AGENT / autonomous engineering mode:
+    // Generate dynamic task DAG using DynamicPlanner with candidate file prediction and topological validation
+    try {
+      const plan = DynamicPlanner.planGoal(goal, workspaceContext);
+      return DynamicPlanner.buildTaskGraph(plan);
+    } catch {
+      // Fallback to structured DAG with candidate targetFiles if planner heuristics fail
+      const graph = new TaskGraph();
+      const detected = workspaceContext?.indexedFiles ?? [];
+      graph.addNode({
+        id: 'task-plan',
+        title: 'Analyze & Plan Implementation',
+        description: `Analyze workspace and plan execution for: "${goal}"`,
+        role: 'planner',
+        dependencies: [],
+        targetFiles: detected.slice(0, 5),
+        priority: 'high',
+        maxRetries: 1
+      });
       graph.addNode({
         id: 'task-code',
-        title: 'Code Implementation',
-        description: goal,
+        title: 'Implement Changes',
+        description: `Implement code modifications according to plan for: "${goal}"`,
         role: 'coder',
-        dependencies: [],
-        targetFiles: [],
+        dependencies: ['task-plan'],
+        targetFiles: detected.slice(0, 5),
+        priority: 'urgent',
+        maxRetries: 2
+      });
+      graph.addNode({
+        id: 'task-test',
+        title: 'Run Automated Tests & Validation',
+        description: 'Run project tests to confirm absence of regressions.',
+        role: 'test_engineer',
+        dependencies: ['task-code'],
+        targetFiles: detected.filter((f) => f.includes('test')),
         priority: 'high',
         maxRetries: 2
       });
       graph.addNode({
-        id: 'task-verify',
-        title: 'Test Verification',
-        description: 'Verify project build and run tests to validate changes.',
-        role: 'test_engineer',
-        dependencies: ['task-code'],
-        targetFiles: [],
-        priority: 'high',
+        id: 'task-review',
+        title: 'Code & Security Review',
+        description: 'Inspect modified files for bugs, security risks, and code quality.',
+        role: 'reviewer',
+        dependencies: ['task-test'],
+        targetFiles: detected.slice(0, 5),
+        priority: 'medium',
         maxRetries: 1
       });
       return graph;
     }
-
-    // Full Autonomous Multi-Agent Pipeline
-    graph.addNode({
-      id: 'task-plan',
-      title: 'Analyze & Plan Implementation',
-      description: `Analyze workspace and plan execution for: "${goal}"`,
-      role: 'planner',
-      dependencies: [],
-      targetFiles: [],
-      priority: 'high',
-      maxRetries: 1
-    });
-
-    graph.addNode({
-      id: 'task-code',
-      title: 'Implement Changes',
-      description: `Implement code modifications according to plan for: "${goal}"`,
-      role: 'coder',
-      dependencies: ['task-plan'],
-      targetFiles: [],
-      priority: 'urgent',
-      maxRetries: 2
-    });
-
-    graph.addNode({
-      id: 'task-test',
-      title: 'Run Automated Tests & Validation',
-      description: 'Run project tests to confirm absence of regressions.',
-      role: 'test_engineer',
-      dependencies: ['task-code'],
-      targetFiles: [],
-      priority: 'high',
-      maxRetries: 2
-    });
-
-    graph.addNode({
-      id: 'task-review',
-      title: 'Code & Security Review',
-      description: 'Inspect modified files for bugs, security risks, and code quality.',
-      role: 'reviewer',
-      dependencies: ['task-test'],
-      targetFiles: [],
-      priority: 'medium',
-      maxRetries: 1
-    });
-
-    return graph;
   }
 }

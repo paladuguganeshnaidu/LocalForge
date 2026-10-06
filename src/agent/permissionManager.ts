@@ -2,6 +2,8 @@ import { withCancellation } from '../core/cancellation';
 import { AgentAccessPolicy } from './accessPolicy';
 import { isSensitivePath } from '../core/sensitivePaths';
 import { getBuiltinToolDescriptor, ToolCategory, ToolDescriptor, validateToolDescriptor } from './toolPolicy';
+import { PolicyBroker, PermissionLevel } from '../policy/policyBroker';
+import { ActionRequest } from '../policy/types';
 
 export type { ToolCategory } from './toolPolicy';
 export type PermissionMode =
@@ -112,19 +114,42 @@ export class PermissionManager {
   private workspaceSessionRegistrations = new Set<string>();
   private approvalHandler?: ApprovalHandler;
   private accessPolicy?: AgentAccessPolicy;
+  private policyBroker: PolicyBroker;
+  private workspaceRoot?: string;
 
   public setAccessPolicy(policy: AgentAccessPolicy): void {
     this.accessPolicy = policy;
   }
 
-  constructor(mode: PermissionMode = 'allow_safe_auto', approvalHandler?: ApprovalHandler) {
+  public setWorkspaceRoot(root: string): void {
+    this.workspaceRoot = root;
+  }
+
+  public getWorkspaceRoot(): string | undefined {
+    return this.workspaceRoot;
+  }
+
+  constructor(mode: PermissionMode = 'allow_safe_auto', approvalHandler?: ApprovalHandler, policyBroker?: PolicyBroker) {
     this.mode = mode;
     this.approvalHandler = approvalHandler;
+    this.policyBroker = policyBroker ?? new PolicyBroker(this.mapModeToPermissionLevel(mode));
+  }
+
+  private mapModeToPermissionLevel(mode: PermissionMode): PermissionLevel {
+    if (mode === 'always_proceed') return 'always_proceed';
+    if (mode === 'request_review') return 'request_review';
+    if (mode === 'always_ask') return 'always_ask';
+    return 'allow_safe_auto';
+  }
+
+  public getPolicyBroker(): PolicyBroker {
+    return this.policyBroker;
   }
 
   public setMode(mode: PermissionMode): void {
     this.clearSession();
     this.mode = mode;
+    this.policyBroker.setPermissionLevel(this.mapModeToPermissionLevel(mode));
   }
 
   public getMode(): PermissionMode {
@@ -269,7 +294,38 @@ export class PermissionManager {
     const sensitiveRead = policy.category === 'read' && paths.some(isSensitivePath);
     if (networkAction || sensitiveRead) requireExplicitApproval = true;
     const category = policy.category;
-    const sessionCommand = typeof args.command === 'string' ? args.command : undefined;
+    const sessionCommand = (policy.processExecution || toolName === 'run_command') && typeof args.command === 'string' ? args.command : undefined;
+    const networkUrls = (policy.network || toolName === 'browse' || toolName === 'fetch') && typeof args.url === 'string' ? [args.url] : undefined;
+
+    // Defense-in-depth policy verification via authoritative PolicyBroker
+    let mappedRiskClass: 'low' | 'medium' | 'high' | 'critical' = 'low';
+    if (policy.riskLevel === 'high_risk') {
+      mappedRiskClass = 'high';
+    } else if (policy.riskLevel === 'network' || policy.riskLevel === 'low_risk') {
+      mappedRiskClass = 'medium';
+    }
+
+    const effectiveWorkspace = this.workspaceRoot || process.cwd();
+    const actionRequest: ActionRequest = {
+      id: authorizationId ?? `req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      principal: { role: 'agent', isAutonomous: true },
+      toolName,
+      category: category === 'read' ? 'read' : category === 'edit' ? 'write' : category === 'execute' ? 'execute' : 'read',
+      source: 'builtin',
+      workspaceRoot: effectiveWorkspace,
+      riskClass: mappedRiskClass,
+      command: sessionCommand,
+      paths: paths.length > 0 ? paths : undefined,
+      networkDestinations: networkUrls,
+      args
+    };
+    const policyDecision = this.policyBroker.evaluate(actionRequest);
+    if (policyDecision.decision === 'deny') {
+      return false;
+    }
+    if (policyDecision.decision === 'prompt' && mappedRiskClass === 'high') {
+      requireExplicitApproval = true;
+    }
 
     if (this.hasWorkspaceSessionApproval() && baseline && authorizationId && this.workspaceSessionRegistrations.has(authorizationId) &&
       !networkAction && !sensitiveRead && !['destructive', 'privileged', 'network'].includes(policy.riskLevel) && policy.mutability !== 'external' &&

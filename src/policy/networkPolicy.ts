@@ -33,18 +33,80 @@ export class NetworkPolicy {
     }
 
     if (net.isIPv6(ip)) {
-      const lower = ip.toLowerCase();
+      const lower = ip.toLowerCase().replace(/^\[|\]$/g, '');
       // Loopback
       if (lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;
       // Link-local
       if (lower.startsWith('fe80:') || lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true;
       // Unique local address
       if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
+      // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1 or normalized ::ffff:7f00:1)
+      if (lower.startsWith('::ffff:')) {
+        const sub = lower.slice(7);
+        if (net.isIPv4(sub)) return this.isPrivateOrLoopbackIp(sub);
+        const hexParts = sub.split(':');
+        if (hexParts.length === 2) {
+          const high = parseInt(hexParts[0], 16);
+          const low = parseInt(hexParts[1], 16);
+          const ipv4 = `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`;
+          return this.isPrivateOrLoopbackIp(ipv4);
+        }
+        return true;
+      }
 
       return false;
     }
 
     return false;
+  }
+
+  private static readonly METADATA_HOSTNAMES = new Set([
+    'instance-data',
+    'metadata.google.internal',
+    'metadata.internal',
+    'metadata',
+    'wpad'
+  ]);
+
+  public static normalizeAndParseIp(hostname: string): string | null {
+    const clean = hostname.replace(/^\[|\]$/g, '').trim().toLowerCase();
+    // IPv4-mapped IPv6: ::ffff:127.0.0.1
+    if (clean.startsWith('::ffff:')) {
+      const embedded = clean.slice(7);
+      if (net.isIPv4(embedded)) return embedded;
+    }
+    // Standard IP
+    if (net.isIP(clean)) return clean;
+    // Hex integer: 0x7f000001
+    if (/^0x[0-9a-f]+$/i.test(clean)) {
+      const num = parseInt(clean, 16);
+      if (!isNaN(num) && num >= 0 && num <= 0xffffffff) {
+        return `${(num >>> 24) & 255}.${(num >>> 16) & 255}.${(num >>> 8) & 255}.${num & 255}`;
+      }
+    }
+    // Decimal integer: 2130706433
+    if (/^\d{8,10}$/.test(clean)) {
+      const num = parseInt(clean, 10);
+      if (!isNaN(num) && num >= 0 && num <= 0xffffffff) {
+        return `${(num >>> 24) & 255}.${(num >>> 16) & 255}.${(num >>> 8) & 255}.${num & 255}`;
+      }
+    }
+    // Octal or hex parts: e.g. 0177.0.0.1 or 0x7f.0.0.1
+    const parts = clean.split('.');
+    if (parts.length === 4) {
+      const octets: number[] = [];
+      for (const p of parts) {
+        let val: number;
+        if (/^0x[0-9a-f]+$/i.test(p)) val = parseInt(p, 16);
+        else if (/^0[0-7]+$/.test(p)) val = parseInt(p, 8);
+        else if (/^\d+$/.test(p)) val = parseInt(p, 10);
+        else return null;
+        if (isNaN(val) || val < 0 || val > 255) return null;
+        octets.push(val);
+      }
+      return octets.join('.');
+    }
+    return null;
   }
 
   public static validateUrl(
@@ -66,7 +128,9 @@ export class NetworkPolicy {
       };
     }
 
-    const hostname = parsed.hostname.toLowerCase();
+    const rawHostname = parsed.hostname.toLowerCase();
+    const resolvedIp = this.normalizeAndParseIp(rawHostname);
+    const hostname = resolvedIp || rawHostname;
 
     // Check credentials in URL
     if (parsed.username || parsed.password) {
@@ -76,8 +140,17 @@ export class NetworkPolicy {
       };
     }
 
+    // Check cloud metadata hostnames
+    if (this.METADATA_HOSTNAMES.has(rawHostname)) {
+      return {
+        safe: false,
+        reason: `Access to cloud metadata endpoint "${rawHostname}" is blocked (SSRF defense).`,
+        hostname: rawHostname
+      };
+    }
+
     // Check localhost
-    const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || rawHostname === 'localhost';
     if (isLocal) {
       if (options.allowLocalhost) {
         return { safe: true, hostname };

@@ -2,6 +2,8 @@ import { spawn, ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { ShellResolver } from './shellResolver';
 import { CommandTimeoutClassifier } from './commandTimeoutClassifier';
+import { EnvironmentFilter } from './environmentFilter';
+import { RingBuffer } from './ringBuffer';
 
 export type ProcessStatus = 'queued' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'timed_out';
 
@@ -92,14 +94,28 @@ export class TerminalManager {
         try {
           process.kill(-child.pid, 'SIGTERM');
         } catch {
-          child.kill('SIGTERM');
+          try { child.kill('SIGTERM'); } catch {}
         }
-        const escalation = setTimeout(() => {
-          if (child.exitCode !== null || child.signalCode !== null) return;
-          try { process.kill(-child.pid!, 'SIGKILL'); }
-          catch { child.kill('SIGKILL'); }
-        }, 1500);
-        escalation.unref();
+        // Await process group termination deterministically
+        const deadline = Date.now() + 1500;
+        let isAlive = true;
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 25));
+          try {
+            process.kill(-child.pid, 0);
+          } catch {
+            isAlive = false;
+            break;
+          }
+          if (Date.now() - (deadline - 1500) > 300) {
+            try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+            try { child.kill('SIGKILL'); } catch {}
+          }
+        }
+        if (isAlive) {
+          try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+          try { child.kill('SIGKILL'); } catch {}
+        }
       }
     } catch (error) {
       try {
@@ -223,12 +239,17 @@ export class TerminalManager {
       }
 
       let child: ChildProcess;
-      const defaultEnv = {
-        ...process.env,
+      const filteredEnv = EnvironmentFilter.filterEnvironment(process.env, Object.keys(options?.env || {}));
+      const defaultEnv: Record<string, string> = {
+        ...filteredEnv,
         CI: 'true',
-        npm_config_yes: 'false',
-        ...(options?.env || {})
+        npm_config_yes: 'false'
       };
+      if (options?.env) {
+        for (const [k, v] of Object.entries(options.env)) {
+          if (v !== undefined) defaultEnv[k] = v;
+        }
+      }
 
       if (resolvedShell.type === 'bash' || resolvedShell.type === 'powershell') {
         child = spawn(resolvedShell.executable, resolvedShell.args, {

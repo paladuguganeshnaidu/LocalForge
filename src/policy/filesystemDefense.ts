@@ -7,7 +7,13 @@ const WINDOWS_RESERVED_NAMES = new Set([
   'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'
 ]);
 
+const realpathCache = new Map<string, string>();
+
 export class FilesystemDefense {
+  public static clearCache(): void {
+    realpathCache.clear();
+  }
+
   public static validatePathSafety(targetPath: string, workspaceRoot?: string): { safe: boolean; reason?: string } {
     if (!targetPath || typeof targetPath !== 'string') {
       return { safe: false, reason: 'Empty or invalid path.' };
@@ -51,8 +57,12 @@ export class FilesystemDefense {
 
     // 5. If workspace root is provided, check containment and symlink escape
     if (workspaceRoot) {
+      // Cross-platform normalization: convert backslashes to forward slashes before resolving
+      // so traversal patterns like "..\..\..\..\Windows\System32" resolve correctly on POSIX as well as Windows
+      const normalizedPath = targetPath.replace(/\\/g, '/');
       const normRoot = path.resolve(workspaceRoot);
-      const normTarget = path.isAbsolute(targetPath) ? path.resolve(targetPath) : path.resolve(normRoot, targetPath);
+      const isTargetAbsolute = path.isAbsolute(normalizedPath) || /^[a-zA-Z]:[/\\]/.test(targetPath);
+      const normTarget = isTargetAbsolute ? path.resolve(targetPath) : path.resolve(normRoot, normalizedPath);
 
       const isInside = (parent: string, child: string) => {
         const p = process.platform === 'win32' ? parent.toLowerCase() : parent;
@@ -66,8 +76,16 @@ export class FilesystemDefense {
 
       // Check realpath if workspace root exists on disk
       try {
-        if (fs.existsSync(normRoot)) {
-          const realRoot = fs.realpathSync(normRoot);
+        let realRoot = realpathCache.get(normRoot);
+        if (!realRoot) {
+          if (fs.existsSync(normRoot)) {
+            realRoot = fs.realpathSync(normRoot);
+            if (realpathCache.size > 500) realpathCache.clear();
+            realpathCache.set(normRoot, realRoot);
+          }
+        }
+
+        if (realRoot) {
           let existingAncestor = normTarget;
           while (
             existingAncestor.length >= normRoot.length &&
@@ -78,7 +96,12 @@ export class FilesystemDefense {
           }
 
           if (fs.existsSync(existingAncestor)) {
-            const realExisting = fs.realpathSync(existingAncestor);
+            let realExisting = realpathCache.get(existingAncestor);
+            if (!realExisting) {
+              realExisting = fs.realpathSync(existingAncestor);
+              if (realpathCache.size > 500) realpathCache.clear();
+              realpathCache.set(existingAncestor, realExisting);
+            }
             if (!isInside(realRoot, realExisting)) {
               return { safe: false, reason: `Path "${targetPath}" escapes workspace via symlink or junction.` };
             }

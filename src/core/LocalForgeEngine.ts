@@ -28,6 +28,7 @@ import { BrowserTool, BROWSER_TOOL_DEFINITION } from '../browser/browserTool';
 import { ContextReferenceResolver } from '../context/referenceResolver';
 import { MultiAgentOrchestrator, OrchestratorOptions, OrchestrationResult } from '../agent/orchestration/orchestrator';
 import { CheckpointManager } from '../agent/orchestration/checkpointManager';
+import { RunManager } from '../runtime/runManager';
 import { registerAllCoreTools } from '../agent/coreTools';
 import { registerWorkflowTools } from '../agent/workflowTools';
 import { registerSubagentTools } from '../agent/subagentTools';
@@ -74,6 +75,7 @@ export class TuxNestEngine {
   public readonly referenceResolver: ContextReferenceResolver;
   public readonly orchestrator: MultiAgentOrchestrator;
   public readonly checkpointManager: CheckpointManager;
+  public readonly runManager: RunManager = new RunManager();
   public readonly selfTest: TuxNestSelfTest;
 
   public indexer?: WorkspaceIndexer;
@@ -141,14 +143,17 @@ export class TuxNestEngine {
     context.subscriptions.push({ dispose: () => { void this.browserTool.dispose(); } });
     this.referenceResolver = new ContextReferenceResolver(this.gitContextService, this.terminalManager);
 
+    this.checkpointManager = new CheckpointManager(context.workspaceState);
     this.orchestrator = new MultiAgentOrchestrator(
       this.compositeProvider,
       this.toolRegistry,
       this.permissionManager,
-      this.editEngine
+      this.editEngine,
+      4,
+      this.checkpointManager
     );
-    this.checkpointManager = new CheckpointManager(context.workspaceState);
     this.selfTest = new TuxNestSelfTest(this);
+    context.subscriptions.push({ dispose: () => { void this.runManager.dispose(); } });
 
     this.registerDefaultTools();
     this.initWorkspaceContext();
@@ -183,6 +188,7 @@ export class TuxNestEngine {
   private initWorkspaceContext(): void {
     const roots = vscode.workspace.workspaceFolders;
     if (roots && roots.length > 0) {
+      this.permissionManager.setWorkspaceRoot(roots[0].uri.fsPath);
       this.indexer = new WorkspaceIndexer();
       this.contextEngine = new ContextEngine(this.indexer);
       this.context.subscriptions.push(this.indexer, this.indexer.onDidChange((status) => this.events.emit('indexStatus', status)), this.editEngine.onDidChangeFiles((uris) => this.indexer?.notifyFilesChanged(uris)));
@@ -307,10 +313,14 @@ export class TuxNestEngine {
       this.currentAbortController.abort();
       this.currentAbortController = undefined;
     }
+    const activeRunId = this.runManager.getActiveRunId();
+    if (activeRunId) {
+      void this.runManager.cancelRun(activeRunId, 'User requested cancellation');
+    }
   }
 
   public isBusy(): boolean {
-    return Boolean(this.currentAbortController);
+    return Boolean(this.currentAbortController) || Boolean(this.runManager.getActiveRunId());
   }
 
   public setAccessScope(scope: AccessScope, filePath?: string): void {
@@ -329,11 +339,30 @@ export class TuxNestEngine {
     await this.sessionManager.initialize();
     this.cancelCurrentTask();
     await this.reconcileProviderConfiguration();
+    const runContext = this.runManager.startRun(userPrompt, { mode: String(mode) });
     const controller = new AbortController();
     this.currentAbortController = controller;
+    const cancelRunListener = () => {
+      controller.abort();
+    };
+    runContext.cancellationNode.signal.addEventListener('abort', cancelRunListener, { once: true });
     try {
-      return await this.executeTaskRun(controller.signal, userPrompt, mode, modelPreference, onProgressOrOptions, legacyOnToken);
+      const summary = await this.executeTaskRun(controller.signal, userPrompt, mode, modelPreference, onProgressOrOptions, legacyOnToken);
+      if (summary.status === 'completed') {
+        await this.runManager.completeRun(runContext.manifest.runId);
+      } else {
+        await this.runManager.failRun(runContext.manifest.runId, new Error((summary.errors ?? []).join('; ') || 'Task failed'));
+      }
+      return summary;
+    } catch (err) {
+      if (controller.signal.aborted) {
+        await this.runManager.cancelRun(runContext.manifest.runId, 'Aborted');
+      } else {
+        await this.runManager.failRun(runContext.manifest.runId, err instanceof Error ? err : new Error(String(err)));
+      }
+      throw err;
     } finally {
+      runContext.cancellationNode.signal.removeEventListener('abort', cancelRunListener);
       if (this.currentAbortController === controller) this.currentAbortController = undefined;
       await this.reconcileProviderConfiguration();
     }
@@ -1004,13 +1033,39 @@ export class TuxNestEngine {
     if (!workspaceRoot) {
       throw new Error('Open a workspace folder before executing multi-agent tasks.');
     }
+    const runContext = this.runManager.startRun(userGoal, { mode });
     const controller = new AbortController();
-    const cancelFromParent = () => controller.abort(options.signal?.reason);
+    const cancelFromParent = () => {
+      controller.abort(options.signal?.reason);
+      void this.runManager.cancelRun(runContext.manifest.runId, String(options.signal?.reason || 'User cancelled'));
+    };
     if (options.signal?.aborted) cancelFromParent();
     else options.signal?.addEventListener('abort', cancelFromParent, { once: true });
     this.currentAbortController = controller;
     try {
-      return await this.orchestrator.executeGoal(userGoal, chosenModel, workspaceRoot, { ...options, signal: controller.signal, mode });
+      const indexedFiles = this.indexer?.getDocuments().map((d) => d.path) ?? [];
+      const result = await this.orchestrator.executeGoal(
+        userGoal,
+        chosenModel,
+        workspaceRoot,
+        { ...options, signal: controller.signal, mode },
+        { indexedFiles }
+      );
+      if (result.status === 'completed') {
+        await this.runManager.completeRun(runContext.manifest.runId);
+      } else if (result.status === 'cancelled') {
+        await this.runManager.cancelRun(runContext.manifest.runId, 'Cancelled');
+      } else {
+        await this.runManager.failRun(runContext.manifest.runId, new Error(result.summary || 'Execution failed'));
+      }
+      return result;
+    } catch (err) {
+      if (controller.signal.aborted) {
+        await this.runManager.cancelRun(runContext.manifest.runId, 'Cancelled');
+      } else {
+        await this.runManager.failRun(runContext.manifest.runId, err instanceof Error ? err : new Error(String(err)));
+      }
+      throw err;
     } finally {
       options.signal?.removeEventListener('abort', cancelFromParent);
       if (this.currentAbortController === controller) this.currentAbortController = undefined;

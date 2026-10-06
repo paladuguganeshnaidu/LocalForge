@@ -41,7 +41,13 @@ test('Adversarial security suite executes 15,000 attack vectors across injection
     'http://192.168.1.1/router',
     'file:///etc/passwd',
     'gopher://127.0.0.1:70/',
-    'http://user:pass@127.0.0.1/'
+    'http://user:pass@127.0.0.1/',
+    'http://0x7f000001/',
+    'http://2130706433/',
+    'http://0177.0.0.1/',
+    'http://[::ffff:127.0.0.1]/',
+    'http://metadata.google.internal/computeMetadata/v1/',
+    'http://instance-data/latest/meta-data/'
   ];
 
   for (let i = 0; i < 5000; i++) {

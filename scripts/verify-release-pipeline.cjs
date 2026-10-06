@@ -53,16 +53,33 @@ function verifyReleasePipeline() {
   const sbomPath = path.join(distDir, 'sbom.json');
   fs.writeFileSync(sbomPath, JSON.stringify(sbom, null, 2), 'utf-8');
 
-  // 3. Compute bundle checksum if dist/extension.bundle.js exists
-  let bundleHash = null;
+  // 3. Mandatory bundle verification - MUST exist and compute SHA256
   const bundlePath = path.join(distDir, 'extension.bundle.js');
-  if (fs.existsSync(bundlePath)) {
+  let bundleHash = null;
+  if (!fs.existsSync(bundlePath)) {
+    errors.push(`Mandatory production bundle missing: "${path.relative(root, bundlePath)}". Run "npm run bundle" first.`);
+  } else {
     const bundleContent = fs.readFileSync(bundlePath);
     bundleHash = crypto.createHash('sha256').update(bundleContent).digest('hex');
+    if (!bundleHash) {
+      errors.push('Failed to compute cryptographic SHA256 checksum for production bundle.');
+    }
   }
 
+  // 4. Identity and Namespace leak audit
+  // Ensure no un-migrated branding leaks in production dist
+  if (fs.existsSync(bundlePath)) {
+    const bundleStr = fs.readFileSync(bundlePath, 'utf8');
+    // Check for obvious unaliased legacy namespace patterns where not permitted
+    if (bundleStr.includes('com.localforge.unaliased')) {
+      errors.push('Detected forbidden unaliased legacy namespace in production bundle.');
+    }
+  }
+
+  const passed = errors.length === 0 && Boolean(bundleHash);
+
   return {
-    passed: errors.length === 0,
+    passed,
     errors,
     sbomGenerated: true,
     bundleHash
@@ -72,11 +89,11 @@ function verifyReleasePipeline() {
 if (require.main === module) {
   const res = verifyReleasePipeline();
   if (!res.passed) {
-    console.error('Release pipeline verification failed:');
+    console.error('RELEASE PIPELINE VERIFICATION FAILED (FAILED CLOSED):');
     for (const e of res.errors) console.error(`- ${e}`);
     process.exit(1);
   } else {
-    console.log(`Release pipeline verification passed. SBOM generated. Bundle SHA256: ${res.bundleHash ?? 'N/A'}`);
+    console.log(`Release pipeline verification PASSED. SBOM generated. Bundle SHA256: ${res.bundleHash}`);
     process.exit(0);
   }
 }
